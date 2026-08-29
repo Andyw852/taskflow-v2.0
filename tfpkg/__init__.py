@@ -43,6 +43,16 @@ for _nm in ("_yaml_strip_comment", "_yaml_split_top", "_yaml_scalar",
     _NS[_nm] = getattr(_yamlmini_mod, _nm)
 del _yamlmini_mod
 
+# 深模块：数据簇（collect_data + 过滤 + 缓存 + 快照）也是真模块，注入共享命名空间。
+# 15/16 依赖 data 而非 17 → 环2 破。collect_data/filter_status 的跨分片依赖
+# 在函数内用 from tfpkg import ... 延迟解析。
+import tfpkg.data as _data_mod
+for _nm in ("_dbg_t", "_state_cache_path", "_state_cache_sig", "_state_cache_save",
+            "_state_cache_load", "collect_data", "apply_exclude", "filter_projs",
+            "filter_status", "status_spec_has_scancel", "_snapshot"):
+    _NS[_nm] = getattr(_data_mod, _nm)
+del _data_mod
+
 # COLLECTOR（远端采集脚本）已独立成 tfpkg/_collector_remote.py —— 一个真实、
 # 可 lint / 可单测的 .py 文件。这里读回成字符串注入命名空间，运行时字节与
 # 原单体脚本里的 r'''...''' 字面量完全一致。

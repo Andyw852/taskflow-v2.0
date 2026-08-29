@@ -256,6 +256,18 @@ def test_yamlmini_module():
     assert tfpkg.parse is y.parse
 
 
+def test_data_module():
+    # data 是真深模块：collect_data + 过滤 + 缓存 + 快照，环2 破
+    import tfpkg.data as d
+    assert callable(d.collect_data) and callable(d.filter_status)
+    assert tfpkg.collect_data is d.collect_data
+    # filter_status 空数据/空 spec 不报错、返回 None
+    assert d.filter_status({"types": []}, "error") is None
+    # 延迟 import 生效：collect_data 函数体里能取到包命名空间的 collect/annotate
+    src = __import__("inspect").getsource(d.collect_data)
+    assert "from tfpkg import" in src
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

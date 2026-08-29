@@ -102,6 +102,7 @@ v2.0 的做法：
   - 破环缝：把 `collect_data`/`_snapshot`/`_state_cache_save`/`apply_exclude`/`filter_projs`
     （数据采集/过滤工具，17 定义、被 15/16 依赖）抽成叶子深模块 `tfpkg/data.py`，
     15/16 依赖它而非 17，环2 即破。
+  - **✅ 已破**：`tfpkg/data.py` 已抽出（见 §10），15/16 不再依赖 17 的数据函数。
 
 这正是 v2.0 选用「单一命名空间装配」而非真实 import 的原因——它是唯一能
 在不改动任何函数体、保证行为等价的前提下完成拆分的方案。
@@ -174,8 +175,10 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
 
 **深模块化（进行中）**：
 - 已完成：`__file__` 深度 hack 消除（改 `_PKG_ROOT`/`_PKG_DIR`/`_SLICE_DIR` 常量）；
-  YAML 解析器抽成真深模块 `tfpkg/yamlmini.py`（对外接口 `parse()`，4 个内部函数
-  隐藏 ~200 行实现，由 `__init__.py` 导入后注入共享命名空间）。
-- 待办：两个环的破环（函数级边图见 §5）——环2 有清晰缝（抽 `tfpkg/data.py`），
-  环1 需延迟 import；均影响在跑的 tf，高风险，建议逐环、逐函数测试推进。
+  YAML 解析器抽成真深模块 `tfpkg/yamlmini.py`（对外接口 `parse()`）；
+  数据簇抽成真深模块 `tfpkg/data.py`（collect_data + 过滤 + 缓存 + 快照，
+  collect_data/filter_status 用函数内 `from tfpkg import ...` 延迟取依赖）——
+  **环2 已破**（15/16 依赖 data 而非 17）。
+- 待办：环1 的破环（06↔09↔13↔11，函数级边图见 §5）——工作流执行核心真正纠缠，
+  需延迟 import；建议逐环、逐函数测试推进。
 
