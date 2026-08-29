@@ -191,6 +191,51 @@ def cmd_summary(data, diff=False, state_path=None):
     print("\n".join(_summary_lines(data)))
 
 
+# ===== 结构化错误码（v2.0：诊断文本 → 稳定 code，供 --json 机器判读）=====
+_DIAG_PATTERNS = [
+    ("relax_summary_missing", "relax_summary.json missing"),
+    ("relax_summary_incomplete", "relax_summary.json incomplete"),
+    ("force_not_converged", "force not converged"),
+    ("outcar_missing", "OUTCAR missing"),
+    ("dir_missing", "dir missing"),
+    ("not_started", "not started"),
+    ("node_fail", "NODE_FAIL"),
+    ("gen_error", "gen 失败"),
+    ("stepconf_unknown_params", "不认识的键"),
+    ("stepconf_missing", "缺少 step.conf"),
+    ("imaginary_freq", "虚频"),
+]
+_RELAX_VERDICTS = ("electronic", "oscillating", "stalled", "thrown", "nsw",
+                   "progressing")
+
+
+def _diag_code(diag):
+    """诊断文本 → 稳定结构化错误码；未命中返回 "unknown"，空串返回 "none"。
+    让 agent 无需 grep：直接看 --json 的 step.diag_code / fails[].code。"""
+    d = (diag or "").strip()
+    if not d:
+        return "none"
+    for code, pat in _DIAG_PATTERNS:
+        if pat in d:
+            return code
+    if d.startswith("未收敛 ["):
+        for v in _RELAX_VERDICTS:
+            if "[%s]" % v in d:
+                return "relax_" + v
+    if d.startswith("job "):
+        return "job"
+    return "unknown"
+
+
+def _add_diag_codes(data):
+    """给每个步骤 dict 就地补 diag_code 字段（--json 用）。返回 data。"""
+    for t in data.get("types", []):
+        for m in t.get("materials", []):
+            for s in m.get("steps", []):
+                s["diag_code"] = _diag_code(s.get("diag") or "")
+    return data
+
+
 def _summary_json(data):
     """summary 的结构化版本（-o json 用）。每类型一行计数 + FAIL 清单 + 队列。"""
     out = {"types": []}
@@ -212,7 +257,8 @@ def _summary_json(data):
                 for s in m["steps"]:
                     if s["kind"] == "FAIL":
                         fails.append({"material": m["name"], "step": s["label"],
-                                      "diag": s.get("diag") or ""})
+                                      "diag": s.get("diag") or "",
+                                      "code": _diag_code(s.get("diag") or "")})
             elif any(k in ("R", "OTHER") for k in kinds):
                 cnt["run"] += 1
             elif any(k == "PD" for k in kinds):

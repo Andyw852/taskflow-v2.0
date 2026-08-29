@@ -233,6 +233,20 @@ def test_dry_run_steps_for():
     assert tfpkg._dry_run_steps_for("rerun", m, None) is None
 
 
+def test_diag_code():
+    # 诊断文本 → 稳定结构化错误码（--json 机器判读）
+    assert tfpkg._diag_code("relax_summary.json missing") == "relax_summary_missing"
+    assert tfpkg._diag_code("relax_summary.json incomplete") == "relax_summary_incomplete"
+    assert tfpkg._diag_code("force not converged") == "force_not_converged"
+    assert tfpkg._diag_code("未收敛 [oscillating] 大幅振荡") == "relax_oscillating"
+    assert tfpkg._diag_code("job RUNNING") == "job"
+    assert tfpkg._diag_code("") == "none"
+    assert tfpkg._diag_code("随便什么未知错误") == "unknown"
+    # _summary_json 的 fails 带 code 字段
+    j = tfpkg._summary_json(_mk_data())
+    assert j["types"][0]["fails"][0]["code"] == "force_not_converged"
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

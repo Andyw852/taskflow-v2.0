@@ -544,7 +544,7 @@ def main():
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)
         if a.json_out:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
+            print(json.dumps(_add_diag_codes(data), ensure_ascii=False, indent=2))
         else:
             render_table(data)
         return
@@ -566,7 +566,7 @@ def main():
         return
     if cmd == "status":
         if a.json_out:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
+            print(json.dumps(_add_diag_codes(data), ensure_ascii=False, indent=2))
             return
         _t1 = _time.time()
         auto_fetch(cfg, data)   # 算完的步骤自动保存到本地 result/

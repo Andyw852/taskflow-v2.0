@@ -133,5 +133,27 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
   `skill/ke-dft-cpu/step3_uniform/gen_step5_uniform.py`、
   `skill/ke-dft-cpu/step7_deform/step7b_read/gen_step9b_deform_read.py`、
   `skill/mlff-mace/benchmark.py`、`setting/hanhai25.yaml` 及其 templates。
-  可能影响对应技能，建议在用到 ke/mlff/hanhai25 前单独 diff 核对。
+- **已解决**：全量 `rsync -ac --delete` 把 v2.0 的 skill/ + setting/ 与原版内容级对齐，
+  上述差异全部消除；新增 `scripts/sync_check.sh` 持续审计（见 §10）。
+
+## 10. AI 友好增强（第二波）与待办
+
+- **git 化**：v2.0 已 `git init` 并推送 GitHub（`github.com/Andyw852/taskflow-v2.0`）。
+  `.gitignore` 排除 `setting/`（配置）、`*.model`（大模型权重）、`test/` 数据子目录，
+  只跟踪代码（294 文件 ~4.7MB）。
+- **对齐自动审计**：`scripts/sync_check.sh` 一键 diff v2.0 vs 原版 skill/setting
+  （内容级，排除 __pycache__/运行时缓存），退出码 0=对齐 / 1=有差异并给同步命令。
+- **dry-run 精确化**：`--dry-run` 按命令语义打印真实目标——`retry`=FAIL 步、
+  `start`=就绪步、`stop`=有作业步、`fetch`=已完成步；`rerun/clean` 无 `-j` 时整材料级
+  （`_dry_run_steps_for` / `_dry_run_report`，见 17_cli.py）。
+- **结构化错误码**：`_diag_code(diag)`（10_summary.py）把诊断文本归到稳定 code，
+  `--json` 输出的 step 加 `diag_code`、summary 的 `fails[].code` 也带 code，
+  agent 无需 grep（如 `relax_summary_missing` / `relax_summary_incomplete` /
+  `force_not_converged` / `relax_oscillating` / `stepconf_unknown_params`）。
+- **测试**：`test/test_tfpkg.py` 14 → 18 个用例（新增 stepconf 白名单回归、
+  retry 目标、dry-run 语义、diag_code）。
+
+**待办（未做）**：
+- 深模块化：消除单一命名空间装配的 `__file__` hack 与循环依赖（见 §5），改真模块/深模块，
+  成本高、风险高，需先理清依赖图再动手。
 
