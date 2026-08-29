@@ -213,6 +213,16 @@ def test_cli_json_filters():
     assert len(d["materials"]) <= 1
 
 
+def test_cli_json_changes():
+    # 沙盒：json --changes 输出结构化变更快照
+    sand = os.path.join(_ROOT, "test", "sandbox", "tf.yaml")
+    rc, out, err = _run("python3 bin/tf -c %s json --changes" % sand)
+    assert rc == 0, "rc=%d err=%s" % (rc, err)
+    d = json.loads(out)
+    assert "changes" in d and "count" in d and "first_run" in d
+    assert d["schema_version"] == 2
+
+
 def test_stepconf_reserved_params():
     # 集群注入键（POTCAR_DIR/REFERENCES_DIR 等）必须在白名单里，
     # 否则 MACE gen 脚本会误报"不认识的键"（v2.0 拷贝回归的回归测试）。
@@ -325,6 +335,28 @@ def test_json_paginate():
     assert len(tfpkg._json_paginate(_mk_data(), 0, 1)["materials"]) == 1
     # offset=1 跳过第 1 个
     assert tfpkg._json_paginate(_mk_data(), 1, 10)["materials"][0]["name"] == "Si"
+
+
+def test_json_changes():
+    # 首次无基线 → first_run；改数据 → 出变更；再跑同数据 → unchanged
+    fd, path = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    try:
+        r1 = tfpkg._json_changes(_mk_data(), path)
+        assert r1["first_run"] is True and r1["count"] == 0
+        # Ge step1 FAIL → OK，状态词 FAIL → done
+        d2 = _mk_data()
+        d2["types"][0]["materials"][1]["steps"][0]["kind"] = "OK"
+        r2 = tfpkg._json_changes(d2, path)
+        assert r2["first_run"] is False and r2["count"] == 1
+        c = r2["changes"][0]
+        assert (c["type"], c["material"], c["step"]) == ("opt-mace-cpu", "Ge", "step1")
+        assert c["old"] == "FAIL" and c["new"] == "done"
+        # 同数据再跑 → unchanged
+        r3 = tfpkg._json_changes(d2, path)
+        assert r3["unchanged"] is True and r3["count"] == 0
+    finally:
+        os.remove(path)
 
 
 def test_yamlmini_module():

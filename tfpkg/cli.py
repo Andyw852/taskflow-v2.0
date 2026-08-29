@@ -91,7 +91,7 @@ def _dry_run_report(cfg, data, cmd, projs, jobs):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         print(USAGE)
         return
@@ -144,6 +144,8 @@ def main():
                    help="取消 hide_done 配置的隐藏效果")
     p.add_argument("--diff", dest="diff", action="store_true",
                    help="summary：与上次快照对比，无变化不输出（省 token，巡检用）")
+    p.add_argument("--changes", dest="changes", action="store_true",
+                   help="json：只输出相对上次快照的步骤级变更（结构化，批分析用）")
     p.add_argument("--refresh", dest="refresh", action="store_true",
                    help="list/summary 强制跳过本地状态缓存，重新 ssh 采集")
     p.add_argument("-y", "--yes", action="store_true")
@@ -469,6 +471,20 @@ def main():
         if a.schema:
             print(JSON_SCHEMA)
         else:
+            if a.changes:                          # v2.0：只输出步骤级变更快照
+                import hashlib as _hashlib
+                _p = ",".join(sorted(x.strip() for x in
+                                     (a.proj or "").split(",") if x.strip()))
+                _scope = ",".join([a.tt or "", a.status_f or "", a.exclude or "",
+                                   _p])
+                _h = _hashlib.md5(_scope.encode("utf-8")).hexdigest()[:8]
+                _sp = os.path.join(cfg.get("_config_dir") or os.getcwd(),
+                                   ".tf_json_snapshot_%s.txt" % _h)
+                _out = _json_changes(data, _sp)
+                _out["schema_version"] = 2
+                _out["tf_version"] = TF_VERSION
+                print(json.dumps(_out, ensure_ascii=False, indent=2))
+                return
             _out = {"schema_version": 2, "tf_version": TF_VERSION}
             _out.update(data)
             if a.errors_only:                       # v2.0：只留 FAIL 材料/步骤

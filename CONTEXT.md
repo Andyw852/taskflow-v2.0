@@ -108,7 +108,7 @@ v2.0 的做法：
   _suggested_action(code) → (动作, 理由)（机器化 AGENTS.md §5 决策表）；
   _add_diag_codes(data) 给每步补 diag_code/suggested_action/action_reason。
 - 一键诊断：cmd_diagnose(cfg, data, mname, jname) → 单材料结构化诊断 dict。
-- json 裁剪/分页：_json_errors_only(data)（只留 FAIL）、_json_paginate(data, offset, limit)（展平分页）。
+- json 裁剪/分页/变更：_json_errors_only(data)（只留 FAIL）、_json_paginate(data, offset, limit)（展平分页）、_json_changes(data, state_path)（相对上次快照的步骤级变更）。
 
 ### ops.py —— 运维流
 - auto_recover_hung(...)（挂死检测/恢复）、cmd_init(...)、cmd_hpc(...)、
@@ -195,9 +195,11 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
 - **一键诊断 tf -p X [-j STEP] diagnose**：把 FAIL 诊断的固定套路（状态 + diag +
   diag_code + suggested_action + job + dir）合成一条命令，输出结构化 JSON（只读、
   不采集不提交）。AI 从「跑 3-4 步 + 读散文」→「跑 1 步 + 读 JSON」。
-- **tf json 裁剪/分页**：--errors-only（只留含 FAIL 的材料与 FAIL 步）、
+- **tf json 裁剪/分页/变更**：--errors-only（只留含 FAIL 的材料与 FAIL 步）、
   --limit N / --offset M（材料展平按 (type,name) 排序分页，返回
   {materials,total,offset,limit}）。批分析时不再吞全表。
+  --changes 只输出相对上次快照的步骤级变更（{changes:[{type,material,step,old,new}],count,first_run,unchanged}），
+  供批分析/下游工具增量拉取（独立快照文件 .tf_json_snapshot_<hash>.txt，不与巡检 summary --diff 抢）。
 
 ## 9. v2.0 与原版 skill/setting 差异审计（发现并修复 1 处回归，其余待核对）
 

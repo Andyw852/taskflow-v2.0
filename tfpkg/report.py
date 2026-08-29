@@ -930,6 +930,36 @@ def _snapshot_diff(old, new):
                     changes.append((tkey, mname, lab, ow or "-", nw or "-"))
     return changes
 
+
+def _json_changes(data, state_path):
+    """json --changes：对比上次快照，返回结构化变更并落新快照（原子写）。
+    首次运行（无快照）→ {changes:[], count:0, first_run:true}；有变化 →
+    changes=[{type,material,step,old,new}]；无变化 → changes=[] + unchanged:true。"""
+    new_snap = _summary_snapshot(data)
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            prev_snap = json.loads(f.read())
+    except Exception:
+        prev_snap = None
+    first_run = prev_snap is None
+    if prev_snap == new_snap:
+        diffs = []
+    else:
+        diffs = (_snapshot_diff(prev_snap, new_snap)
+                 if isinstance(prev_snap, dict) else [])
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(new_snap, f, ensure_ascii=False, sort_keys=True)
+    except OSError:
+        pass
+    return {
+        "changes": [{"type": t, "material": m, "step": lab, "old": o, "new": n}
+                    for t, m, lab, o, n in diffs],
+        "count": len(diffs),
+        "first_run": first_run,
+        "unchanged": not first_run and len(diffs) == 0,
+    }
+
 # ===== _summary_lines (原 L3711-L3751) =====
 def _summary_lines(data):
     """把 data 规约成 summary 的文本行（打印与 diff 共用）。"""
