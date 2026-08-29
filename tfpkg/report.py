@@ -1046,12 +1046,51 @@ def _diag_code(diag):
     return "unknown"
 
 
+# ===== 建议动作映射（v2.0：diag_code → 确定性动作，机器化 AGENTS.md §5 决策表）=====
+# 让 AI 不必再读散文决策表：FAIL 步直接带 suggested_action + action_reason。
+# retry/start/rerun 仍是「建议」——破坏性命令(rerun/stop/clean) AI 仍须先请示。
+_ACTION_MAP = {
+    "force_not_converged": ("retry", "收敛困难，opt 步自动 cp CONTCAR 续算"),
+    "relax_summary_missing": ("retry", "收敛输出缺失，重算/续算"),
+    "relax_summary_incomplete": ("retry", "收敛输出不全，重算/续算"),
+    "relax_electronic": ("retry", "SCF 收敛困难，续算或升级 INCAR"),
+    "relax_oscillating": ("retry", "弛豫振荡，续算观察"),
+    "relax_nsw": ("retry", "NSW 步数用尽，cp CONTCAR 续算"),
+    "relax_progressing": ("retry", "仍在下降被截断，续算"),
+    "relax_stalled": ("human_review", "弛豫停滞，先查 hang_check 是否已处理"),
+    "relax_thrown": ("human_review", "异常抛出，需看日志"),
+    "outcar_missing": ("retry", "输出缺失，重算"),
+    "dir_missing": ("rerun", "目录缺失，需重新生成（破坏性，先请示）"),
+    "not_started": ("start", "未开始，推进即可"),
+    "node_fail": ("retry", "节点故障，直接重交"),
+    "gen_error": ("human_review", "gen 脚本报错，需看脚本"),
+    "stepconf_unknown_params": ("human_review", "参数配置错误，需检查 step.conf"),
+    "stepconf_missing": ("human_review", "缺少 step.conf，需检查"),
+    "imaginary_freq": ("human_review", "虚频，需人工判断"),
+    "job": ("human_review", "作业状态异常，需看 job 信息"),
+    "unknown": ("human_review", "判断不了，报告请示"),
+}
+
+
+def _suggested_action(diag_code):
+    """diag_code → (建议动作, 理由)。"none"（非失败态）返回 ("none", "")。"""
+    code = diag_code or "none"
+    if code == "none":
+        return ("none", "")
+    return _ACTION_MAP.get(code, ("human_review", "未映射的 code，人工判断"))
+
+
 def _add_diag_codes(data):
-    """给每个步骤 dict 就地补 diag_code 字段（--json 用）。返回 data。"""
+    """给每个步骤 dict 就地补 diag_code/suggested_action/action_reason 字段
+    （--json 用）。返回 data。"""
     for t in data.get("types", []):
         for m in t.get("materials", []):
             for s in m.get("steps", []):
-                s["diag_code"] = _diag_code(s.get("diag") or "")
+                code = _diag_code(s.get("diag") or "")
+                s["diag_code"] = code
+                act, reason = _suggested_action(code)
+                s["suggested_action"] = act
+                s["action_reason"] = reason
     return data
 
 
@@ -1075,9 +1114,11 @@ def _summary_json(data):
                 cnt["err"] += 1
                 for s in m["steps"]:
                     if s["kind"] == "FAIL":
+                        code = _diag_code(s.get("diag") or "")
+                        act, _reason = _suggested_action(code)
                         fails.append({"material": m["name"], "step": s["label"],
                                       "diag": s.get("diag") or "",
-                                      "code": _diag_code(s.get("diag") or "")})
+                                      "code": code, "action": act})
             elif any(k in ("R", "OTHER") for k in kinds):
                 cnt["run"] += 1
             elif any(k == "PD" for k in kinds):
@@ -1093,4 +1134,75 @@ def _summary_json(data):
         out["queue"] = {"R": q.get("R", 0), "PD": q.get("PD", 0),
                         "total": q.get("total", 0)}
     return out
+
+
+# ===== 一键结构化诊断（v2.0：把 FAIL 诊断的固定套路合成一条命令）=====
+def cmd_diagnose(cfg, data, mname, jname):
+    """tf -p X [-j STEP] diagnose：返回单材料的结构化诊断 dict（供 cli 打印
+    JSON / 测试断言）。默认输出所有 FAIL 步骤；-j 指定时只输出那一步。
+    只读：data 已由调用方采集好，本函数不连超算、不提交。"""
+    t, m = find_material(data, mname)
+    if jname:
+        targets = [find_step(m, jname)]
+    else:
+        targets = [s for s in m["steps"] if s.get("kind") == "FAIL"]
+    steps = []
+    for s in targets:
+        code = _diag_code(s.get("diag") or "")
+        act, reason = _suggested_action(code)
+        steps.append({
+            "label": s.get("label"),
+            "name": s.get("name"),
+            "kind": s.get("kind"),
+            "diag": s.get("diag") or "",
+            "diag_code": code,
+            "suggested_action": act,
+            "action_reason": reason,
+            "job": s.get("job"),
+            "dir": s.get("dir"),
+        })
+    active = m.get("active")
+    return {
+        "material": m.get("name"),
+        "type": t.get("key"),
+        "hpc": m.get("hpc_name") or "",
+        "dim": m.get("dim") or "",
+        "active": active.get("label") if isinstance(active, dict) else active,
+        "action": m.get("action") or "",
+        "steps": steps,
+    }
+
+
+# ===== json 裁剪/分页（v2.0：tf json 批分析时控 token）=====
+def _json_errors_only(data):
+    """json --errors-only：只保留含 FAIL 步骤的材料，且每材料只留 FAIL 步骤。"""
+    out = dict(data)
+    types = []
+    for t in data.get("types", []):
+        mats = []
+        for m in t.get("materials", []):
+            fails = [s for s in m.get("steps", []) if s.get("kind") == "FAIL"]
+            if fails:
+                m2 = dict(m)
+                m2["steps"] = fails
+                mats.append(m2)
+        if mats:
+            t2 = dict(t)
+            t2["materials"] = mats
+            types.append(t2)
+    out["types"] = types
+    return out
+
+
+def _json_paginate(data, offset, limit):
+    """json --limit/--offset：把材料展平（带 type）按 (type,name) 稳定排序后
+    分页，返回扁平结构 {materials,total,offset,limit}——批分析逐页拉取用。"""
+    flat = []
+    for t in data.get("types", []):
+        for m in t.get("materials", []):
+            flat.append(dict(m, type=t.get("key")))
+    flat.sort(key=lambda x: (x.get("type") or "", x.get("name") or ""))
+    page = flat[offset:offset + limit] if limit is not None else flat[offset:]
+    return {"materials": page, "total": len(flat), "offset": offset,
+            "limit": limit}
 

@@ -68,10 +68,57 @@ v2.0 的做法：
 | collect.py | 远端采集（ssh + COLLECTOR） | collect, collect_v3_batch, run_remote, sh_b64 |
 | data.py | 数据簇（采集 + 过滤 + 缓存 + 快照） | collect_data, apply_exclude, filter_projs, filter_status, _snapshot, _state_cache_save |
 | workflow.py | 工作流执行引擎（状态机/DAG/门控 + 提交 + 推进 + 动作命令） | step_state, do_submit, auto_advance, auto_fetch, remote_gen, cmd_start/stop/retry/rerun/clean, annotate |
-| report.py | 渲染/汇报流（表格/详情渲染 + 查找 + 资源 + status/summary） | render_table, render_detail, find_material, find_asset, cmd_status, cmd_summary |
+| report.py | 渲染/汇报流（表格/详情渲染 + 查找 + 资源 + status/summary + 诊断/错误码/建议动作） | render_table, render_detail, find_material, find_step, cmd_status, cmd_summary, cmd_diagnose, _diag_code, _suggested_action, _json_errors_only, _json_paginate |
 | ops.py | 运维流（挂死检测/恢复 + init + hpc 切换 + watch） | auto_recover_hung, cmd_init, cmd_hpc, cmd_level, cmd_watch |
 | cli.py | 命令入口（main + 分发 + dry-run） | main |
 | yamlmini.py | YAML 解析器 | parse |
+
+## 4.5 模块对外契约（AI 调用指南——不读实现就能用）
+
+深模块的核心是「小接口 + 深实现」。下面是 8 个模块对外暴露的接口（外部调用
+只看这些，实现细节不必读）。跨模块一律 from tfpkg import X（函数内延迟解析）。
+
+### bootstrap.py —— 配置 / 发现流
+- load_config(path) → (cfg_dict, cfg_path)：加载全局 tf.yaml。
+- discover_skills() → 扫 skill/*/skill.yaml 的技能清单。
+- apply_skills(cfg, verbose=) → 把技能装配进 cfg（返回 cfg）。
+- merge_project_configs(cfg) → 合并 project_setting/tf_*.yaml。
+- discover_local(...) → 本地模式扫材料目录。
+- 常量：EXAMPLE_CONFIG（示例配置）、STATUS_ALIAS（状态别名）、REASON_MAX。
+
+### collect.py —— 远端采集（ssh + COLLECTOR）
+- collect(...) / collect_v3_batch(...) → 采集远端状态（内部拼 ssh）。
+- run_remote(...)、sh_b64(...) → ssh 执行 / base64 下发辅助。
+
+### data.py —— 数据簇（采集 + 过滤 + 缓存 + 快照）
+- collect_data(cfg, types) → 采集状态，返回 data（{types:[{key,root,materials:[...]}], queue:{...}}）。
+- apply_exclude(data, s)、filter_projs(...)、filter_status(data, st) → 过滤。
+- _state_cache_load/save(...) → list/summary 的本地缓存。
+
+### workflow.py —— 工作流执行引擎（状态机 + 提交 + 推进 + 动作）
+- step_state(...)、do_submit(...)、auto_advance(...)、auto_fetch(...)、remote_gen(...)。
+- 动作命令：cmd_start / cmd_stop / cmd_retry / cmd_rerun / cmd_clean（破坏性命令在 cli 层被 dry-run / 请示拦截）。
+- _dry_run_steps_for(cmd, m, jb) → dry-run 目标筛选。
+
+### report.py —— 渲染 / 汇报 / 诊断（AI 读输出的主要来源）
+- 渲染：render_table(data)、render_detail(m)、_summary_lines(data)、_summary_json(data)。
+- 查找：find_material(data, name) → (t, m)；find_step(m, jname) → step dict。
+- 命令：cmd_status(...)、cmd_summary(...)。
+- 结构化错误码 + 建议动作：_diag_code(diag) → 稳定 code；
+  _suggested_action(code) → (动作, 理由)（机器化 AGENTS.md §5 决策表）；
+  _add_diag_codes(data) 给每步补 diag_code/suggested_action/action_reason。
+- 一键诊断：cmd_diagnose(cfg, data, mname, jname) → 单材料结构化诊断 dict。
+- json 裁剪/分页：_json_errors_only(data)（只留 FAIL）、_json_paginate(data, offset, limit)（展平分页）。
+
+### ops.py —— 运维流
+- auto_recover_hung(...)（挂死检测/恢复）、cmd_init(...)、cmd_hpc(...)、
+  cmd_level(...)、cmd_watch(...)、cmd_adopt(...)、cmd_auto*、cmd_migrate_subdir(...)。
+
+### cli.py —— 命令入口
+- main()：唯一的 CLI 入口（argparse + 命令分发 + dry-run + --json 输出）。
+
+### yamlmini.py —— YAML 解析器
+- parse(s) → dict（唯一对外接口，无 PyYAML 依赖）。
 
 ## 5. 历史循环依赖（均已消除，供参考）
 
@@ -119,7 +166,7 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
 
 只读回归命令（不碰超算）：`--help` / `config` / `skills` / `--schema`。
 
-单测：`python3 test/test_tfpkg.py`（22 个用例，自带运行器，无需 pytest）。
+单测：`python3 test/test_tfpkg.py`（28 个用例，自带运行器，无需 pytest）。
 
 ## 7. 已知差异（已消除）
 
@@ -132,7 +179,7 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
 
 - **COLLECTOR 独立**：`tfpkg/_collector_remote.py`（真实 .py，可 `py_compile` / lint），
   装配时读回字符串注入命名空间，字节与原单体一致（有单测 `test_collector_integrity`）。
-- **pytest 单测**：`test/test_tfpkg.py` 22 个用例（COLLECTOR 完整性、config 加载、
+- **pytest 单测**：`test/test_tfpkg.py` 28 个用例（COLLECTOR 完整性、config 加载、
   skills 发现/装配、summary 格式化、状态词、快照 diff、自然排序、CLI 冒烟）。
   自带独立运行器，不依赖 pytest 是否安装。
 - **`--dry-run`**：`start/stop/retry/rerun/clean/fetch` 加 `--dry-run`，只打印将影响的
@@ -141,6 +188,16 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
   （或 `tf --schema`）打印字段说明（常量 `JSON_SCHEMA`）。
 - **`--json` 输出**：`list/summary/status/dir` 加 `--json`，输出机器可读 JSON
   （summary 用 `_summary_json` 结构化；status 的 `--json` 只读、不 auto_fetch/advance）。
+- **建议动作映射（机器化决策表）**：report.py 新增 _suggested_action(code)，把 diag_code
+  机器化映射到确定性动作（retry/rerun/start/human_review）+ 理由——即把 AGENTS.md §5 的
+  散文决策表搬进代码。--json 的 step 带 suggested_action + action_reason，
+  summary 的 fails[].action 也带动作。AI 不再读散文规则做决策。
+- **一键诊断 tf -p X [-j STEP] diagnose**：把 FAIL 诊断的固定套路（状态 + diag +
+  diag_code + suggested_action + job + dir）合成一条命令，输出结构化 JSON（只读、
+  不采集不提交）。AI 从「跑 3-4 步 + 读散文」→「跑 1 步 + 读 JSON」。
+- **tf json 裁剪/分页**：--errors-only（只留含 FAIL 的材料与 FAIL 步）、
+  --limit N / --offset M（材料展平按 (type,name) 排序分页，返回
+  {materials,total,offset,limit}）。批分析时不再吞全表。
 
 ## 9. v2.0 与原版 skill/setting 差异审计（发现并修复 1 处回归，其余待核对）
 
@@ -169,7 +226,7 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
   `--json` 输出的 step 加 `diag_code`、summary 的 `fails[].code` 也带 code，
   agent 无需 grep（如 `relax_summary_missing` / `relax_summary_incomplete` /
   `force_not_converged` / `relax_oscillating` / `stepconf_unknown_params`）。
-- **测试**：`test/test_tfpkg.py` 14 → 22 个用例（新增 stepconf 白名单回归、
+- **测试**：`test/test_tfpkg.py` 14 → 28 个用例（新增 stepconf 白名单回归、
   retry 目标、dry-run 语义、diag_code、yamlmini/data/workflow 深模块、命名空间完整性）。
 
 **深模块化（已完成）**：
@@ -179,5 +236,5 @@ python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
   `_slice/` 目录已删除，单一命名空间装配已退役。
 - 两个循环依赖环均已消除（环1 合并进 workflow.py、环2 抽 data.py）；跨模块引用
   统一用函数内 `from tfpkg import ...` 延迟解析。
-- 22 个单测（含命名空间完整性安全网 `test_namespace_complete`）。
+- 28 个单测（含命名空间完整性安全网 `test_namespace_complete`）。
 

@@ -189,6 +189,30 @@ def test_cli_dry_run():
         os.unlink(path)
 
 
+def test_cli_diagnose():
+    # 沙盒：一键结构化诊断（只读、不提交）
+    sand = os.path.join(_ROOT, "test", "sandbox", "tf.yaml")
+    rc, out, err = _run("python3 bin/tf -c %s -tt opt-mace-cpu -p Si diagnose" % sand)
+    assert rc == 0, "rc=%d err=%s" % (rc, err)
+    d = json.loads(out)
+    assert d["material"] == "Si"
+    assert d["type"] == "opt-mace-cpu"
+    assert "steps" in d and "hpc" in d
+
+
+def test_cli_json_filters():
+    # 沙盒：json --errors-only / --limit 分页
+    sand = os.path.join(_ROOT, "test", "sandbox", "tf.yaml")
+    rc, out, err = _run("python3 bin/tf -c %s json --errors-only" % sand)
+    assert rc == 0, "rc=%d err=%s" % (rc, err)
+    assert "types" in json.loads(out)
+    rc, out, err = _run("python3 bin/tf -c %s json --limit 1" % sand)
+    assert rc == 0, "rc=%d err=%s" % (rc, err)
+    d = json.loads(out)
+    assert "materials" in d and "total" in d
+    assert len(d["materials"]) <= 1
+
+
 def test_stepconf_reserved_params():
     # 集群注入键（POTCAR_DIR/REFERENCES_DIR 等）必须在白名单里，
     # 否则 MACE gen 脚本会误报"不认识的键"（v2.0 拷贝回归的回归测试）。
@@ -245,6 +269,62 @@ def test_diag_code():
     # _summary_json 的 fails 带 code 字段
     j = tfpkg._summary_json(_mk_data())
     assert j["types"][0]["fails"][0]["code"] == "force_not_converged"
+    # fails 现在带建议动作（机器化 AGENTS.md §5 决策表）
+    assert j["types"][0]["fails"][0]["action"] == "retry"
+
+
+def test_diag_action_map():
+    # diag_code → 确定性建议动作（机器化决策表）
+    assert tfpkg._suggested_action("force_not_converged")[0] == "retry"
+    assert tfpkg._suggested_action("relax_nsw")[0] == "retry"
+    assert tfpkg._suggested_action("node_fail")[0] == "retry"
+    assert tfpkg._suggested_action("dir_missing")[0] == "rerun"
+    assert tfpkg._suggested_action("not_started")[0] == "start"
+    assert tfpkg._suggested_action("stepconf_unknown_params")[0] == "human_review"
+    assert tfpkg._suggested_action("unknown")[0] == "human_review"
+    assert tfpkg._suggested_action("none") == ("none", "")
+    # 每个 retry/rerun 动作都有理由
+    for code, (act, reason) in tfpkg._ACTION_MAP.items():
+        assert reason, "%s 缺理由" % code
+
+
+def test_diagnose():
+    # cmd_diagnose：默认输出 FAIL 步，结构化带 diag_code + suggested_action
+    d = tfpkg.cmd_diagnose({}, _mk_data(), "Ge", None)
+    assert d["material"] == "Ge"
+    assert d["type"] == "opt-mace-cpu"
+    assert len(d["steps"]) == 1
+    s = d["steps"][0]
+    assert s["label"] == "step1"
+    assert s["kind"] == "FAIL"
+    assert s["diag_code"] == "force_not_converged"
+    assert s["suggested_action"] == "retry"
+    assert s["action_reason"]
+    # -j 指定非 FAIL 步也输出
+    d2 = tfpkg.cmd_diagnose({}, _mk_data(), "Ge", "step2")
+    assert len(d2["steps"]) == 1 and d2["steps"][0]["kind"] == "OK"
+
+
+def test_json_errors_only():
+    # 只保留含 FAIL 步骤的材料，且只留 FAIL 步骤
+    out = tfpkg._json_errors_only(_mk_data())
+    mats = out["types"][0]["materials"]
+    assert [m["name"] for m in mats] == ["Ge"]          # Si 无 FAIL 被滤掉
+    assert [s["label"] for s in mats[0]["steps"]] == ["step1"]  # 只留 FAIL 步
+
+
+def test_json_paginate():
+    # 展平材料分页：扁平结构 + total/offset/limit
+    out = tfpkg._json_paginate(_mk_data(), 0, 10)
+    assert out["total"] == 2
+    assert out["offset"] == 0 and out["limit"] == 10
+    names = [m["name"] for m in out["materials"]]
+    assert names == ["Ge", "Si"]                        # 按 (type,name) 排序
+    assert out["materials"][0]["type"] == "opt-mace-cpu"
+    # limit=1 只取 1 个
+    assert len(tfpkg._json_paginate(_mk_data(), 0, 1)["materials"]) == 1
+    # offset=1 跳过第 1 个
+    assert tfpkg._json_paginate(_mk_data(), 1, 10)["materials"][0]["name"] == "Si"
 
 
 def test_yamlmini_module():

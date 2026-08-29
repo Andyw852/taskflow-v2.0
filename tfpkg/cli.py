@@ -91,7 +91,7 @@ def _dry_run_report(cfg, data, cmd, projs, jobs):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         print(USAGE)
         return
@@ -161,6 +161,12 @@ def main():
     p.add_argument("--set", dest="sets", action="append", metavar="节.键=值",
                    help="conf：改本步 step.conf（如 --set incar.EDIFF=1E-6；"
                         "值留空=删除该键）")
+    p.add_argument("--errors-only", dest="errors_only", action="store_true",
+                   help="json：只保留含 FAIL 步骤的材料与 FAIL 步骤")
+    p.add_argument("--limit", dest="limit", type=int, metavar="N",
+                   help="json：只输出前 N 个材料（分页）")
+    p.add_argument("--offset", dest="offset", type=int, metavar="M",
+                   help="json：跳过前 M 个材料（配合 --limit 分页）")
     p.add_argument("args", nargs="*")
     a, unknown = p.parse_known_args()  # v3.14：位置参数可穿插在选项中间
     a.args = list(a.args) + unknown    # （-p A B retry / -p A B -j 1 dir）
@@ -171,7 +177,7 @@ def main():
     commands = {"status", "list", "summary", "start", "stop", "retry", "rerun",
                 "json", "config", "dir", "fetch", "init", "clean", "watch",
                 "help", "auto", "adopt", "migrate-subdir", "hpc", "skills",
-                "conf", "level"}   # patch_level
+                "conf", "level", "diagnose"}   # patch_level
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -404,6 +410,13 @@ def main():
         else:
             render_table(data)
         return
+    if cmd == "diagnose":   # v2.0：一键结构化诊断（只读；默认输出 FAIL 步）
+        if not projs:
+            sys.exit("错误：diagnose 需要 -p 材料（如 tf -p C24/qHPC24 diagnose）。")
+        _outs = [cmd_diagnose(cfg, data, pj, jobs[0]) for pj in projs]
+        print(json.dumps(_outs[0] if len(_outs) == 1 else _outs,
+                         ensure_ascii=False, indent=2))
+        return
     if cmd == "summary":   # 只读极简汇总；不 auto_fetch/auto_advance（绝不提交）
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)
@@ -458,6 +471,10 @@ def main():
         else:
             _out = {"schema_version": 2, "tf_version": TF_VERSION}
             _out.update(data)
+            if a.errors_only:                       # v2.0：只留 FAIL 材料/步骤
+                _out = _json_errors_only(_out)
+            if a.limit is not None or a.offset is not None:   # v2.0：材料分页
+                _out = _json_paginate(_out, a.offset or 0, a.limit)
             print(json.dumps(_out, ensure_ascii=False, indent=2))
     elif cmd == "dir":
         # 只输出路径本身，方便拼进 ssh/cd 命令：ssh jzzn "cd $(tf -p X -j 1 dir)"
