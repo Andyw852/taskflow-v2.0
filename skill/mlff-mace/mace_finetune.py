@@ -41,6 +41,7 @@ def parse_args():
     p.add_argument("--force-mh-ft-lr", default="false")
     p.add_argument("--replay", default="")
     p.add_argument("--num-samples-pt", type=int, default=30000)
+    p.add_argument("--multiheads-finetuning", default="true")   # true=多头replay / false=naive单头
     p.add_argument("--energy-weight", type=float, required=True)
     p.add_argument("--forces-weight", type=float, required=True)
     p.add_argument("--stress-weight", type=float, required=True)
@@ -158,7 +159,7 @@ def main():
         sys.executable, "-m", "mace.cli.run_train",
         "--name=%s" % a.name,
         "--foundation_model=%s" % a.foundation,
-        "--multiheads_finetuning=True",
+        "--multiheads_finetuning=%s" % str(a.multiheads_finetuning).lower(),
         "--pt_train_file=%s" % a.replay,
         "--num_samples_pt=%d" % a.num_samples_pt,
         "--train_file=%s" % a.train_file,

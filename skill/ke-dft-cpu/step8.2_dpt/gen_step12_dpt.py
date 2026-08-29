@@ -538,7 +538,12 @@ def get_effective_mass_aniso(cwd, carrier, is_2d):
         except Exception:
             use_tr = True
 
+        # [P1-2] 展开 IBZ → 全 BZ，两层：amset（环境）→ pymatgen 点群（不依赖环境）。
+        # 【彻底删掉 IBZ 兜底】IBZ 上的 m* 不是"精度差一点"，是系统性错误（单侧
+        # 取点，SS 正交胞对称性禁止交叉项却拟合出 off=0.28 的假数）。展开不成功
+        # 就硬失败、不出 m*，绝不静默退回 IBZ。
         expanded = False
+        _expand_method = None
         try:
             from amset.electronic_structure.symmetry import expand_kpoints
             full_kfrac, _, _, _, _, kp_mapping = expand_kpoints(
@@ -546,23 +551,97 @@ def get_effective_mass_aniso(cwd, carrier, is_2d):
                 time_reversal=use_tr, return_mapping=True)
             kp_mapping = np.asarray(kp_mapping)
             kfrac = np.array(full_kfrac)            # (n_full, 3)
-            ene = ene_ibz[kp_mapping]               # (n_full, nb)
-            # 精确匹配 IBZ 原 k：全 BZ 里找回原带边 k 的物理位置（而非任取星元），
-            # 保证 x/y 分量和 E1 链落在同一坐标系，交叉校验才有意义。
-            d = kfrac - kfrac_ibz[k0_ibz]; d -= np.round(d)
-            dd = np.linalg.norm(d, axis=1)
-            k0 = int(np.argmin(dd))
-            if dd[k0] > 1e-4:
-                raise RuntimeError("展开后找不到原带边 k 点（回卷距离 %.3g）" % dd[k0])
+            _expand_method = "amset"
             expanded = True
-        except Exception as _e:
-            # 展开失败（网格非标准/amset 不可用）→ 退回 IBZ，单侧取点可能偏置
-            print("[WARN] %s：全 BZ 展开失败（%s: %s），退回 IBZ —— 拟合可能有"
-                  "单侧取点偏置（hex K 点实测 2.7 倍伪各向异性）"
-                  % (carrier, type(_e).__name__, str(_e)[:60]))
-            kfrac = kfrac_ibz
-            ene = ene_ibz
-            k0 = k0_ibz
+        except Exception:
+            # 层2：subprocess 到 step.conf 的 amset 环境跑 expand_kpoints
+            # （jzzn 默认 python 是 atomate2_p_a 无 amset，但 conda 里有 amset_clean）
+            _sub_ok = False
+            try:
+                import subprocess as _sp, shlex as _shlex, json as _json
+                _env = None
+                try:
+                    import stepconf as _sc
+                    _txt = open(_sc.CONF_NAME, encoding="utf-8-sig").read()
+                    _p = {k.upper(): v for k, v, _ in _sc.parse(_txt, _sc.CONF_NAME).get("params", [])}
+                    _sh, _e = _p.get("CONDA_SH"), _p.get("AMSET_ENV")
+                    if _sh and _e:
+                        _env = "source %s && conda activate %s" % (_sh, _e)
+                except Exception:
+                    pass
+                if _env:
+                    _code = ("import sys,json,numpy as np\n"
+                             "from pymatgen.core import Structure\n"
+                             "from amset.electronic_structure.symmetry import expand_kpoints\n"
+                             "st=Structure.from_dict(json.loads(sys.argv[1]))\n"
+                             "kf=np.array(json.loads(sys.argv[2]))\n"
+                             "ut=sys.argv[3]=='True'\n"
+                             "f,_,_,_,_,kp=expand_kpoints(st,kf,symprec=0.01,time_reversal=ut,return_mapping=True)\n"
+                             "print(json.dumps({'full':np.array(f).tolist(),'kp':np.asarray(kp).tolist()}))")
+                    _cmd = "%s && python3 -c %s %s %s %s" % (
+                        _env, _shlex.quote(_code),
+                        _shlex.quote(_json.dumps(v.final_structure.as_dict())),
+                        _shlex.quote(_json.dumps(kfrac_ibz.tolist())),
+                        str(use_tr))
+                    _out = _sp.run(["bash", "-lc", _cmd], capture_output=True,
+                                   text=True, timeout=180)
+                    _lines = [l for l in (_out.stdout or "").strip().splitlines()
+                              if l.strip().startswith("{")]
+                    if _lines:
+                        _data = _json.loads(_lines[-1])
+                        kp_mapping = np.asarray(_data["kp"])
+                        kfrac = np.array(_data["full"])
+                        _expand_method = "amset-subproc"
+                        expanded = True
+                        _sub_ok = True
+            except Exception:
+                pass
+            if not _sub_ok:
+                # 层3：pymatgen 点群展开（+ 时间反演，只依赖 pymatgen）
+                try:
+                    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+                    _ops = SpacegroupAnalyzer(
+                        v.final_structure, symprec=0.01
+                    ).get_point_group_operations(cartesian=False)
+                    _seen, _kf_list, _idx_list = {}, [], []
+                    for _i, _k in enumerate(kfrac_ibz):
+                        _targets = [op.operate(_k) for op in _ops]
+                        if use_tr:
+                            _targets += [op.operate(-_k) for op in _ops]
+                        for _kk in _targets:
+                            _kk -= np.round(_kk)
+                            _key = tuple(np.round(_kk, 6))
+                            if _key not in _seen:
+                                _seen[_key] = True
+                                _kf_list.append(_kk)
+                                _idx_list.append(_i)
+                    if not _kf_list:
+                        raise RuntimeError("点群展开得到 0 个点")
+                    # [网格一致性校验] 与 amset 同等严格：铺满才接受，否则单侧取点
+                    _df = kfrac_ibz - kfrac_ibz[0]; _df -= np.round(_df)
+                    _nz = np.abs(_df) > 1e-6
+                    _mesh = np.array([int(round(1.0 / float(np.min(np.abs(_df[_nz[:, i], i])))))
+                                      if _nz[:, i].any() else 1 for i in range(3)])
+                    _n_expect = int(np.prod(_mesh))
+                    if len(_kf_list) != _n_expect:
+                        raise RuntimeError(
+                            "pymatgen 展开只得到 %d/%d 点，网格未铺满"
+                            % (len(_kf_list), _n_expect))
+                    kfrac = np.array(_kf_list)
+                    kp_mapping = np.asarray(_idx_list)
+                    _expand_method = "pymatgen"
+                    expanded = True
+                except Exception as _e2:
+                    return None, ("全 BZ 展开失败（amset/subprocess/pymatgen 都不可用：%s）"
+                                  "——拒绝在 IBZ 上拟合 m*（单侧取点是系统性错误）"
+                                  % type(_e2).__name__)
+        # 展开后（amset/pymatgen 共用）：能量映射 + 精确匹配 IBZ 原 k
+        ene = ene_ibz[kp_mapping]                   # (n_full, nb)
+        d = kfrac - kfrac_ibz[k0_ibz]; d -= np.round(d)
+        dd = np.linalg.norm(d, axis=1)
+        k0 = int(np.argmin(dd))
+        if dd[k0] > 1e-4:
+            return None, "展开后找不到原带边 k 点（回卷距离 %.3g）" % dd[k0]
 
         kcart = kfrac @ recip
         dk = kcart - kcart[k0]
@@ -683,7 +762,7 @@ def get_effective_mass_aniso(cwd, carrier, is_2d):
         off = abs(c) / max(abs(a), abs(b))
         prov = ("带边二次型拟合(%s, %d点/%d壳层, R<%.2f, 模型=%s, "
                 "交叉项/主项=%.2f, cond=%.0e, rel=%.3f, spin=%d)"
-                % ("全BZ" if expanded else "IBZ", npt, n_shell, Rused,
+                % (_expand_method, npt, n_shell, Rused,
                    "+".join(names), off, cond, rel, isp))
         # [P2 后] 交叉项判据：正交胞（SS/LS/*_ortho）的点群禁止面内交叉项，
         # off 明显非零 = 拟合本身有问题（取点不对称/带边非极值点/跨带），
@@ -815,8 +894,21 @@ def main():
     is_2d = (dim == "2d")
 
     carriers = (["electron", "hole"] if CARRIER == "both" else [CARRIER])
+    # [ENV] 记录执行环境，铺开时"哪个环境跑的"从推断变成可读事实
+    try:
+        import socket as _socket
+        _amset_ver = "N/A"
+        try:
+            import amset as _amset
+            _amset_ver = getattr(_amset, "__version__", "N/A")
+        except Exception:
+            pass
+        _env = {"python": sys.executable, "amset": _amset_ver,
+                "host": _socket.gethostname()}
+    except Exception:
+        _env = {"python": sys.executable}
     res = {"dim": dim, "is_2d": is_2d, "temperature_K": TEMPERATURE_K,
-           "skill_rev": _SKILL_REV,
+           "skill_rev": _SKILL_REV, "env": _env,
            "formula": ("2D Bardeen-Shockley: μ=eℏ³C_2D/(k_BT m* m_d E1²)" if is_2d
                        else "3D: μ=2√(2π)eℏ⁴C_3D/(3(k_BT)^{3/2}m*^{5/2}E1²)"),
            "results": [_one_carrier(cwd, is_2d, c, TEMPERATURE_K) for c in carriers],

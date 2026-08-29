@@ -210,11 +210,24 @@ def cmd_prep(cfg):
                      % (max(idx) + 1, len(disps)))
         ph3.dataset = {"displacements": disps[idx], "forces": forces}
     else:
-        ph3.forces = forces
+        # phono3py 4.x：findiff dataset 保留 included=False 的 second_atoms
+        # （被 FC3_CUTOFF_PAIR 过滤掉的对位移，未生成 disp 目录、未算力），而
+        # forces setter 遍历所有 second_atoms（不跳过 included=False）——需提供
+        # 与 dataset 位移数一致的完整数组，included=False 填 0（fc3 拟合会跳过）。
+        # 映射：disp 目录编号 == dataset 位移的 id（first_atoms[0].id=1，
+        # second_atoms 的 id=2..N），故 forces_full[id-1] = 对应帧的力。
+        n_total = 1 + sum(len(fa.get("second_atoms", []))
+                          for fa in ph3.dataset.get("first_atoms", []))
+        forces_full = np.zeros((n_total, nsc, 3), dtype=float)
+        for f, fv in zip(files, forces):
+            num = int(re.search(r"disp-(\d+)", f).group(1))
+            forces_full[num - 1] = fv
+        ph3.forces = forces_full
     # 存成自带力的 phono3py_params.yaml：后面的拟合直接读它，不再走
     #   `phono3py --cf3` + FORCES_FC3（那条路要求文件数==位移数，缺一帧就错位）。
     ph3.save(str(out / "phono3py_params.yaml"))
-    print("[OK] phono3py_params.yaml：%d 帧力已写入（已扣平衡帧）" % len(forces))
+    print("[OK] phono3py_params.yaml：%d 帧力已写入（已扣平衡帧；另 %d 个 cutoff 外对填 0）"
+          % (len(forces), n_total - len(forces)))
 
     ph3 = _load_ph3_with_forces(out / "phono3py_disp.yaml")
     write_vasp(str(out / "POSCAR"), ph3.unitcell, direct=True)     # 原胞
