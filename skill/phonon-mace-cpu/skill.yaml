@@ -1,0 +1,50 @@
+# =============================================================================
+# skill/phonon-mace-cpu/skill.yaml —— MACE 声子谱（仅 2 阶力常数，无 3 阶、无热导率）
+#
+# 从 kl-mace-cpu 拆出：只算声子，不碰 fc3 / BTE。
+#   S1_relax   MACE 弛豫（同 kl-mace-cpu）
+#   S2_force   随机位移（帧数由 ALM 2 阶自由力常数反推，振幅 0.01 Å）+ MACE 取力
+#   S3_phonon  symfc 拟合 fc2 → q-mesh 虚频闸 + band-dft-cpu.yaml → phonon_summary.json
+#
+# 引擎在 skill/phonon-mace-cpu/ 与 _common/mace/（mace_relax.py / mace_model.py /
+# klmace_common.py / submit_mace_relax.tpl 共用）。
+# =============================================================================
+schema: 1
+name: phonon-mace-cpu
+desc: 声子谱(MACE/CPU)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, SPOSCAR, workflow_method.txt, relax_summary.json,
+              forces_summary.json, phonon_summary.json, band-dft-cpu.yaml, submit.sh,
+              mace_relax.log, mace_forces.log, phonon.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_mace_relax, label: S1_relax,
+     check: marker, marker: 'relax_summary.json:"converged": true',
+     gen: gen_step1_mace_relax.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_relax.py, submit_mace_relax.tpl]}
+
+  - {seq: 2, name: step2_disp_force, label: S2_force,
+     check: marker, marker: "forces_summary.json:FORCES_DONE",
+     gen: gen_step2_disp_phonon.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mc_rattle.py, mace_forces_phonon.py,
+                submit_mace_relax.tpl]}
+
+  - {seq: 3, name: step3_phonon, label: S3_phonon,
+     check: marker, marker: 'phonon_summary.json:"PHONON_DONE": true',
+     gen: gen_step3_phonon.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                phonon_fit_driver.py, submit_mace_relax.tpl]}
+
+requires:
+  python: [mace-torch, torch, ase, phonopy, symfc, spglib, numpy, alm]
+  conda: mace

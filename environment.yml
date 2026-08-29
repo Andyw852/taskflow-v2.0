@@ -1,0 +1,51 @@
+# taskflow 运行环境清单（conda）
+#
+# 用法（MACE/MLFF 主环境）：
+#     conda env create -f environment.yml
+#     conda activate mace
+#
+# 说明：
+#   tf 本身是单文件 Python、零第三方依赖（PyYAML 可选），装不装本环境都能跑 tf；
+#   真正需要 Python 科学栈的是「各技能」在超算端跑的计算脚本，按技能分环境（见文末注释）。
+#
+# 本文件给出 MACE/MLFF 类技能的主环境（skill.yaml 里的 conda: mace）：
+#   kl-mace-cpu / kl-mace-gpu / phonon-mace-cpu / mlff-mace 共用。
+# CPU/GPU 只差 torch 那几行：CPU 换 cpuonly + pytorch，GPU 按显卡选 cudatoolkit 版本，
+# 环境名照项目现状（jzzn=venv mace_cpu/torch CPU、3090=conda mace-gpu、a800=conda mace/cu128）。
+
+name: mace
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.11
+  # ---- torch 与 MACE（按机器改这几行）----
+  - pytorch
+  - pytorch-cuda=12.8          # a800 实测 cu128；3090 改 12.1/11.8，CPU 机器换 cpuonly
+  - mace-torch                 # MACE 势计算引擎（a800 实测 0.3.16；torch 2.7.1 可配）
+  # ---- 结构与通用 ----
+  - ase
+  - numpy
+  - spglib
+  - h5py
+  - matplotlib
+  # ---- 声子 / 力常数 ----
+  - phonopy
+  - phono3py                   # 同时提供 phono3py 命令行（kl-mace 的 exe 依赖）
+  - symfc
+  - alm
+
+# =====================================================================
+# 其它技能专用环境（不并入上面，避免依赖冲突）：
+#   ke-dft-cpu        -> conda amset_clean:  pymatgen numpy matplotlib amset BoltzTraP2
+#   kl-dft-cpu        -> conda atomate2_p_a: phonopy phono3py numpy spglib
+#   elastic-dft-cpu   -> 超算登录节点 pip install --user pymatgen matplotlib
+#   opt-mace-cpu      -> jzzn venv ~/venvs/mace_cpu: torch(cpu)+mace-torch+ase+numpy
+#   opt-mace-gpu      -> 3090 conda mace-gpu:      torch(cuda)+mace-torch+ase+numpy
+#
+# 非 Python 外部程序（conda 装不了，需自备 / 有许可）：
+#   VASP 6.x（vasp_std）  商业许可；band/elastic/ke/kl/opt-dft 及 mlff-mace 标注用
+#   vaspkit               ke-dft-cpu / kl-dft-cpu / mlff-mace 依赖
+#   phono3py 命令行        kl-dft-cpu / kl-mace 依赖（conda 装 phono3py 已含）
+# =====================================================================

@@ -1,0 +1,108 @@
+# =============================================================================
+# skill/mlff-mace/skill.yaml —— 随机位移法 MLFF 训练（MACE 势函数产出流水线）
+#
+# 复现 autoplex phonon workflow（JCP 153,044104(2020) / Nat.Commun. 16,7666(2025)）
+# 的物理配方与验收标准，用 taskflow 步骤机制实现。详见 README.md。
+#
+#   S1_relax   VASP 紧弛豫原胞（三段式，EDIFFG=-0.001，external pressure ≤ 2 kB）
+#   S2_cell    判维度 + 从基座模型读 r_max 定超胞（登录节点 run:gen）
+#   S3_calib   基座模型 CALIB_FC2 → u_rms(300K) → RATTLE_STD 三档（run:gen）
+#   S4_gen     生成本代全部待标注构型（rattle 网格 + displ + iso + static）（run:gen）
+#   S5_label   DFT 单点标注（fanout cfg-*，唯一昂贵一步；12 核小作业）
+#   S6_data    OUTCAR → extxyz + 指纹校验 + 离群过滤 + FPS + 划分（run:gen）
+#   S7_ft      MACE 多头微调（fanout seed-*，GPU/CPU）
+#   S8_bench   全部验收闸 + 学习曲线 + 停机判定（sbatch）
+#   S9_pub     仅 status==pass 才拷 .model 进 MACE_MODEL_DIR（run:gen）
+#
+# 代数迭代：taskflow 是 DAG，代数用 step.conf 的 GENERATION 表达（§7.1）。
+#   tf -tt mlff-mace -p <材料> conf --set params.GENERATION=1
+#   tf -tt mlff-mace -p <材料> -j 4 rerun     # 只删结构清单重生成（安全）
+#   tf -tt mlff-mace -p <材料> start          # 5→8 自动补生成/重跑/提交
+#
+# ★ step5_label 操作定则：只用 retry / start -f，绝不用 rerun / clean ——
+#   后两者会 rm -rf 步骤目录，毁掉已算完的 DFT 帧。
+# =============================================================================
+schema: 1
+name: mlff-mace
+desc: 随机位移法MLFF训练
+version: "0.1"
+
+checks: checks.py
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+# 只拉小文件。.model / *.xyz / fc*.hdf5 / vasprun.xml 不拉回本地（动辄上 GB）。
+fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, step.conf, workflow_method.txt,
+              mlff_params.txt, supercell_summary.json, calib_summary.json,
+              struct_manifest.json, dataset_summary.json, finetune_summary.json,
+              validation_summary.json, convergence_history.json,
+              model_card.json, publish_status.json, publish_skip.json,
+              coverage_report.json, learning_curve.json, plan.json, e0s.json,
+              "results_*.txt", "*.png", "*.log", queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_relax, label: S1_relax,
+     check: step1, pressure_tol: 2.0,
+     gen: gen_step1_relax.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mlff_common.py, dim_common.py, stepconf.py,
+                step.conf, incar_2d.tpl, incar_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 2, name: step2_supercell, label: S2_cell,
+     check: plot, run: gen, done_marker: supercell_summary.json, fetch_all: true,
+     gen: gen_step2_supercell.py,
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                supercell_tool.py, mace_model.py]}
+
+  - {seq: 3, name: step3_calib, label: S3_calib,
+     check: plot, run: gen, done_marker: calib_summary.json, fetch_all: true,
+     gen: gen_step3_calib.py,
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                fc2_calib.py, mace_model.py]}
+
+  - {seq: 4, name: step4_genstruct, label: S4_gen,
+     check: manifest, run: gen, done_marker: struct_manifest.json, fetch_all: true,
+     gen: gen_step4_genstruct.py,
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                dft_settings.py, rattle_gen.py, dataset_build.py]}
+
+  - {seq: 5, name: step5_label, label: S5_label,
+     check: label, fanout: "cfg-*",
+     gen: gen_step5_label.py,
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                dft_settings.py, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 6, name: step6_dataset, label: S6_data,
+     check: dataset, run: gen, done_marker: dataset_summary.json,
+     gen: gen_step6_dataset.py,
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                dft_settings.py, dataset_build.py]}
+
+  - {seq: 7, name: step7_finetune, label: S7_ft,
+     check: finetune, fanout: "seed-*",
+     gen: "gen_step7_finetune.py {mat}",
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                mace_model.py, mace_finetune.py, submit_mace.tpl]}
+
+  - {seq: 8, name: step8_benchmark, label: S8_bench,
+     check: benchmark, fetch_all: true,
+     gen: "gen_step8_benchmark.py {mat}",
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf,
+                dft_settings.py, mace_model.py, mace_relax.py,
+                benchmark.py, learning_curve.py, converge_ctrl.py,
+                dataset_build.py, submit_mace.tpl]}
+
+  - {seq: 9, name: step9_publish, label: S9_pub,
+     check: publish, run: gen, done_marker: publish_status.json, fetch_all: true,
+     gen: "gen_step9_publish.py {mat}",
+     gen_need: [mlff_common.py, dim_common.py, stepconf.py, step.conf]}
+
+requires:
+  python: [mace-torch, torch, ase, phonopy, numpy, matplotlib]
+  exe: [vaspkit]
+  conda: mace          # [FIX-F4] 与 CONDA_ENV 对应；venv 路径写在 step.conf 的 CONDA_ENV

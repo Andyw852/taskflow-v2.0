@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""gen_step4_disp.py —— 超胞 + 位移生成，扇出（step4_disp）。
+
+从 step1 弛豫结构接力，扩超胞并生成位移超胞，每个位移一个 disp-NNNNN 子目录单点取力。
+两种方法（step.conf 的 METHOD）：
+  findiff : phono3py 对称有限位移（不需 ALM），位移数由空间群对称约化决定
+  alm     : 随机位移，位移数由 ALM 的自由力常数个数 × OVERSAMPLE 估出（少而全，
+            适合大超胞/高阶）。位移数计算复用参考引擎 lattice_kappa 的 ALM 例程。
+把 DIM/SUPERCELL/MESH/METHOD 写进 kl_params.txt，供 step5/step6 严格继承。
+产出目录：step4_disp/{phono3py_disp.yaml, disp-00001, ...}
+"""
+import glob
+import os
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kl_common as kc
+from dim_common import require_dim  # noqa: E402
+import stepconf
+
+OUTDIR = "step4_disp"
+STEP   = "step4_disp"
+PREV   = ["step1_std_opt"]
+
+SPEC = {
+    "FUNC":         ("pbesol", "str"),
+    "KSPACING":     ("0.04",   "str"),   # 超胞取力，比原胞略稀
+    "KSCHEME":      ("2",      "str"),
+    "ENCUT":        (None,     "int"),
+    "ENCUT_FACTOR": (1.5,      "float"),
+    "VASPKIT_EXE":  ("vaspkit", "str"),
+    "METHOD":       ("findiff", "str"),  # findiff | alm
+    "SUPERCELL":    (None,     "words"), # 显式 "3 3 3"；空=按 MIN_SC_LEN 自动
+    "MIN_SC_LEN":   (15.0,     "float"),
+    "MAX_MULTIPLE": (6,        "int"),
+    "KAPPA_MESH":   ("20 20 20", "str"), # 写进 kl_params 供 step6
+    "FC3_CUTOFF_PAIR": (None,  "float"), # findiff 三阶对距离上限(Å)；空=全对称集
+    "OVERSAMPLE":   (5,        "int"),   # alm 过采样系数
+    "ALM_CUT2":     (None,     "float"), # alm 二阶截断(Å)；空=不截断
+    "ALM_CUT3":     (5.0,      "float"), # alm 三阶截断(Å)
+}
+
+
+def run_phono3py_disp(out, dim_reps, method, conf):
+    """phono3py -d 生成位移超胞（幂等）。返回超胞 SPOSCAR 路径（供 ALM）。"""
+    if (out / "phono3py_disp.yaml").is_file() and glob.glob(str(out / "POSCAR-*")):
+        print("[..] 已有位移超胞，跳过 phono3py -d（幂等）")
+        return
+    base = '-d --dim="%s" --pa auto -c POSCAR' % kc.dim_str(dim_reps)
+    if method == "alm":
+        n = estimate_alm_nstruct(out, dim_reps, conf)
+        args = base + " --rd %d" % n
+        print("[..] ALM 定位移数：随机位移 %d 个超胞" % n)
+    else:
+        args = base
+        if conf["FC3_CUTOFF_PAIR"] is not None:
+            args += " --cutoff-pair=%s" % conf["FC3_CUTOFF_PAIR"]
+    if kc.run_phono3py(args, out, "disp_create.log") != 0:
+        sys.exit("[ERROR] phono3py -d 失败，看 %s/disp_create.log" % out)
+    if not (out / "phono3py_disp.yaml").is_file():
+        sys.exit("[ERROR] phono3py -d 未产出 phono3py_disp.yaml（phono3py 是否可用？）")
+
+
+def estimate_alm_nstruct(out, dim_reps, conf):
+    """用 ALM 自由力常数个数估随机位移超胞数（复用参考引擎例程）。ALM 不可用则回退。"""
+    fallback = max(4, conf["OVERSAMPLE"] * 8)
+    try:
+        import lattice_kappa as lk
+        from ase.io import read as ase_read
+    except Exception as e:
+        print("[WARN] 无法 import lattice_kappa/ase（%s），ALM 定数回退 N=%d" % (e, fallback))
+        return fallback
+    # 先用 phono3py -d 造一次对称超胞，取 SPOSCAR 作为 ALM 的超胞
+    if kc.run_phono3py('-d --dim="%s" --pa auto -c POSCAR' % kc.dim_str(dim_reps),
+                       out, "alm_scell.log") != 0 or not (out / "SPOSCAR").is_file():
+        print("[WARN] 取超胞失败，ALM 定数回退 N=%d" % fallback)
+        return fallback
+    try:
+        atoms = ase_read(str(out / "SPOSCAR"), format="vasp")
+        orders, cuts = [2, 3], [conf["ALM_CUT2"], conf["ALM_CUT3"]]
+        lk.write_alm_suggest_input(atoms, orders, cuts, out / "alm.in")
+        lk.run_alm(out)
+        nfree = lk.parse_alm_nfree(out / "alm.log", orders)
+        n = lk.estimate_n_struct(nfree, len(atoms), conf["OVERSAMPLE"])
+        # 清掉对称位移的 POSCAR-*，后面用 --rd 重新造随机位移
+        for p in glob.glob(str(out / "POSCAR-*")):
+            os.remove(p)
+        (out / "phono3py_disp.yaml").unlink(missing_ok=True)
+        return int(n)
+    except Exception as e:
+        print("[WARN] ALM 定数失败（%s），回退 N=%d" % (e, fallback))
+        return fallback
+
+
+def main():
+    cwd = Path.cwd()
+    out = cwd / OUTDIR
+    out.mkdir(exist_ok=True)
+    conf = stepconf.load(SPEC, STEP)
+
+    prev = kc.find_prev_dir(cwd, PREV)
+    if prev is None:
+        sys.exit("[ERROR] 找不到 step1_std_opt 的结构")
+    kc.relay_poscar(prev / "CONTCAR", out / "POSCAR", "step1_std_opt")
+
+    meth = kc.read_method(prev / kc.METHOD_FILE)
+    dim = (meth.get("DIM", "").lower() or kc.resolve_dim(out / "POSCAR")[0])
+    _, vac_axis = kc.resolve_dim(out / "POSCAR", dim)
+    require_dim(dim, ('2d', '3d'), "step4_disp",
+                why="晶格热导需要声子群速度和布里渊区积分，孤立分子只有分立振动模式")
+    func = conf["FUNC"] if conf["FUNC"] not in (None, "", "auto") \
+        else meth.get("FUNC", "pbesol").lower()
+    method = str(conf["METHOD"]).lower()
+    if method not in ("findiff", "alm"):
+        sys.exit("[ERROR] METHOD 只允许 findiff / alm")
+
+    if conf["SUPERCELL"]:
+        reps = [int(x) for x in conf["SUPERCELL"]]
+        if dim == "2d":
+            reps[vac_axis if vac_axis is not None else 2] = 1
+    else:
+        reps = kc.supercell_matrix(out / "POSCAR", dim, conf["MIN_SC_LEN"],
+                                   conf["MAX_MULTIPLE"], vac_axis if vac_axis is not None else 2)
+    mesh = kc.mesh_str(conf["KAPPA_MESH"].split(), dim, vac_axis if vac_axis is not None else 2)
+    print("[..] 维度=%s 方法=%s 超胞=%s mesh=%s" % (dim.upper(), method, kc.dim_str(reps), mesh))
+    kc.write_kl_params(out / kc.KL_PARAMS, DIM=dim.upper(), SUPERCELL=kc.dim_str(reps),
+                       MESH=mesh, METHOD=method, FUNC=func)
+
+    run_phono3py_disp(out, reps, method, conf)
+
+    poscars = sorted(glob.glob(str(out / "POSCAR-*")))
+    if not poscars:
+        sys.exit("[ERROR] 没有产出 POSCAR-* 位移超胞")
+    print("[..] 位移超胞 %d 个，逐个补输入" % len(poscars))
+
+    here = Path(__file__).resolve().parent
+    incar_tpl = kc.resolve_submit(here, dim, "incar_force")
+    submit_tpl = kc.resolve_submit(here, dim, "submit_std")
+    encut = None
+    for pos in poscars:
+        num = os.path.basename(pos).split("-", 1)[1]
+        d = out / ("disp-%s" % num)
+        d.mkdir(exist_ok=True)
+        if (d / "INCAR").is_file() and (d / "POSCAR").is_file():
+            continue
+        shutil.copyfile(pos, d / "POSCAR")
+        kc.vaspkit_kpoints(d, conf["KSCHEME"], conf["KSPACING"], conf["VASPKIT_EXE"], dim, vac_axis)
+        kc.vaspkit_potcar(d, conf["VASPKIT_EXE"])
+        if encut is None:
+            encut = conf["ENCUT"] or kc.encut_from_potcar(d / "POTCAR", conf["ENCUT_FACTOR"])
+        kc.render_tpl(incar_tpl, {"SYSTEM": "%s force %s" % (cwd.name, num), "ENCUT": encut,
+                                  "GGA": kc.GGA_MAP.get(func, "PS")}, d / "INCAR")
+        kc.write_submit(submit_tpl, d / "submit.sh",
+                        {"JOBNAME": "%s-kl-dft-cpu-S4-%s" % (cwd.name, num)})
+        kc.apply_submit_overrides(d / "submit.sh", conf)
+    print("[DONE] %s：%d 个位移子目录就绪，tf 各自提交（fanout disp-*）" % (OUTDIR, len(poscars)))
+
+
+if __name__ == "__main__":
+    main()

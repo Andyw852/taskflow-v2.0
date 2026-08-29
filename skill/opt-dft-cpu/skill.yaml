@@ -1,0 +1,45 @@
+# =============================================================================
+# skill/opt-dft-cpu/skill.yaml —— 结构优化 + 能量（形成能 / 嵌入能），schema 1
+#
+# 三步流水线：
+#   S1_opt      结构弛豫（复用公共池 relax_common，与 band-dft-cpu/kl-dft-cpu/ke-dft-cpu/elastic-dft-cpu 的
+#               step1 同一引擎，三段式作业内分段 + 0D/2D/3D 自动判定）
+#   S2_static   静态自洽：读 S1 的 CONTCAR 接力，输出体系总能 E_tot
+#   S3_energy   能量后处理（登录节点 run:gen）：读 E_tot + 组分 + step.conf
+#               参考值，算 E_per_atom / 形成能 / 嵌入能 → energy_summary.json
+#
+# 相对稳定性判据（高通量筛选，详见 README.md）：
+#   E_per_atom = E_tot / N_atoms    —— 无需任何参考值，同一组成下直接排名
+#   形成能 E_form  = E_tot - Σ n_i·μ_i         （μ_i 填 step3 的 MU 参数）
+#   嵌入能 E_embed = E_tot - E_host - n_g·μ_g  （Li@C60 这类包合/插层）
+# =============================================================================
+schema: 1
+name: opt-dft-cpu
+desc: 结构优化(DFT/CPU)
+version: "0.1"
+checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob）
+
+template_layout: shared
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, POTCAR, submit.sh, OUTCAR,
+              vasprun.xml, workflow_method.txt, energy_summary.json,
+              queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_opt, label: S1_opt, check: relax_injob,
+     gen: gen_step1_opt.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl,
+                dim_common.py, stepconf.py, step.conf,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 2, name: step2_static, label: S2_static, check: outcar,
+     gen: gen_step2_static.py,
+     gen_need: [dim_common.py, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 3, name: step3_energy, label: S3_energy, check: plot, run: gen,
+     done_marker: energy_summary.json, gen: gen_step3_energy.py,
+     gen_need: [stepconf.py, step.conf], fetch_all: true}

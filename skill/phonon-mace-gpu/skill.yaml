@@ -1,0 +1,59 @@
+# =============================================================================
+# skill/phonon-mace-gpu/skill.yaml —— MACE 声子谱（仅 2 阶力常数，无 3 阶、无热导率），GPU 版
+#
+# 与 phonon-mace-cpu 完全相同的三步骨架，唯一差别是计算资源：
+#   S1_relax   MACE 弛豫（同 kl-mace-gpu），GPU 计算节点作业
+#   S2_force   随机位移（帧数由 ALM 2 阶自由力常数反推，振幅 0.01 Å）+ MACE 取力，GPU
+#   S3_phonon  symfc 拟合 fc2 → q-mesh 虚频闸 + band-dft-cpu.yaml → phonon_summary.json
+#
+# GPU 版跑 3090 GPU 服务器（8×RTX3090，无 SLURM，走 ~/fakeslurm 垫片）：
+# DEVICE=cuda、conda 环境 mace-gpu（CUDA 版 torch + mace-torch + phonopy + symfc）。
+# 提交模板在 setting/3090/templates/submit_mace_relax.tpl（--gres=gpu:1 + nvidia-smi/cuda 检查）。
+#
+# ⚠️ RTX3090 是消费级卡，FP64 吞吐只有 FP32 的 1/32~1/64；声子力常数要求 float64，
+#   所以 GPU 版**未必**比 CPU 版快（mace_model.py 会在日志里提醒）。先小规模测一次再选版本。
+#
+# 引擎：skill/phonon-mace-gpu/（gen_step2/3、mace_forces_phonon.py、phonon_fit_driver.py
+# 自包含，从 phonon-mace-cpu 拷来）+ _common/mace/（gen_step1_mace_relax.py / mace_model.py /
+# klmace_common.py / mace_relax.py / mc_rattle.py / submit_mace_relax.tpl 共用）。
+# =============================================================================
+schema: 1
+name: phonon-mace-gpu
+desc: 声子谱(MACE/GPU)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: "3090"
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, SPOSCAR, workflow_method.txt, relax_summary.json,
+              forces_summary.json, phonon_summary.json, band-dft-cpu.yaml, submit.sh,
+              mace_relax.log, mace_forces.log, phonon.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_mace_relax, label: S1_relax,
+     check: marker, marker: 'relax_summary.json:"converged": true',
+     gen: gen_step1_mace_relax.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_relax.py, submit_mace_relax.tpl]}
+
+  - {seq: 2, name: step2_disp_force, label: S2_force,
+     check: marker, marker: "forces_summary.json:FORCES_DONE",
+     gen: gen_step2_disp_phonon.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mc_rattle.py, mace_forces_phonon.py,
+                submit_mace_relax.tpl]}
+
+  - {seq: 3, name: step3_phonon, label: S3_phonon,
+     check: marker, marker: 'phonon_summary.json:"PHONON_DONE": true',
+     gen: gen_step3_phonon.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                phonon_fit_driver.py, submit_mace_relax.tpl]}
+
+requires:
+  python: [mace-torch, torch, ase, phonopy, symfc, spglib, numpy, alm]
+  # 实际 conda 环境按集群默认注入（setting/<hpc>.yaml 的 conda_env）。此处仅作展示。
+  conda: mace-gpu

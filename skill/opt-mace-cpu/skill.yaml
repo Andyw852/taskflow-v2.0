@@ -1,0 +1,55 @@
+# =============================================================================
+# skill/opt-mace-cpu/skill.yaml —— MACE 势结构优化 + 形成能（CPU 版）
+#
+# 与 opt-dft-cpu（VASP）同一套三步骨架，但力全由 MACE 势给出，没有 VASP/POTCAR/KPOINTS。
+#   S1_relax    MACE 弛豫（ASE + FrechetCellFilter + FixSymmetry），计算节点作业
+#   S2_static   MACE 静态单点：读 S1 的 CONTCAR 取总能 E_tot，计算节点作业
+#   S3_energy   形成能：E_form = E_tot - Σ n_i·μ_i（μ_i 填 step3 的 MU 参数），登录节点
+#
+# S1/S2 是 submit 模式（批量 138 个材料也能秒级提交、不阻塞登录节点）；
+# S3 是纯后处理（读 E_tot + 组分，算形成能），跑登录节点。
+# 引擎（mace_relax.py / mace_static.py / mace_model.py / klmace_common.py）
+# 在 skill/opt-mace-cpu/ 与 _common/mace/。
+#
+# CPU 版：DEVICE=cpu，跑 jzzn 的 cpu192 分区（venv mace_cpu）。
+# GPU 版见 skill/opt-mace-gpu/（同一套步骤，跑 3090 GPU 服务器）。
+# =============================================================================
+schema: 1
+name: opt-mace-cpu
+desc: 结构优化(MACE/CPU)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, workflow_method.txt, relax_summary.json,
+              static_summary.json, energy_summary.json, submit.sh,
+              mace_relax.log, mace_static.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_mace_relax, label: S1_relax,
+     check: marker, marker: 'relax_summary.json:"converged": true',
+     gen: gen_step1_mace_relax.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_relax.py, submit_mace_opt.tpl],
+     fetch_all: true}
+
+  - {seq: 2, name: step2_mace_static, label: S2_static,
+     check: marker, marker: 'static_summary.json:"STATIC_DONE": true',
+     gen: gen_step2_mace_static.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_static.py, submit_mace_opt.tpl],
+     fetch_all: true}
+
+  - {seq: 3, name: step3_formation, label: S3_energy, run: gen,
+     check: plot, done_marker: energy_summary.json,
+     gen: gen_step3_formation.py,
+     gen_need: [stepconf.py, step.conf], fetch_all: true}
+
+requires:
+  python: [mace-torch, torch, ase, numpy]
+  conda: mace_cpu

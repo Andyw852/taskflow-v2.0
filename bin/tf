@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""taskflow v2 入口脚本（等价于原 versions/v1.0/tf）。"""
+import os
+import sys
+
+# 让 bin/tf 直接运行（不经安装）时也能找到 tfpkg 包
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
+
+from tfpkg import main
+
+if __name__ == "__main__":
+    try:
+        main()
+        sys.stdout.flush()
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""gen_step5_fc.py —— 收力 → 拟合 fc2/fc3 → 声子谱 → 虚频闸（step5_fc）。
+
+run: gen —— 登录节点跑。流程：
+  1. 收 step4_disp/disp-*/vasprun.xml（按编号排序，findiff 严禁缺帧）
+  2. 若 step3_nac 有 vasprun → phonopy-vasp-born 生成 BORN（NAC）
+  3. 拟合力常数：findiff → phono3py --cf3 --sym-fc；alm → phono3py --cf3 --alm（压缩感知）
+  4. 声子谱：phono3py-load --band-dft-cpu auto [--nac] → band-dft-cpu.yaml，解析最小频率
+  5. 写 phonon_summary.json：无虚频 "stable": true —— 给 step6 的闸门（marker）
+产出目录：step5_fc/
+"""
+import glob
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import kl_common as kc
+import stepconf
+
+OUTDIR   = "step5_fc"
+STEP     = "step5_fc"
+DISP_DIR = "step4_disp"
+NAC_DIR  = "step3_nac"
+
+SPEC = {
+    "FUNC":        ("pbesol", "str"),  # 全局 step.conf 带入，本步不用
+    "BAND_POINTS": (51,   "int"),
+    "IMAG_THR":    (0.10, "float"),   # 虚频阈值(THz)
+    "FSYM_TOL":    (1e-3, "float"),   # alm 拟合对称容差（透传）
+}
+
+
+def collect_vaspruns(disp_dir):
+    subs = sorted(glob.glob(str(disp_dir / "disp-*")),
+                  key=lambda p: int(re.search(r"disp-(\d+)", p).group(1)))
+    files, missing = [], []
+    for d in subs:
+        num = re.search(r"disp-(\d+)", d).group(1)
+        vr = Path(d) / "vasprun.xml"
+        (files if vr.is_file() and vr.stat().st_size else missing).append(
+            ("../%s/disp-%s/vasprun.xml" % (DISP_DIR, num)) if vr.is_file()
+            and vr.stat().st_size else num)
+    return files, missing
+
+
+def parse_min_freq(band_yaml):
+    if not Path(band_yaml).is_file():
+        return None
+    fr = [float(m.group(1)) for ln in Path(band_yaml).read_text(errors="ignore").splitlines()
+          for m in [re.match(r"\s*frequency:\s*(-?[\d.Ee+]+)", ln)] if m]
+    return min(fr) if fr else None
+
+
+def make_born(cwd, out):
+    """有 step3_nac 的 vasprun 就用 phonopy-vasp-born 生成 BORN。返回是否成功。"""
+    vr = cwd / NAC_DIR / "vasprun.xml"
+    if not vr.is_file():
+        print("[..] 无 step3_nac 结果 → 不加 NAC")
+        return False
+    rc = kc.run_in_env("phonopy-vasp-born %s > BORN 2>born.log || true"
+                       % ("../%s/vasprun.xml" % NAC_DIR), out)
+    ok = (out / "BORN").is_file() and (out / "BORN").stat().st_size > 0
+    print("[%s] BORN（NAC）%s" % ("OK" if ok else "WARN",
+                                  "已生成" if ok else "生成失败，退回无 NAC"))
+    return ok
+
+
+def main():
+    cwd = Path.cwd()
+    out = cwd / OUTDIR
+    out.mkdir(exist_ok=True)
+    conf = stepconf.load(SPEC, STEP)
+    disp = cwd / DISP_DIR
+    if not (disp / "phono3py_disp.yaml").is_file():
+        sys.exit("[ERROR] %s 缺 phono3py_disp.yaml（step4 未生成位移）" % disp)
+    shutil.copyfile(disp / "phono3py_disp.yaml", out / "phono3py_disp.yaml")
+    for f in ("POSCAR", kc.KL_PARAMS, kc.METHOD_FILE):
+        if (disp / f).is_file():
+            shutil.copyfile(disp / f, out / f)
+
+    params = kc.read_kl_params(out / kc.KL_PARAMS)
+    method = (params.get("METHOD") or "findiff").lower()
+
+    files, missing = collect_vaspruns(disp)
+    if not files:
+        sys.exit("[ERROR] %s 下没有 disp-*/vasprun.xml，位移单点还没算完" % disp)
+    if missing and method == "findiff":
+        sys.exit("[ERROR] findiff 缺帧 %d 个（disp-%s）—— 有限位移不可跳帧，请 retry 补齐"
+                 % (len(missing), ",".join(missing)))
+    if missing:
+        print("[WARN] alm 方法缺 %d 帧，用现有 %d 帧拟合（随机位移可容缺，但越多越准）"
+              % (len(missing), len(files)))
+    print("[..] 收集 %d 个 vasprun.xml（方法=%s）" % (len(files), method))
+
+    log = "fc_build.log"
+    (out / log).write_text("", encoding="utf-8")
+    if kc.run_in_env("phono3py --cf3 %s" % " ".join(files), out, log) != 0 \
+            or not (out / "FORCES_FC3").is_file():
+        sys.exit("[ERROR] phono3py --cf3 收力失败，看 %s/%s" % (out, log))
+    fit = "--sym-fc" if method == "findiff" else "--alm"
+    if kc.run_in_env("phono3py %s" % fit, out, log) != 0:
+        sys.exit("[ERROR] phono3py %s 拟合力常数失败，看 %s/%s" % (fit, out, log))
+    for fc in ("fc2.hdf5", "fc3.hdf5"):
+        if not (out / fc).is_file():
+            sys.exit("[ERROR] 未生成 %s" % fc)
+
+    use_nac = make_born(cwd, out)
+    nac_flag = " --nac" if use_nac else ""
+    kc.run_in_env("phono3py-load phono3py_disp.yaml --band-dft-cpu auto --band-dft-cpu-points %d%s"
+                  % (conf["BAND_POINTS"], nac_flag), out, log)
+
+    mf = parse_min_freq(out / "band-dft-cpu.yaml")
+    if mf is None:
+        stable, note = True, "band-dft-cpu.yaml 未生成/解析失败，稳定性未验证，按稳定放行"
+        print("[WARN] " + note)
+    else:
+        stable = mf >= -conf["IMAG_THR"]
+        note = "最小声子频率 %.3f THz（阈值 -%.2f）：%s" % (
+            mf, conf["IMAG_THR"], "无明显虚频，稳定" if stable
+            else "存在虚频，动力学不稳定——热导率无物理意义")
+        print("[%s] %s" % ("OK" if stable else "FAIL", note))
+
+    (out / "phonon_summary.json").write_text(json.dumps(
+        {"stable": bool(stable), "min_frequency_THz": mf, "method": method,
+         "nac": use_nac, "n_force_sets": len(files), "note": note},
+        ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    print("[DONE] %s：fc2/fc3 + 声子谱就绪，stable=%s nac=%s"
+          % (OUTDIR, str(stable).lower(), use_nac))
+
+
+if __name__ == "__main__":
+    main()

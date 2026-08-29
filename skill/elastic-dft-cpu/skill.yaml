@@ -1,0 +1,40 @@
+# =============================================================================
+# skill/elastic-dft-cpu/skill.yaml —— 弹性常数技能清单（schema 1）
+#   S1_opt      标准结构优化
+#   S2_elastic  IBRION=6 有限形变（应力-应变 → Cij）
+#   S3_post     本地后处理（不提交 SLURM）：Cij 解析、Born 判据、2D→N/m、各向异性图
+# =============================================================================
+schema: 1
+name: elastic-dft-cpu
+desc: 弹性常数(DFT/CPU)
+version: "1.2"
+checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob）
+
+# 模板布局：per_step = 每个步骤一个目录，只放该步骤要的模板
+#   skill/elastic-dft-cpu/templates/step1_std_opt/{incar_2d,incar_3d,submit_jzzn_vaspstd_*}.tpl
+#   skill/elastic-dft-cpu/templates/step2_elastic/{submit_jzzn_vaspstd_*}.tpl
+# 步骤目录里没有的文件会回落到 templates/ 根，再回落到技能根目录。
+template_layout: per_step
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true       # 新技能没有历史目录，直接按技能建子目录
+
+# 全程 vasp_std：每个步骤都显式声明 gen_need，完全替代类型级清单，
+# 也跳过 template_map 自动补推，因此不需要 ncl 占位模板。
+steps:
+  - {seq: 1, name: step1_std_opt, label: S1_opt, check: relax_injob,
+     gen: gen_step1_std_opt.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf, check_common.py, step1_check_and_resubmit.py,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+  - {seq: 2, name: step2_elastic, label: S2_elastic, check: marker,
+     marker: "OUTCAR:TOTAL ELASTIC MODULI", gen: gen_step2_elastic.py,
+     gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step2_check_and_resubmit.py,
+                submit_std_2d.tpl, submit_std_3d.tpl]}
+  - {seq: 3, name: step3_postprocess, label: S3_post, check: plot, run: gen,
+     gen: gen_step3_postprocess.py, gen_need: [],
+     done_marker: mechanical_properties.json, fetch_all: true}
+
+# S3_post 在登录节点跑，需要 numpy / matplotlib / pymatgen
+requires:
+  python: [numpy, matplotlib, pymatgen]

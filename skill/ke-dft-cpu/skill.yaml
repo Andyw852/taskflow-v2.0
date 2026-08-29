@@ -1,0 +1,188 @@
+# patch_ke_dag：needs 是显式依赖，DAG 调度用；没写 needs 的步骤回退为"上一步"。
+# =============================================================================
+# skill/ke-dft-cpu/skill.yaml —— 电子热导率（AMSET）
+#
+# 【源目录：分组结构】大步骤是文件夹，里面套小步骤文件夹（v1.5 src 字段）：
+#   skill/ke-dft-cpu/
+#   ├── step1_opt/                       结构优化（复用 elastic-dft-cpu）
+#   ├── step2_bandgap/                   带隙大步骤（源目录名 = 计算目录名）
+#   │   ├── step2.1_static/
+#   │   ├── step2.2_pbe/                 PBE 能带（WAVECAR）
+#   │   ├── step2.2_pbe_plot/            PBE 画图 → band_summary.json
+#   │   ├── step2.3_hse/                 HSE 能带（BANDGAP=hse 时）
+#   │   └── step2.3_hse_plot/            HSE 画图 → band_summary.json
+#   ├── step3_uniform/                   密网格自洽（新）
+#   ├── step4_wave/                      amset wave（新）
+#   ├── step5_dielect/                   DFPT 介电（新）
+#   ├── step6_elastic/                   弹性常数（复用 elastic-dft-cpu）
+#   ├── step7_deform/                    形变势大步骤（本身即 step7 计算源）
+#   │   └── step7b_read/                 step7.1 读取
+#   └── step8_amset/                     amset run（新）
+#
+# 【计算目录】现已与 src/seq 对齐：seq N 的步骤，计算目录、源目录、label 同号。
+#   bandgap 段计算目录为嵌套 step2_bandgap/step2.x_*；其余为平的 stepN_*。
+#   step1 兼容旧名：新目录 step1_opt，仍能识别历史 step1_std_opt（双名兜底）。
+#
+# k 网格一律 VASPKIT（1→102→Γ心→kspacing），2D 用 force_kz1 压真空方向为 1。
+# 每个 gen 脚本开头都有可改参数区（ENCUT/ISMEAR/KSPACING/KPAR/NCORE…）。
+# =============================================================================
+schema: 1
+name: ke-dft-cpu
+desc: 电子热导率(DFT/CPU)
+version: "0.1"
+checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob）
+
+template_layout: per_step
+template_dir: "."
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+fetch_files: [INCAR, POSCAR, CONTCAR, POTCAR, KPOINTS, KPOINTS_OPT, kpath.json,
+              submit.sh, OUTCAR, EIGENVAL, vasprun.xml, queue.out, queue.err,
+              workflow_method.txt, band_summary.json, settings.yaml,
+              deformation.h5, transport.json, amset.log]
+
+steps:
+  - {seq: 1, name: step1_opt, label: S1_opt, src: step1_opt,
+     check: relax_injob, gen: gen_step1_std_opt.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf, check_common.py, step1_check_and_resubmit.py,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 3, name: step3_uniform, label: S3_uniform, src: step3_uniform,
+     check: wavecar, gen: gen_step5_uniform.py,
+     gen_need: [stepconf.py, step.conf, ke_common.py, dim_common.py, check_common.py,
+                incar_uniform_2d.tpl, incar_uniform_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl],
+     needs: ["step1_opt"]}
+
+  - {seq: 4, name: step4_wave, label: S4_wave, src: step4_wave,
+     check: marker, marker: "wavefunction.h5:", gen: gen_step6_wave.py,
+     gen_need: [stepconf.py, step.conf, submit_amset.tpl],
+     needs: ["step3_uniform"]}
+
+  - {seq: 5, name: step5_dielect, label: S5_dielect, src: step5_dielect,
+     check: marker, marker: "OUTCAR:MACROSCOPIC STATIC DIELECTRIC TENSOR",
+     gen: gen_step8_dielect.py,
+     gen_need: [stepconf.py, step.conf, ke_common.py, dim_common.py, check_common.py,
+                incar_dfpt_2d.tpl, incar_dfpt_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl],
+     needs: ["step1_opt"]}
+
+  - {seq: 6, name: step6_elastic, label: S6_elastic, src: step6_elastic,
+     check: marker, marker: "OUTCAR:TOTAL ELASTIC MODULI",
+     gen: gen_step2_elastic.py,
+     gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step2_check_and_resubmit.py,
+                submit_std_2d.tpl, submit_std_3d.tpl],
+     needs: ["step1_opt"]}
+
+  - {seq: 7, name: step7_deform, label: S7_deform, src: step7_deform,
+     check: outcar, fanout: "*deform*", gen: gen_step9_deform.py,
+     gen_need: [stepconf.py, step.conf, ke_common.py, dim_common.py, incar_deform_2d.tpl, incar_deform_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl],
+     needs: ["step1_opt"]}
+
+  - {seq: 7.1, name: step7b_deform_read, label: S7.1_read, src: step7_deform/step7b_read,
+     check: plot, run: gen, done_marker: deformation.h5,
+     gen: gen_step9b_deform_read.py, gen_need: [], fetch_all: true,
+     needs: ["step7_deform"]}
+
+  - {seq: 8, name: step8_amset, label: S8_kappa, src: step8_amset,
+     check: marker, marker: "transport.json:thermal_conductivity",
+     gen: gen_step10_amset.py, gen_need: [stepconf.py, step.conf, submit_amset.tpl, vdw_radii.py], fetch_all: true,
+     needs: ["step4_wave", "step5_dielect", "step6_elastic", "step7b_deform_read", "step2_bandgap/step2.2_pbe_plot", "step2_bandgap/step2.3_hse_plot"]}
+
+# --- 2 带隙段：子步嵌套进 step2_bandgap/，状态表合并成 S2_bandgap 一列 ---------
+# 泛函 pbe/pbesol 由 step1 弛豫继承。两条分支各自带画图，由 step.conf 的
+# BANDGAP 参数选择走到哪：
+#   BANDGAP = pbe   只算 PBE 带隙：2.1 static → 2.2 pbe → 2.2 pbe_plot，收工
+#   BANDGAP = hse   继续 HSE 带隙：… → 2.3 hse → 2.3 hse_plot（默认）
+# 两条分支的画图步都产出 band_summary.json（PBE 用 gen_step3.1，HSE 用 gen_step4.1）。
+# 开关落地：驱动在装配任务配置时把 BANDGAP 映射成下面 bandgap_hse 组的开/关
+# （见 tf 的 resolve_stepconf_flags）；也可在项目配置里直接写 bandgap_hse: false。
+# group: S2_bandgap 让子步在状态表合并为一列，第二行显示走到哪步。
+#   bandgap_steps : 关掉 = 完全不算带隙（手填 setting.yaml 的 bandgap）
+# 计算目录名：step2_bandgap/{step2.1_static, step2.2_pbe, step2.2_pbe_plot,
+#                            step2.3_hse, step2.3_hse_plot}
+optional_steps:
+  bandgap_steps:
+    default: true
+    steps:
+      - {seq: 2.1, name: "step2_bandgap/step2.1_static", label: S2.1_scf,
+         group: S2_bandgap, after: step1_opt,
+         src: step2_bandgap/step2.1_static, check: outcar, gen: gen_step2_static.py,
+         gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step2_check_and_resubmit.py,
+                    incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl],
+     needs: ["step1_opt"]}
+      - {seq: 2.2, name: "step2_bandgap/step2.2_pbe", label: S2.2_pbe,
+         group: S2_bandgap, after: "step2_bandgap/step2.1_static",
+         src: step2_bandgap/step2.2_pbe, check: wavecar, gen: gen_step3_WAVECAR.py,
+         gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step3_check_and_resubmit.py,
+                    incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl,
+                    submit_ncl_2d.tpl, submit_ncl_3d.tpl],
+     needs: ["step2_bandgap/step2.1_static"]}
+      - {seq: 2.25, name: "step2_bandgap/step2.2_pbe_plot", label: S2.2_pbeplot,
+         group: S2_bandgap, after: "step2_bandgap/step2.2_pbe",
+         src: step2_bandgap/step2.2_pbe_plot, check: plot, run: gen,
+         done_marker: band_summary.json, gen: "gen_step3.1_plot_band.py",
+         gen_need: [], fetch_all: true,
+     needs: ["step2_bandgap/step2.2_pbe"]}
+  # HSE 分支单独一组：默认开=走到 HSE 带隙；BANDGAP=pbe（或 bandgap_hse: false）
+  # 则整段跳过，只留 PBE 带隙。2.3 hse 从 2.2_pbe 继承，2.3_hse_plot 画 HSE 能带。
+  bandgap_hse:
+    default: true
+    steps:
+      - {seq: 2.3, name: "step2_bandgap/step2.3_hse", label: S2.3_hse,
+         group: S2_bandgap, after: "step2_bandgap/step2.2_pbe",
+         src: step2_bandgap/step2.3_hse, check: outcar, gen: gen_step4_HSE.py,
+         gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step4_check_and_resubmit.py,
+                    incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl,
+                    submit_ncl_2d.tpl, submit_ncl_3d.tpl],
+     needs: ["step2_bandgap/step2.2_pbe"]}
+      - {seq: 2.35, name: "step2_bandgap/step2.3_hse_plot", label: S2.3_hseplot,
+         group: S2_bandgap, after: "step2_bandgap/step2.3_hse",
+         src: step2_bandgap/step2.3_hse_plot, check: plot, run: gen,
+         done_marker: band_summary.json, gen: "gen_step4.1_plot_band.py",
+         gen_need: [], fetch_all: true,
+     needs: ["step2_bandgap/step2.3_hse"]}
+
+# --- 8.2 DPT 形变势迁移率：给 8.1 提供分方向 τ，必须排在 8.1 前面 ---
+  dpt:
+    default: true
+    steps:
+      - {seq: 8.2, name: "step8.2_dpt", label: S8.2_dpt,
+         after: step8,
+         src: step8.2_dpt, check: plot, run: gen,
+         done_marker: dpt_result.json,
+         gen: gen_step12_dpt.py, gen_need: [], fetch_all: true,
+         needs: ["step3_uniform", "step6_elastic", "step7b_deform_read"]}
+
+  # --- 8.1 BoltzTraP2 CRTA × DPT-τ：文献口径的完整实现 ---
+  #   after 用 step8 前缀（匹配最后一个 step8*），这样 dpt 组关掉时
+  #   本步自动挂回 step8_amset，不会因为锚点消失而静默不注入。
+  boltztrap_crta:
+    default: true
+    steps:
+      - {seq: 8.1, name: "step8.1_boltztrap", label: S8.1_bt2,
+         after: step8,
+         src: step8.1_boltztrap, check: plot, run: gen,
+         done_marker: boltztrap_crta.json,
+         gen: gen_step11_boltztrap.py, gen_need: [], fetch_all: true,
+         needs: ["step3_uniform", "step6_elastic", "step7b_deform_read",
+                 "step8.2_dpt"]}
+
+  output_compare:
+    default: true
+    steps:
+      - {seq: 8.3, name: "step8.3_output", label: S8.3_cmp,
+         after: step8,
+         src: step8.3_output, check: plot, run: gen,
+         done_marker: comparison_300K.png,
+         gen: gen_step13_output.py, gen_need: [], fetch_all: true,
+         needs: ["step8_amset", "step8.1_boltztrap", "step8.2_dpt"]}
+
+requires:
+  python: [pymatgen, numpy, matplotlib, amset, BoltzTraP2]
+  conda: amset_clean
+  exe: [vasp_std, vaspkit]

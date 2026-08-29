@@ -1,0 +1,58 @@
+# ---- 配置 / 密钥（本地专属，不进仓库）----
+setting/
+setting/.tf_watch.log
+
+# ---- Python 缓存 ----
+__pycache__/
+*.pyc
+
+# ---- 虚拟环境 / 本地依赖 ----
+mace_local_venv/
+.pheasy_test_venv/
+*_venv/
+
+# ---- 运行时产物 / 测试输出（tf 生成，不进仓库）----
+tf_test/**/result/
+tf_test/**/log/
+test/tf_test/
+test/_si_backup/
+test/sandbox/
+test/unihamgnn/
+.tf_fetched
+.tf_monitor.out
+.tf_monitor.log
+queue.out
+queue.err
+submit.sh
+
+# ---- 备份 / 补丁 / 日志 ----
+*.bak
+*.bak_*
+*.bak-*
+*.bak.*
+*.log
+.patch_trash/
+fix_*.patch
+fix_*.py
+*_unify.patch
+apply_fixes.py
+taskflow_bandgap_unify.patch
+
+# ---- MACE 模型文件（体积大，用 skill/*/templates/mace/push_model.sh 单独推集群）----
+*.model
+
+# ---- 本地临时目录 ----
+.fix_bak/
+work/
+tmp_mace_mu/
+
+# ---- 软著文档 / 输出数据（本地保留，不进仓库）----
+rz/
+mg_formation_energy_ranking.tsv
+
+# ---- 运行时输出 / 临时产物（本地保留，不进仓库）----
+output/
+tmp/
+
+# ---- 系统 / 其它 ----
+.DS_Store

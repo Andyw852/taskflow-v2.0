@@ -1,0 +1,53 @@
+# =============================================================================
+# skill/opt-mace-gpu/skill.yaml —— MACE 势结构优化 + 形成能（GPU 版）
+#
+# 与 opt-mace-cpu 完全相同的三步骨架，唯一差别是计算资源：
+#   S1_relax    MACE 弛豫（ASE + FrechetCellFilter + FixSymmetry），GPU 计算节点作业
+#   S2_static   MACE 静态单点：读 S1 的 CONTCAR 取总能 E_tot，GPU 计算节点作业
+#   S3_energy   形成能：E_form = E_tot - Σ n_i·μ_i（μ_i 填 step3 的 MU 参数），登录节点
+#
+# GPU 版跑 3090 GPU 服务器（8×RTX3090，无 SLURM，走 ~/fakeslurm 垫片）：
+# DEVICE=cuda、conda 环境 mace-gpu（CUDA 版 torch + mace-torch）。
+# 提交模板在 setting/3090/templates/submit_mace_opt.tpl（--gres=gpu:1 + nvidia-smi/cuda 检查）。
+# 引擎与 opt-mace-cpu 共用：gen 脚本/ mace_static.py 在本目录，mace_relax.py /
+# mace_model.py / klmace_common.py 在 _common/mace/。
+# =============================================================================
+schema: 1
+name: opt-mace-gpu
+desc: 结构优化(MACE/GPU)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: "3090"
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, workflow_method.txt, relax_summary.json,
+              static_summary.json, energy_summary.json, submit.sh,
+              mace_relax.log, mace_static.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_mace_relax, label: S1_relax,
+     check: marker, marker: 'relax_summary.json:"converged": true',
+     gen: gen_step1_mace_relax.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_relax.py, submit_mace_opt.tpl],
+     fetch_all: true}
+
+  - {seq: 2, name: step2_mace_static, label: S2_static,
+     check: marker, marker: 'static_summary.json:"STATIC_DONE": true',
+     gen: gen_step2_mace_static.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_static.py, submit_mace_opt.tpl],
+     fetch_all: true}
+
+  - {seq: 3, name: step3_formation, label: S3_energy, run: gen,
+     check: plot, done_marker: energy_summary.json,
+     gen: gen_step3_formation.py,
+     gen_need: [stepconf.py, step.conf], fetch_all: true}
+
+requires:
+  python: [mace-torch, torch, ase, numpy]
+  conda: mace-gpu

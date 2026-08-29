@@ -1,0 +1,101 @@
+# =============================================================================
+# skill/kl-dft-cpu/skill.yaml —— 晶格热导率（有限位移/随机位移 + BTE），schema 1
+#
+# 物理链（对齐 lattice_kappa.py 参考引擎，拆成 tf 异步分步）：
+#   S1_opt      结构优化（复用 band-dft-cpu/elastic-dft-cpu/ke-dft-cpu 同一 gen_step1_std_opt.py，一字不差）
+#   S2_static   原胞静态自洽：出带隙判金属、作声子参考胞
+#   S3_nac      NAC 介电/Born（LEPSILON DFPT）→ BORN 文件；金属/关 NAC 自动跳过（可选步）
+#   S4_disp     超胞 + 位移生成，扇出：
+#                 method=findiff → phono3py 对称有限位移（不需 ALM）
+#                 method=alm     → 随机位移，位移数由 ALM 自由力常数个数 × oversample 决定
+#               每个位移一个 disp-* 子目录，各自单点取力
+#   S5_fc       提交计算节点：收力 → 拟合 fc2/fc3 → 双格式导出 → 虚频做闸（FAIL 则 S6 不启动）
+#               拟合器 FIT_ENGINE=phono3py(symfc/alm，默认) | pheasy(随机位移压缩感知，需 alm)
+#               产出 step5_fc/phono3py/（fc2/fc3.hdf5）与 step5_fc/shengbte/（FORCE_CONSTANTS_2ND/3RD）
+#   S6_kappa    提交计算节点跑 BTE：SOLVER=phono3py(rta/lbte) | shengbte → 晶格热导率
+#
+# 参数全部走 step.conf（stepconf.py 解析，三层合并：技能默认 → 技能本步默认 →
+# 项目共用 → 项目本步）。改参数：tf -tt kl-dft-cpu -p <材料> -j <步骤> conf --set params.KEY=值
+# 模板 per_step：templates/<步骤名>/{incar_*,submit_*}.tpl，缺则回落 templates/ 根。
+# 2D 全程把真空方向压 1（超胞倍数、K 网格、BTE 网格）。
+# =============================================================================
+schema: 1
+name: kl-dft-cpu
+desc: 晶格热导率(DFT/CPU)
+version: "0.2"
+checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob）
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+# 各步关键输入/输出拉回本地；扇出 S4 只拉汇总，S5/S6 用 fetch_all 整目录拉回。
+fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, POTCAR, submit.sh, OUTCAR,
+              vasprun.xml, workflow_method.txt, kl_params.txt, BORN,
+              phono3py_disp.yaml, fc2.hdf5, fc3.hdf5, band-dft-cpu.yaml,
+              phonon_summary.json, kappa_summary.json,
+              phono3py_kappa.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_std_opt, label: S1_opt, check: relax_injob,
+     gen: gen_step1_std_opt.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf,
+                check_common.py, step1_check_and_resubmit.py,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 2, name: step2_static, label: S2_static, check: outcar,
+     gen: gen_step2_static.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py,
+                check_common.py, step2_check_and_resubmit.py,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 4, name: step4_disp, label: S4_disp, check: outcar, fanout: "disp-*",
+     gen: gen_step4_disp.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py, lattice_kappa.py,
+                check_common.py, step2_check_and_resubmit.py,
+                incar_force_2d.tpl, incar_force_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  # S5_fc 现为【提交计算节点】作业（去掉 run: gen）：gen 只写 submit.sh + fit_config.json，
+  #   拟合/导出/虚频闸在作业里由 kl_fc_backends.py 执行。marker 仍是 phonon_summary.json。
+  - {seq: 5, name: step5_fc, label: S5_fc, check: phonon,
+     gen: gen_step5_fc.py, fetch_all: true,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py, lattice_kappa.py,
+                kl_fc_backends.py, submit_fit_p3py.tpl, submit_fit_pheasy.tpl]}
+
+  - {seq: 6, name: step6_kappa, needs: [step5_fc], label: S6_kappa, check: marker,
+     marker: 'kappa_summary.json:"KAPPA_DONE": true',
+     gen: gen_step6_kappa.py, fetch_all: true,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py, lattice_kappa.py,
+                submit_p3py.tpl, submit_shengbte.tpl, vdw_radii.py]}
+
+# NAC 为可选步组：极性绝缘体默认开（LO-TO 劈裂需要）。
+#   关闭：项目配置写 nac: false —— tf 直接不注入 step3_nac，S5/S6 因无 BORN 自然无 NAC。
+#   金属：step2 判金属后会打印提示，请手动置 nac: false（金属无 LO-TO 劈裂，DFPT 介电发散）。
+optional_steps:
+  nac:
+    default: true
+    steps:
+      - {seq: 3, name: step3_nac, label: S3_nac, after: step2_static,
+         check: marker, marker: "OUTCAR:MACROSCOPIC STATIC DIELECTRIC TENSOR",
+         gen: gen_step3_nac.py,
+         gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py,
+                    check_common.py, step2_check_and_resubmit.py,
+                    incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  # S5.1 声子谱绘图（登录节点 run: gen，不提交作业）：读 step5_fc/phono3py/fc2.hdf5 画谱。
+  #   有 BORN → band_nac.* + band_nonac.* 两张；无 BORN → 只 band_nonac.*。
+  phonon_plot:
+    default: true
+    steps:
+      - {seq: 5.1, name: step5_phonon_plot, label: S5.1_plot, after: step5_fc,
+         gen: "gen_step5.1_plot_phonon.py", check: plot, run: gen, gen_need: [],
+         done_marker: phonon_plot_summary.json, fetch_all: true}
+
+requires:
+  python: [phonopy, phono3py, numpy, spglib]
+  conda: atomate2_p_a
+  exe: [vasp_std, vaspkit, phono3py]

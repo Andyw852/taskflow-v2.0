@@ -1,0 +1,74 @@
+# =============================================================================
+# skill/kl-mace-gpu/skill.yaml —— 晶格热导率（MACE 机器学习势 + BTE），GPU 版
+#
+# 与 kl-dft-cpu（VASP 有限位移）同一物理链，但力全部由 MACE 势给出：没有 VASP、没有
+# POTCAR/KPOINTS/ENCUT、没有扇出（N 个位移在一个作业里循环算完）。
+#
+#   S1_relax   MACE 弛豫原胞（ASE + FrechetCellFilter + FixSymmetry），登录节点
+#   S2_force   phono3py -d 生成位移（登录节点）→ **GPU 上一个作业算完全部位移力**
+#   S3_fc      拟合 fc2/fc3 → 声子谱 → 虚频闸（登录节点）
+#   S4_kappa   phono3py BTE → 晶格热导率（phono3py 无 GPU 路径，两版都跑 CPU 队列）
+#
+# ⚠️ 本技能目录**只有清单和模板**。gen_*.py 和引擎（mace_forces.py 等）在公共池
+# skill/_common/mace/ 里，GPU/CPU 两版共用一份——这就是拆成两个技能的成本控制点：
+# 差异全在 templates/ 里（队列、DEVICE、超胞默认值），代码零重复。
+# 想让某一版自包含：把 _common/mace/*.py 拷进本目录即可（技能目录优先于公共池）。
+#
+# 参数走 step.conf（stepconf.py 三层合并）：
+#   tf -tt kl-mace-gpu -p <材料> -j <步骤> conf --set params.MACE_MODEL=xxx.model
+# 2D 全程把真空方向压 1（超胞倍数、BTE 网格），胞优化时锁死真空方向。
+# =============================================================================
+schema: 1
+name: kl-mace-gpu
+desc: 晶格热导率(MACE/GPU)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+# 只拉小文件。fc2/fc3.hdf5、kappa-m*.hdf5 动辄上 GB，留在超算。
+fetch_files: [POSCAR, CONTCAR, workflow_method.txt, klmace_params.txt,
+              relax_summary.json, forces_summary.json, phonon_summary.json,
+              kappa_summary.json, band-dft-cpu.yaml, BORN, phono3py_disp.yaml,
+              phono3py_params.yaml, FORCES_FC3, FORCES_FC2,
+              submit.sh, mace_relax.log, mace_forces.log, fc_build.log,
+              phono3py_kappa.log, queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_mace_relax, label: S1_relax,
+     check: marker, marker: 'relax_summary.json:"converged": true',
+     gen: gen_step1_mace_relax.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_relax.py, submit_mace_relax.tpl]}
+
+  - {seq: 2, name: step2_disp_force, label: S2_force,
+     check: marker, marker: "forces_summary.json:FORCES_DONE",
+     gen: gen_step2_disp_force.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                mace_model.py, mace_forces.py, mc_rattle.py, mc_rattle_disp.py,
+                submit_mace.tpl]}
+
+  - {seq: 3, name: step3_fc, label: S3_fc,
+     check: phonon,
+     hpc: jzzn,
+     gen: gen_step3_fc.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                fc_fit_driver.py, submit_fc.tpl]}
+
+  - {seq: 4, name: step4_kappa, label: S4_kappa,
+     check: marker, marker: 'kappa_summary.json:"KAPPA_DONE": true',
+     hpc: jzzn,
+     gen: gen_step4_kappa.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                submit_p3py.tpl]}
+
+requires:
+  python: [mace-torch, torch, ase, phonopy, phono3py, symfc, pheasy, spglib, numpy, h5py]
+  # 实际 conda 环境按集群默认注入（setting/<hpc>.yaml 的 conda_env：jzzn=mace_cpu venv、
+  # 3090=mace-gpu、a800=mace）。此处 conda 字段仅作展示。
+  conda: mace
+  exe: [phono3py]

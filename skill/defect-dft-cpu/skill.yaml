@@ -1,0 +1,39 @@
+# =============================================================================
+# skill/defect-dft-cpu/skill.yaml —— 缺陷形成能 + P/N 型技能（schema 1）
+# 流程（修正版方法论，见 README.md）：
+#   S0_refs   凸包参考相(5 元素相 + 4 二元相) PBE-D3+SOC 弛豫 [run:gen, 4 材料共享]
+#   S1_bulk   完美超胞(3x3x1) PBE-D3+SOC 弛豫 + LOCPOT（静电势参考）[与 S0 并行]
+#   S2_def    本征缺陷枚举(空位/反位/互占位对/间隙) 中性弛豫  [fanout]
+#   S3_chg    各缺陷带电态单点(NELECT±q, LVHAR)          [fanout]
+#   S4_anlys  凸包出化学势 -> 形成能/转变能级/P-N（run:gen，登录节点）
+# =============================================================================
+schema: 1
+name: defect-dft-cpu
+desc: 缺陷形成能(DFT/CPU)
+version: "0.1"
+template_layout: shared
+
+defaults:
+  hpc: jzzn            # jzzn：VASP 6.4.3 + POTCAR 库 + 192 核节点（HSE 必须）
+                       # 3090：仅 CPU VASP(vasp_normal,24核) 且未找到 POTCAR 库
+                       #       —— 若已补 POTCAR 且只跑 PBE 批，可用 tf -p MAT hpc 3090
+  skill_subdir: true
+
+# 提交模板逻辑名由 tf 从 setting/<hpc>/templates/ 推到材料目录
+gen_need: [defects_common.py, gen_references.py, formation_energy.py, convex_hull.py,
+           extract_band_refs.py, step.conf, incar_defect.tpl,
+           submit_std_3d.tpl, submit_ncl_3d.tpl]
+aux_files: []
+
+steps:
+  - {seq: 0, name: step0_references, label: S0_refs, check: plot, run: gen,
+     gen: gen_step0_references.py, done_marker: references_energy.json}
+  - {seq: 1, name: step1_bulk, label: S1_bulk, check: outcar,
+     gen: gen_step1_bulk.py, needs: []}
+  - {seq: 2, name: step2_defects, label: S2_def, check: outcar,
+     gen: gen_step2_defects.py, fanout: "def-*", contcar_to_poscar: true}
+  - {seq: 3, name: step3_charged, label: S3_chg, check: outcar,
+     gen: gen_step3_charged.py, fanout: "def-*"}
+  - {seq: 4, name: step4_analysis, label: S4_anlys, check: plot, run: gen,
+     gen: gen_step4_analysis.py, needs: [step0_references, step3_charged],
+     done_marker: formation_energy_summary.json, fetch_all: true}

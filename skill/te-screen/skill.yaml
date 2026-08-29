@@ -1,0 +1,45 @@
+# =============================================================================
+# skill/te-screen/skill.yaml —— 热电快速替代筛选(易算特征 -> ZT_e/PF 预测)
+#
+# 目的：对"全新生成的候选结构"在【不跑任何 DFT】的前提下，用训练好的 Ridge
+# 替代模型把 14 个易算特征(组成 magpie + 晶格几何)映射成 n/p 型 ZT_e 与 log10(PF)，
+# 作为多智能体闭环里"生成 -> 快速验证 -> 反馈"的 T0 层评分器。
+#
+# 两步都是 run: gen(登录节点秒级，不提交 SLURM、不占 GPU)：
+#   S1_features  读材料目录 POSCAR -> 计算 14 维易算特征 -> step1_features/te_features.json
+#   S2_predict   读 S1 特征 -> Ridge 预测 -> step2_predict/te_screen_summary.json
+#
+# 特征与模型与 matexplore/scripts/train_surrogate.py 同源，训练数据为 JARVIS dft_2d
+# (1103 二维材料)。模型只依赖 numpy + 元素属性表，跨机器可复现。
+# 深层验证(T1 MACE 弛豫 / T2 DFT 电子输运)由 opt-mace-gpu / band-dft-cpu /
+# ke-dft-cpu 承接；晶格热导率(kl-*)本轮跳过。
+# =============================================================================
+schema: 1
+name: te-screen
+desc: 热电快速筛选(替代模型)
+version: "0.1"
+
+template_layout: shared
+
+defaults:
+  hpc: "3090"
+  skill_subdir: true
+
+fetch_files: [te_features.json, te_screen_summary.json]
+
+steps:
+  - {seq: 1, name: step1_features, label: S1_feat, check: marker,
+     marker: 'te_features.json:"n_sites"', run: gen,
+     gen: gen_step1_features.py,
+     gen_need: [cheap_features.py, element_properties.json]}
+
+  - {seq: 2, name: step2_predict, label: S2_pred, check: marker,
+     marker: 'te_screen_summary.json:"PREDICTED"', run: gen,
+     gen: gen_step2_predict.py,
+     gen_need: [cheap_features.py, n_ZT_e.json, p_ZT_e.json,
+                n_log10_PF.json, p_log10_PF.json],
+     needs: [step1_features]}
+
+requires:
+  python: [numpy]
+

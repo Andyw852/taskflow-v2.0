@@ -1,0 +1,53 @@
+# =============================================================================
+# skill/unihamgnn/skill.yaml —— Uni-HamGNN 通用 SOC 哈密顿量模型能带技能
+#
+# Uni-HamGNN（HamGNN 通用模型）预测电子哈密顿量矩阵，再由 band_cal 对角化得到能带。
+# 三步流水线：
+#   S1_graph    POSCAR -> OpenMX .dat -> openmx_postprocess -> graph_data.npz
+#               （non-SOC，SOC=true 时再加 SOC 一份），计算节点 MPI 作业
+#   S2_predict  通用模型预测哈密顿量 -> hamiltonian.npy，计算节点单进程 torch 作业
+#   S3_band     band_cal 对角化 -> 能带图 + 带隙，登录节点后处理
+#
+# 引擎/接口（HamGNN 仓库 + OpenMX + 通用模型 .pkl）是外部依赖，路径走 step.conf。
+# =============================================================================
+schema: 1
+name: unihamgnn
+desc: 能带(Uni-HamGNN)
+version: "0.1"
+
+template_layout: shared
+
+defaults:
+  hpc: "3090"          # Uni-HamGNN 目前部署在 3090 服务器（纯 CPU 跑）
+  skill_subdir: true
+
+fetch_files: [POSCAR, workflow_method.txt, graph_data_summary.json,
+              predict_summary.json, band_summary.json, submit.sh,
+              queue.out, queue.err, band_cal.log]
+
+steps:
+  - {seq: 1, name: step1_graph_data, label: S1_graph,
+     check: marker, marker: 'graph_data_summary.json:"GRAPH_DATA_DONE": true',
+     gen: gen_step1_graph_data.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, unihamgnn_common.py,
+                poscar2openmx.tpl, poscar2openmx_soc.tpl, graph_data_gen.tpl,
+                write_step1_summary.py, submit_hamgnn_mpi.tpl],
+     fetch_all: true}
+
+  - {seq: 2, name: step2_predict, label: S2_predict,
+     check: marker, marker: 'predict_summary.json:"PREDICT_DONE": true',
+     gen: gen_step2_predict.py,
+     gen_need: [stepconf.py, step.conf, unihamgnn_common.py,
+                input_predict.tpl, write_step2_summary.py, submit_hamgnn.tpl],
+     fetch_all: true}
+
+  - {seq: 3, name: step3_band, label: S3_band, run: gen,
+     check: plot, done_marker: band_summary.json,
+     gen: gen_step3_band.py,
+     gen_need: [stepconf.py, step.conf, unihamgnn_common.py, band_cal.tpl],
+     fetch_all: true}
+
+requires:
+  python: [torch, torch-geometric, e3nn, pymatgen, numpy, scipy, matplotlib, yaml, natsort]
+  conda: hamgnn
+  exe: [poscar2openmx, graph_data_gen, band_cal, openmx_postprocess, read_openmx]

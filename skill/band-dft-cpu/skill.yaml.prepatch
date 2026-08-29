@@ -1,0 +1,77 @@
+# =============================================================================
+# skill/band-dft-cpu/skill.yaml —— 能带技能自描述清单（schema 1）
+# 放进技能目录即被 tf 自动发现，全局 tf.yaml 里不用再抄 steps。
+# 覆盖优先级：本文件 < 全局 tf.yaml 的 task_types.band-dft-cpu < 项目 tf_<项目>.yaml
+# =============================================================================
+schema: 1
+name: band-dft-cpu
+desc: 能带计算
+version: "1.3"
+checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob）
+
+# 模板布局：shared = 所有步骤共用 templates/ 下同一套模板
+#   skill/band-dft-cpu/templates/{incar_2d,incar_3d,submit_jzzn_*}.tpl
+# 另一种是 per_step（见 skill/elastic-dft-cpu/skill.yaml）。不写 = shared。
+template_layout: shared
+# template_dir: templates      # 目录名，缺省 templates
+
+# ---- 站点无关的缺省值（用户在 tf.yaml 里覆盖 hpc / work_dir 即可）----------
+defaults:
+  hpc: jzzn
+  skill_subdir: true       # band-dft-cpu 已全量迁移到 材料/band-dft-cpu/ 子目录
+
+# gen 时推到材料目录的依赖（本目录内的文件；已存在不覆盖）
+# step.conf 不是普通文件：tf 会把 skill 出厂默认 + 项目 templates/ +
+# 项目 templates/<步骤名>/ 三层合并成一份带来源注释的文件再推送。
+gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf,
+           incar_2d.tpl, incar_3d.tpl,
+           submit_std_2d.tpl, submit_std_3d.tpl, submit_ncl_2d.tpl, submit_ncl_3d.tpl]
+# check 诊断脚本（agent 用，只补不覆盖）
+aux_files: [check_common.py, step1_check_and_resubmit.py, step2_check_and_resubmit.py,
+            step3_check_and_resubmit.py, step4_check_and_resubmit.py]
+
+# ---- 计算步骤（顺序即流水线顺序）------------------------------------------
+# seq: run_steps 的序号锚点；三段弛豫共用 seq 1，画图步用 3.1 / 4.1
+steps:
+  - {seq: 1, name: step1_PBE_opt, label: S1_opt, check: relax_injob,
+     gen: gen_step1_PBE_opt.py, contcar_to_poscar: true}
+  - {seq: 2, name: step2_PBE_static,  label: S2_static,  check: outcar,  gen: gen_step2_static.py}
+  - {seq: 3, name: step3_PBE_WAVECAR, label: S3_WAVECAR, check: wavecar, gen: gen_step3_WAVECAR.py}
+
+# ---- 可选步骤组（取代主程序里写死的 PLOT_STEP_DEFS / _inject_plot_steps）----
+# 键名即开关名：tf.yaml 或项目配置里写  plot_steps: false  即可关闭。
+# after 是锚点步骤名前缀，命中则插在其后；本技能没有该锚点就自动不注入。
+# 带隙层级由 step.conf 的 BANDGAP 参数控制（pbe / hse，默认 hse）：
+#   pbe = 只到 PBE 带隙（1,2,3 + 3.1 画图），跳过整段 HSE
+#   hse = 继续 HSE（bandgap_hse 组：step4 + 4.1 画图）
+# 落地：驱动装配任务配置时把 BANDGAP 映射成 bandgap_hse 开关（见 tf 的
+# resolve_stepconf_flags）；也可在项目配置里直接写 bandgap_hse: false。
+optional_steps:
+  plot_steps:
+    default: true
+    steps:
+      - {seq: 3.1, name: step3_band_plot, label: S3.1_plot, after: step3_PBE,
+         gen: "gen_step3.1_plot_band.py", check: plot, run: gen, gen_need: [],
+         done_marker: band_summary.json, fetch_all: true}
+
+  # ★ 新增：PBEsol 真空对齐
+  vacuum_align:
+    default: true
+    steps:
+      - {seq: 3.2, name: step3_vacuum, label: S3.2_vac, after: step3_band_plot,
+         gen: "gen_step3.2_vacuum_align.py", check: plot, run: gen, gen_need: [],
+         done_marker: vacuum_align_summary.json, fetch_all: true}
+
+  bandgap_hse:
+    default: true
+    steps:
+      - {seq: 4, name: step4_HSE_band, label: S4_HSE, after: step3_PBE_WAVECAR,
+         check: outcar, gen: gen_step4_HSE.py}
+      - {seq: 4.1, name: step4_band_plot, label: S4.1_plot, after: step4_HSE,
+         gen: "gen_step4.1_plot_band.py", check: plot, run: gen, gen_need: [],
+         done_marker: band_summary.json, fetch_all: true}
+      # ★ 新增：HSE 真空对齐（同一脚本，用参数指向 step4 目录）
+      - {seq: 4.2, name: step4_vacuum, label: S4.2_vac, after: step4_band_plot,
+         gen: "gen_step3.2_vacuum_align.py --scf-dir step4_HSE_band --band-dft-cpu-dir step4_band_plot --out-dir step4_vacuum",
+         check: plot, run: gen, gen_need: [],
+         done_marker: vacuum_align_summary.json, fetch_all: true}

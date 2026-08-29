@@ -1,0 +1,39 @@
+SYSTEM = {{SYSTEM}}
+ISTART = 0
+{{ICHARG_LINE}}
+GGA    = {{GGA}}
+{{VDW_LINE}}
+
+PREC    = Accurate
+ENCUT   = {{ENCUT}}
+LREAL   = .FALSE.
+LASPH   = .TRUE.
+
+ALGO   = All
+AMIX   = 0.1
+BMIX   = 0.0001
+EDIFF  = 1E-6
+NELM   = 200
+NELMIN = 6
+ISMEAR = 0
+{{SIGMA_LINE}}
+ISPIN  = 1
+ISYM   = 0
+
+IBRION = {{IBRION}}
+ISIF   = {{ISIF}}
+NSW    = {{NSW}}
+{{EDIFFG_LINE}}
+
+LWAVE  = .FALSE.
+LCHARG = .TRUE.
+{{LVHAR_LINE}}
+
+NCORE  = 6
+KPAR   = 4
+
+LSORBIT  = .TRUE.
+GGA_COMPAT = .FALSE.
+LMAXMIX  = 4
+MAGMOM   = {{MAGMOM}}
+{{NELECT_LINE}}
