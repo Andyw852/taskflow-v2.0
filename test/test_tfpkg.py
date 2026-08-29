@@ -281,6 +281,24 @@ def test_workflow_module():
     assert tfpkg.do_submit is w.do_submit
 
 
+def test_namespace_complete():
+    # 深模块化安全网：8 个真模块的名字全部注入包命名空间
+    import tfpkg
+    stdlib = {"os", "sys", "re", "json", "time", "shlex", "hashlib", "base64",
+              "collections", "functools", "itertools", "subprocess", "tempfile",
+              "threading", "socket", "argparse", "glob", "math", "random", "shutil",
+              "Counter", "defaultdict", "ThreadPoolExecutor", "datetime", "copy",
+              "pathlib", "getpass", "textwrap", "urllib", "io", "string", "signal",
+              "ast", "inspect", "warnings", "csv"}
+    for modname in ("bootstrap", "collect", "data", "workflow", "report",
+                    "ops", "cli", "yamlmini"):
+        m = getattr(tfpkg, modname)
+        missing = [n for n in vars(m)
+                   if not n.startswith("__") and n not in stdlib
+                   and not hasattr(tfpkg, n)]
+        assert not missing, "%s 未注入: %s" % (modname, missing)
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

@@ -1,4 +1,31 @@
 # -*- coding: utf-8 -*-
+"""collect —— 远端采集流（05_collect）。ssh + COLLECTOR 采集超算状态。
+对外接口：collect / collect_v3_batch / run_remote / sh_b64 等。"""
+
+import os
+import sys
+import re
+import json
+import time
+import shlex
+import hashlib
+import base64
+import collections
+import functools
+import itertools
+import subprocess
+import tempfile
+import threading
+import socket
+import argparse
+import glob
+import math
+import random
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+
+# ===== 来自 05_collect.py =====
+# -*- coding: utf-8 -*-
 # 05_collect —— 远端状态采集（ssh + COLLECTOR）
 #
 # 本分片由 tfpkg/__init__.py 装配器在单一命名空间里按顺序执行；
@@ -16,6 +43,7 @@
 
 # ===== _dedup_segments (原 L1819-L1871) =====
 def _dedup_segments(mats):
+    from tfpkg import _natkey
     """多段（项目配置）发现同名材料时：材料归属"其 project_setting 里 tf_*.yaml
     所对应的那个段"（如 C20/qHPC20 归 C20/project_setting/tf_C20.yaml 的段）；
     材料没有 project_setting 时归全局段。无法判定归属的重复保留给重名检查。"""
@@ -80,6 +108,7 @@ def _queue_total(queue_by_host):
 
 # ===== collect_v3_batch (原 L1889-L2043) =====
 def collect_v3_batch(cfg, segs):
+    from tfpkg import _LOCAL_ONLY_STEP_KEYS, _load_yaml_file, _natkey, discover_local, pkg_setting_path, resolve_material_local, step_cfg
     """v3 本地模式批量采集：所有段（项目配置）先本地解析，再按 (host, work_dir)
     全局分组——同组所有段合进一次 ssh 采集；多组之间并行。
     v3.20 之前每段各发一条 ssh：10 个材料配置就串行 10 次握手（每次 ~2s）。
@@ -261,6 +290,7 @@ def _ssh_cmd_pre(cfg, host, pre_opts, remote_args):
 # ===== collect (原 L2069-L2097) =====
 def collect(cfg, types, host="__default__"):
     # v1.2：把本次涉及技能的 checks.py 源码一起打包，远端注册成判据
+    from tfpkg import COLLECTOR, skill_checks_for
     extra = skill_checks_for(cfg, [td.get("key") for td in types])
     payload = base64.b64encode(
         json.dumps({"user": cfg.get("user"), "types": types,

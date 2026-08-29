@@ -1,8 +1,8 @@
 # CONTEXT.md —— taskflow v2.0 代码导航（给 AI / 维护者）
 
 > 本文件是 taskflow-v2.0 的代码地图，读代码 / 改代码前先看这里。
-> 一句话：v2.0 把原 7463 行单体脚本 `versions/v1.0/tf` 拆成 `tfpkg/` 包，
-> 用「单一命名空间装配」保证行为与原版完全等价。
+> 一句话：v2.0 把原 7463 行单体脚本 `versions/v1.0/tf` 拆成 `tfpkg/` 包的
+> 8 个真深模块（小接口 + 深实现），行为与原版完全等价。
 
 ## 1. 目录结构
 
@@ -10,10 +10,17 @@
 taskflow-v2.0/
 ├── bin/tf                  # ★ 入口脚本（等价于原 versions/v1.0/tf）
 ├── tfpkg/                  # 新拆分的 Python 包
-│   ├── __init__.py         # 装配器：按顺序 exec _slice/*.py 到单一命名空间
+│   ├── __init__.py         # 装配器：导入 8 个真深模块并把名字注入包命名空间
 │   ├── __main__.py         # python -m tfpkg
 │   ├── _collector_remote.py  # 远端采集脚本（真实 .py，可 lint；装配时读成 COLLECTOR 字符串）
-│   └── _slice/             # 18 个分片（按职责切，见第 4 节地图）
+│   ├── bootstrap.py        # 配置/发现流
+│   ├── collect.py          # 远端采集
+│   ├── data.py             # 数据簇（采集+过滤+缓存+快照）
+│   ├── workflow.py         # 工作流执行引擎
+│   ├── report.py           # 渲染/汇报流
+│   ├── ops.py              # 运维流
+│   ├── cli.py              # 命令入口
+│   └── yamlmini.py         # YAML 解析器
 ├── versions/v1.0/tf        # 原始单体（保留作对比基准，勿改）
 ├── skill/                  # 技能（模板 / 脚本 / skill.yaml）
 ├── setting/                # 集群 / 全局配置（tf.yaml、<集群>.yaml）
@@ -23,60 +30,53 @@ taskflow-v2.0/
 └── TASKFLOW.md             # 完整手册
 ```
 
-## 2. 架构：单一命名空间装配（single-namespace assembly）
+## 2. 架构：深模块（deep modules，小接口 + 深实现）
 
 原 `tf` 是 7463 行的单体脚本，184 个函数 / 类 / 常量共享一个模块级命名空间，
-函数之间按名字直接引用，且存在多处**循环依赖**（见第 5 节）。
+函数之间按名字直接引用，且存在多处**循环依赖**（见第 5 节，均已消除）。
 
 v2.0 的做法：
 
-- 把原文件按职责切成 `tfpkg/_slice/` 下的 18 个分片（函数体**逐字拷贝，零改动**）。
-- `__init__.py` 在**同一个** `globals()` 命名空间里按文件名顺序 `exec` 这些分片。
-- 效果 = 原单文件：所有函数 / 常量互相按名字可见，无需任何 import 改写。
+- 把原文件按职责合并成 `tfpkg/` 下的 8 个真深模块（见第 4 节地图）。
+- `__init__.py` 导入这 8 个模块，并把它们的名字注入包命名空间。
+- 跨模块引用在**函数内**用 `from tfpkg import X` 延迟解析（调用时才解析，避开模块级 import 环）。
 
 **改代码时的规则**：
 
-- 改某个功能 → 打开对应分片（见第 4 节地图）。
-- 分片之间的引用按名字解析，**不要给分片加 import**（它们不是独立模块）。
-- 装配顺序 = 依赖顺序：`00_state.py` 先注入标准库 import 和全部常量。
+- 改某个功能 → 打开对应模块（见第 4 节地图）。
+- 跨模块引用：函数内 `from tfpkg import X`（不要加模块级 import，避免环）。
+- 模块内引用：直接按名字调用（同模块）。
 
 ## 3. 关键不变量（改代码别破坏）
 
 1. **路径常量**（原 `__file__` 深度 hack 已消除）：`__init__.py` 注入 `_PKG_ROOT`（包根）、
    `_PKG_DIR`（tfpkg 包目录）、`_SLICE_DIR`（_slice 目录）三个显式常量，替代分片里
    `dirname(__file__)/../..` 之类的路径计算；`__file__` 保持真实值 `tfpkg/__init__.py`。
-   **不要移动 `_slice/` 目录的层级**（`_SLICE_DIR` 仍指向它）。
+   （`_SLICE_DIR` 已废弃——`_slice/` 目录已删除，所有代码并入真模块。）
 2. **`COLLECTOR` 独立成 `_collector_remote.py`**：远端采集脚本现在是一个真实、可 lint
    的 `.py` 文件 `tfpkg/_collector_remote.py`；`__init__.py` 装配时把它读回成字符串注入
    命名空间，运行时字节与原单体完全一致（base64 下发超算的行为不变）。
-3. **命令入口**：`main()` 在 `17_cli.py`，命令分发逻辑也在其中。
+3. **命令入口**：`main()` 在 `cli.py`，命令分发逻辑也在其中。
 4. **副作用顺序**：装配时 `00_state.py` 里会执行 `os.environ.get(...)` 等常量求值，
    其余分片只有 `def` / `class` 定义，不产生副作用。
 
-## 4. 分片地图（改哪找哪）
+## 4. 模块地图（改哪找哪）
 
-| 分片 | 职责 | 主要函数 |
+| 模块 | 职责 | 主要函数 |
 |---|---|---|
-| 00_state | 常量 / 配置模板 / 标准库 import / JSON_SCHEMA | EXAMPLE_CONFIG, USAGE, STATUS_ALIAS, JSON_SCHEMA, 各缓存 dict |
-| 01_yamlmini | 迷你 YAML 解析器 + 配置加载 | _mini_yaml, load_config |
-| 02_skills | 技能发现 / 清单 / 装配 | discover_skills, apply_skills, cmd_skills |
-| 03_projects | 项目配置扫描合并 / 任务类型 | merge_project_configs, get_types, step_cfg |
-| 04_discover | 本地材料 / 目录发现 | discover_local, resolve_material_local |
-| 05_collect | 远端采集（ssh + COLLECTOR） | collect, collect_v3_batch, run_remote |
-| workflow.py | ★ 工作流执行引擎（06_state+09_submit+13_advance+11_actions 合并的真模块，环1 消除） | step_state, do_submit, auto_advance, remote_gen, cmd_start/stop/retry/rerun/clean, annotate |
-| 07_render | 表格 / 详情渲染 + 查找 | render_table, render_detail, find_material |
-| 08_assets | 技能资源 / step.conf | find_asset, build_step_conf, fill_local_dim |
-| 10_summary | status / summary | cmd_status, cmd_summary, _summary_json |
-| 12_hang | 挂死检测 / 恢复 | auto_recover_hung, _hung_scan |
-| 14_init | 项目初始化 | cmd_init, _init_one_skill |
-| 15_hpc | hpc / level / auto / adopt / migrate | cmd_hpc, cmd_level, cmd_auto, cmd_adopt |
-| 16_watch | 后台监控 | cmd_watch, _watch_daemon |
-| 17_cli | 状态缓存 / 过滤 / main 入口 | main, collect_data, filter_status |
+| bootstrap.py | 配置/发现流（常量/配置模板/标准库 import/YAML 加载/技能发现/项目配置/材料发现） | load_config, discover_skills, apply_skills, merge_project_configs, discover_local, EXAMPLE_CONFIG, STATUS_ALIAS |
+| collect.py | 远端采集（ssh + COLLECTOR） | collect, collect_v3_batch, run_remote, sh_b64 |
+| data.py | 数据簇（采集 + 过滤 + 缓存 + 快照） | collect_data, apply_exclude, filter_projs, filter_status, _snapshot, _state_cache_save |
+| workflow.py | 工作流执行引擎（状态机/DAG/门控 + 提交 + 推进 + 动作命令） | step_state, do_submit, auto_advance, auto_fetch, remote_gen, cmd_start/stop/retry/rerun/clean, annotate |
+| report.py | 渲染/汇报流（表格/详情渲染 + 查找 + 资源 + status/summary） | render_table, render_detail, find_material, find_asset, cmd_status, cmd_summary |
+| ops.py | 运维流（挂死检测/恢复 + init + hpc 切换 + watch） | auto_recover_hung, cmd_init, cmd_hpc, cmd_level, cmd_watch |
+| cli.py | 命令入口（main + 分发 + dry-run） | main |
+| yamlmini.py | YAML 解析器 | parse |
 
-## 5. 已知循环依赖（将来做「深模块」时先读这节）
+## 5. 历史循环依赖（均已消除，供参考）
 
-拆分前做了全量依赖分析，发现以下循环。若将来把分片改成真实 import 的独立模块，
-必须**先打破这些环**（用延迟 import / 接口抽取），否则会 import 失败：
+拆分前做了全量依赖分析，发现以下循环。深模块化时已用「合并成真模块 + 函数内延迟
+import」全部打破（见 §10），此处保留原始边图供追溯：
 
 - `06_state ↔ 09_submit ↔ 13_advance ↔ 11_actions`（工作流执行主环）✅ **已破**：四片合并为真模块 `tfpkg/workflow.py`
 - `15_hpc ↔ 17_cli ↔ 16_watch`（命令路由环）✅ **已破**：数据簇抽 `tfpkg/data.py`
@@ -114,12 +114,12 @@ python3 bin/tf --help        # 帮助（与原版逐字节一致）
 python3 bin/tf skills        # 只读，读 skill/*/skill.yaml
 python3 bin/tf config        # 打印示例配置
 python3 -m tfpkg             # 等价入口
-python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
+python3 -c "import tfpkg"    # 装配成功 = 8 个深模块就位
 ```
 
 只读回归命令（不碰超算）：`--help` / `config` / `skills` / `--schema`。
 
-单测：`python3 test/test_tfpkg.py`（14 个纯函数 + CLI 冒烟用例，自带运行器，无需 pytest）。
+单测：`python3 test/test_tfpkg.py`（22 个用例，自带运行器，无需 pytest）。
 
 ## 7. 已知差异（已消除）
 
@@ -132,7 +132,7 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
 
 - **COLLECTOR 独立**：`tfpkg/_collector_remote.py`（真实 .py，可 `py_compile` / lint），
   装配时读回字符串注入命名空间，字节与原单体一致（有单测 `test_collector_integrity`）。
-- **pytest 单测**：`test/test_tfpkg.py` 14 个用例（COLLECTOR 完整性、config 加载、
+- **pytest 单测**：`test/test_tfpkg.py` 22 个用例（COLLECTOR 完整性、config 加载、
   skills 发现/装配、summary 格式化、状态词、快照 diff、自然排序、CLI 冒烟）。
   自带独立运行器，不依赖 pytest 是否安装。
 - **`--dry-run`**：`start/stop/retry/rerun/clean/fetch` 加 `--dry-run`，只打印将影响的
@@ -169,16 +169,15 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
   `--json` 输出的 step 加 `diag_code`、summary 的 `fails[].code` 也带 code，
   agent 无需 grep（如 `relax_summary_missing` / `relax_summary_incomplete` /
   `force_not_converged` / `relax_oscillating` / `stepconf_unknown_params`）。
-- **测试**：`test/test_tfpkg.py` 14 → 19 个用例（新增 stepconf 白名单回归、
-  retry 目标、dry-run 语义、diag_code、yamlmini 深模块）。
+- **测试**：`test/test_tfpkg.py` 14 → 22 个用例（新增 stepconf 白名单回归、
+  retry 目标、dry-run 语义、diag_code、yamlmini/data/workflow 深模块、命名空间完整性）。
 
-**深模块化**：
-- 已完成：`__file__` 深度 hack 消除（改 `_PKG_ROOT`/`_PKG_DIR`/`_SLICE_DIR` 常量）；
-  YAML 解析器抽成真深模块 `tfpkg/yamlmini.py`（对外接口 `parse()`）；
-  数据簇抽成真深模块 `tfpkg/data.py`（collect_data + 过滤 + 缓存 + 快照，
-  collect_data/filter_status 用函数内 `from tfpkg import ...` 延迟取依赖）——
-  **环2 已破**（15/16 依赖 data 而非 17）；
-  工作流执行引擎抽成大深模块 `tfpkg/workflow.py`（06_state+09_submit+13_advance+11_actions
-  四片合并，内部引用变模块内，32 处函数内延迟 import 取外部依赖）——**环1 已破**。
-- 两个循环依赖环均已消除；剩余 14 个 slice 仍走单一命名空间装配（00/01/02/03/04/05/07/08/10/12/14/15/16/17）。
+**深模块化（已完成）**：
+- 全部 8 个真深模块就位：`bootstrap.py`（配置/发现流）、`collect.py`（远端采集）、
+  `data.py`（数据簇）、`workflow.py`（工作流执行引擎）、`report.py`（渲染/汇报流）、
+  `ops.py`（运维流）、`cli.py`（命令入口）、`yamlmini.py`（YAML 解析器）。
+  `_slice/` 目录已删除，单一命名空间装配已退役。
+- 两个循环依赖环均已消除（环1 合并进 workflow.py、环2 抽 data.py）；跨模块引用
+  统一用函数内 `from tfpkg import ...` 延迟解析。
+- 22 个单测（含命名空间完整性安全网 `test_namespace_complete`）。
 

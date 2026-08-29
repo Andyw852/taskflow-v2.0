@@ -1,4 +1,31 @@
 # -*- coding: utf-8 -*-
+"""cli —— 命令入口（17_cli）。main + 分发 + dry-run。
+对外接口：main。"""
+
+import os
+import sys
+import re
+import json
+import time
+import shlex
+import hashlib
+import base64
+import collections
+import functools
+import itertools
+import subprocess
+import tempfile
+import threading
+import socket
+import argparse
+import glob
+import math
+import random
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+
+# ===== 来自 17_cli.py =====
+# -*- coding: utf-8 -*-
 # 17_cli —— main() 入口与命令分发
 #
 # 本分片由 tfpkg/__init__.py 装配器在单一命名空间里按顺序执行；
@@ -10,6 +37,7 @@
 
 # ===== main (原 L7078-L7453) =====
 def _dry_run_steps_for(cmd, m, jb):
+    from tfpkg import find_step_soft
     """--dry-run：某材料在命令 cmd、步骤筛选 jb 下实际会动的步骤。
     返回步骤列表；None 表示"整材料级"（rerun/clean 无 -j 时）。"""
     if jb:
@@ -30,6 +58,7 @@ def _dry_run_steps_for(cmd, m, jb):
 
 
 def _dry_run_report(cfg, data, cmd, projs, jobs):
+    from tfpkg import find_material
     """--dry-run：打印真实目标对象（复用 _dry_run_steps_for 的语义）。"""
     mats = []
     if projs:
@@ -62,6 +91,7 @@ def _dry_run_report(cfg, data, cmd, projs, jobs):
 
 
 def main():
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         print(USAGE)
         return

@@ -1,89 +1,63 @@
 # -*- coding: utf-8 -*-
-"""
-tfpkg —— taskflow v2 包（由原单体脚本重构而来）。
+"""tfpkg —— taskflow v2 包（深模块化重构完成）。
 
-架构：单一命名空间装配（single-namespace assembly）。
-  原 versions/v1.0/tf 是一个 7463 行、184 个顶层定义的单体脚本，所有函数/
-  常量共享一个模块级命名空间，互相按名字直接引用（含多处跨层循环依赖）。
-  为了在「不改动任何函数体、行为完全等价」的前提下把它拆成可导航的文件，
-  本包把原文件按职责切成 _slice/ 下的若干分片，并在本文件里按顺序在
-  *同一个*命名空间中 exec 执行——效果等同原单文件。
+架构：真深模块（real deep modules，小接口 + 深实现）。
+  原 versions/v1.0/tf 是 7463 行单体脚本。v2.0 先按职责切成 _slice/ 分片做
+  单一命名空间装配，现已全部抽成真深模块（显式 import + 小接口）：
 
-导航（给 AI / 维护者）：
-  - 改某个功能 → 按 _slice/ 文件名找对应分片（完整地图见仓库根 CONTEXT.md）。
-  - 分片之间的函数引用按名字解析（和原单文件一致），不要给分片间加 import。
-  - 装配顺序即依赖顺序：00_state 先注入标准库 import 与全部常量。
-  - 若要真正把某分片升级为「深模块」（显式 import + 小接口），先读
-    CONTEXT.md 的「循环依赖」一节，避免引入 import 环。
+  - bootstrap.py  配置/发现流（原 00_state+01_yamlmini+02_skills+03_projects+04_discover）
+  - collect.py    远端采集（原 05_collect）
+  - data.py       数据簇（collect_data + 过滤 + 缓存 + 快照）
+  - workflow.py   工作流执行引擎（原 06_state+09_submit+13_advance+11_actions）
+  - report.py     渲染/汇报流（原 07_render+08_assets+10_summary）
+  - ops.py        运维流（原 12_hang+14_init+15_hpc+16_watch）
+  - cli.py        命令入口（原 17_cli）
+  - yamlmini.py   YAML 解析器
+
+  跨模块引用在函数内用 from tfpkg import ... 延迟解析（调用时才解析，避开
+  模块级 import 环）；本文件把各模块的名字全部注入包命名空间，保证
+  from tfpkg import X 在调用时都能命中。两个历史循环依赖环均已消除。
 """
 import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SLICE = os.path.join(_HERE, "_slice")
-
-# 关键：把分片代码里的 __file__ 指向 _slice 下的文件。它与原 versions/v1.0/tf
-# 处于相同的相对深度（包根下第 3 层），保证代码里 dirname(__file__)/../.. 之类
-# 的路径计算仍解析到包根（setting/ skill/）。
 _NS = globals()
-# 深模块化：已移除 __file__ 深度 hack（分片改用 _PKG_ROOT/_PKG_DIR 常量），
-# __file__ 保持真实值 tfpkg/__init__.py。
 
-# 深模块化：显式路径常量，替代分片里的 dirname(__file__)/../.. 计算。
-# _PKG_ROOT = 包根（setting/ skill/ 所在），_PKG_DIR = tfpkg 包目录，
-# _SLICE_DIR = _slice 目录。
+# 路径常量：_PKG_ROOT = 包根（setting/ skill/ 所在），_PKG_DIR = tfpkg 目录，
+# _SLICE_DIR = _slice 目录（已废弃，仅保留兼容）。
 _NS["_PKG_ROOT"] = os.path.normpath(os.path.dirname(_HERE))
 _NS["_PKG_DIR"] = os.path.normpath(_HERE)
-_NS["_SLICE_DIR"] = os.path.normpath(_SLICE)
+_NS["_SLICE_DIR"] = os.path.normpath(os.path.join(_HERE, "_slice"))
 
-# 深模块：真实模块（已抽离单命名空间的叶子）导入后，把接口注入共享命名空间。
-# 这样剩余的 slice 仍按名字调用 _mini_yaml，行为不变。
-import tfpkg.yamlmini as _yamlmini_mod
-for _nm in ("_yaml_strip_comment", "_yaml_split_top", "_yaml_scalar",
-            "_flow_depth", "_mini_yaml", "parse"):
-    _NS[_nm] = getattr(_yamlmini_mod, _nm)
-del _yamlmini_mod
+# 导入全部真深模块。bootstrap 必须最先（report 模块级 from tfpkg.bootstrap
+# import REASON_MAX 依赖它；其余模块无模块级跨模块依赖，顺序无关）。
+from . import (  # noqa: E402
+    bootstrap, collect, data, workflow, report, ops, cli, yamlmini,
+)
+_MODULES = (bootstrap, collect, data, workflow, report, ops, cli, yamlmini)
 
-# 深模块：数据簇（collect_data + 过滤 + 缓存 + 快照）也是真模块，注入共享命名空间。
-# 15/16 依赖 data 而非 17 → 环2 破。collect_data/filter_status 的跨分片依赖
-# 在函数内用 from tfpkg import ... 延迟解析。
-import tfpkg.data as _data_mod
-for _nm in ("_dbg_t", "_state_cache_path", "_state_cache_sig", "_state_cache_save",
-            "_state_cache_load", "collect_data", "apply_exclude", "filter_projs",
-            "filter_status", "status_spec_has_scancel", "_snapshot"):
-    _NS[_nm] = getattr(_data_mod, _nm)
-del _data_mod
+# 把各模块的名字注入包命名空间（排除 dunder 与标准库名）。
+_STDLIB_NAMES = {
+    "os", "sys", "re", "json", "time", "shlex", "hashlib", "base64",
+    "collections", "functools", "itertools", "subprocess", "tempfile",
+    "threading", "socket", "argparse", "glob", "math", "random", "shutil",
+    "Counter", "defaultdict", "ThreadPoolExecutor", "datetime", "copy",
+    "pathlib", "getpass", "textwrap", "urllib", "io", "string", "signal",
+    "ast", "inspect", "warnings", "csv",
+}
+for _mod in _MODULES:
+    for _nm, _obj in vars(_mod).items():
+        if _nm.startswith("__") or _nm in _STDLIB_NAMES:
+            continue
+        _NS[_nm] = _obj
+del _mod, _nm, _obj
 
-# 深模块：工作流执行引擎（06/09/13/11 合并）注入共享命名空间 → 环1 消除。
-# 外部依赖在函数内 from tfpkg import ... 延迟解析。
-import tfpkg.workflow as _wf_mod
-for _nm, _obj in vars(_wf_mod).items():
-    if _nm.startswith("__") or _nm in ("os", "sys", "re", "json", "time", "shlex"):
-        continue
-    _NS[_nm] = _obj
-del _wf_mod
-
-# COLLECTOR（远端采集脚本）已独立成 tfpkg/_collector_remote.py —— 一个真实、
-# 可 lint / 可单测的 .py 文件。这里读回成字符串注入命名空间，运行时字节与
-# 原单体脚本里的 r'''...''' 字面量完全一致。
+# COLLECTOR（远端采集脚本）已独立成 tfpkg/_collector_remote.py —— 真实 .py 文件。
+# 这里读回成字符串注入命名空间，运行时字节与原单体脚本里的 r'''...''' 字面量一致。
 with open(os.path.join(_HERE, "_collector_remote.py"), encoding="utf-8") as _fh:
     _NS["COLLECTOR"] = _fh.read()
 
 # v2.0：记录真实入口路径（bin/tf），供 --version / 裸 tf 的「程序:」行显示。
-# __file__ 被指向 _slice/00_state.py 仅用于保持 dirname(__file__)/../.. 的
-# 深度不变量，不应出现在面向用户的「程序:」里。
 _prog = os.path.join(os.path.dirname(_HERE), "bin", "tf")
 _NS["_PROG_PATH"] = (os.path.realpath(_prog)
                      if os.path.isfile(_prog) else _NS["__file__"])
-
-
-def _load_slices():
-    names = sorted(f for f in os.listdir(_SLICE) if f.endswith(".py"))
-    for name in names:
-        path = os.path.join(_SLICE, name)
-        with open(path, encoding="utf-8") as fh:
-            code = compile(fh.read(), path, "exec")
-        exec(code, _NS)
-
-
-_load_slices()
-
