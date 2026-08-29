@@ -430,8 +430,7 @@ def _init_one_skill(cfg, types, target, name=None, tt=None, force=False,
     if sd and not os.path.isabs(sd):
         # v1.3：相对路径先按配置目录找，找不到再按软件根找
         # （tf.yaml 放 setting/ 时，skill/ 在软件根下，只按配置目录会找偏）
-        pkg_root = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+        pkg_root = _PKG_ROOT
         for base in (cfg.get("_config_dir"), pkg_root):
             cand = os.path.normpath(os.path.join(base or ".", sd))
             if os.path.isdir(cand):

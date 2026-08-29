@@ -25,7 +25,23 @@ _SLICE = os.path.join(_HERE, "_slice")
 # 处于相同的相对深度（包根下第 3 层），保证代码里 dirname(__file__)/../.. 之类
 # 的路径计算仍解析到包根（setting/ skill/）。
 _NS = globals()
-_NS["__file__"] = os.path.join(_SLICE, "00_state.py")
+# 深模块化：已移除 __file__ 深度 hack（分片改用 _PKG_ROOT/_PKG_DIR 常量），
+# __file__ 保持真实值 tfpkg/__init__.py。
+
+# 深模块化：显式路径常量，替代分片里的 dirname(__file__)/../.. 计算。
+# _PKG_ROOT = 包根（setting/ skill/ 所在），_PKG_DIR = tfpkg 包目录，
+# _SLICE_DIR = _slice 目录。
+_NS["_PKG_ROOT"] = os.path.normpath(os.path.dirname(_HERE))
+_NS["_PKG_DIR"] = os.path.normpath(_HERE)
+_NS["_SLICE_DIR"] = os.path.normpath(_SLICE)
+
+# 深模块：真实模块（已抽离单命名空间的叶子）导入后，把接口注入共享命名空间。
+# 这样剩余的 slice 仍按名字调用 _mini_yaml，行为不变。
+import tfpkg.yamlmini as _yamlmini_mod
+for _nm in ("_yaml_strip_comment", "_yaml_split_top", "_yaml_scalar",
+            "_flow_depth", "_mini_yaml", "parse"):
+    _NS[_nm] = getattr(_yamlmini_mod, _nm)
+del _yamlmini_mod
 
 # COLLECTOR（远端采集脚本）已独立成 tfpkg/_collector_remote.py —— 一个真实、
 # 可 lint / 可单测的 .py 文件。这里读回成字符串注入命名空间，运行时字节与

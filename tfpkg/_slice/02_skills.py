@@ -20,8 +20,7 @@
 # ===== skill_search_dirs (原 L1104-L1121) =====
 def skill_search_dirs(cfg):
     """技能搜索路径，靠前优先（同名技能先命中者生效）。"""
-    pkg_root = os.path.normpath(os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+    pkg_root = _PKG_ROOT
     cdir = cfg.get("_config_dir") or ""
     cands = ["./skill"]
     cands += [os.path.expanduser(str(p)) for p in (cfg.get("skill_paths") or [])]

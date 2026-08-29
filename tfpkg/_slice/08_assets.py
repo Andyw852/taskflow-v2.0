@@ -135,9 +135,8 @@ def find_asset(cfg, t, m, fname, sname=None):
         if _shpc:
             hpc_key = str(_shpc)
     if hpc_key:
-        _here = os.path.dirname(os.path.realpath(__file__))
-        for _sdir in (os.path.join(_here, "..", "..", "setting"),
-                      os.path.join(_here, "..", "setting"),
+        for _sdir in (os.path.join(_PKG_ROOT, "setting"),
+                      os.path.join(_PKG_DIR, "setting"),
                       os.path.expanduser("~/.config/taskflow/setting")):
             _hroot = os.path.join(_sdir, str(hpc_key))
             for _d in _proj_dirs(_hroot):
@@ -151,8 +150,7 @@ def find_asset(cfg, t, m, fname, sname=None):
         if os.path.isabs(sd):
             sdirs = [sd]
         else:  # 相对路径查找顺序：项目配置目录 → 全局配置目录 → 软件根目录
-            pkg_root = os.path.normpath(os.path.join(   # （tf.yaml 放 setting/ 时
-                os.path.dirname(os.path.realpath(__file__)), "..", ".."))  # 也能找对）
+            pkg_root = _PKG_ROOT   # （tf.yaml 放 setting/ 时也能找对）
             for base in (seg.get("_base_dir") or t.get("_base_dir"),
                          cfg.get("_config_dir"), pkg_root):
                 if base:
@@ -200,8 +198,7 @@ def step_conf_sources(cfg, t, m, sname):
     seg = (m.get("_seg") or {})
     sd = seg.get("skill_dir") or t.get("skill_dir")
     if sd and not os.path.isabs(sd):
-        pkg_root = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+        pkg_root = _PKG_ROOT
         for base in (seg.get("_base_dir") or t.get("_base_dir"),
                      cfg.get("_config_dir"), pkg_root):
             if base and os.path.isdir(os.path.join(base, sd)):
@@ -311,8 +308,7 @@ def _dim_mod(cfg, t):
         if os.path.isabs(sd):
             bases = [sd]
         else:
-            pkg_root = os.path.normpath(os.path.join(
-                os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+            pkg_root = _PKG_ROOT
             for b in (t.get("_base_dir"), cfg.get("_config_dir"), pkg_root):
                 if b:
                     bases.append(os.path.normpath(os.path.join(b, sd)))

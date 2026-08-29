@@ -42,10 +42,10 @@ v2.0 的做法：
 
 ## 3. 关键不变量（改代码别破坏）
 
-1. **`__file__` 深度**：`__init__.py` 把 `__file__` 指向 `_slice/00_state.py`。
-   它与原 `versions/v1.0/tf` 处于相同的相对深度（包根下第 3 层），因此原代码里
-   `dirname(__file__)/../..` 之类的路径计算仍解析到包根（`setting/` `skill/` 所在目录）。
-   **不要移动 `_slice/` 目录的层级。**
+1. **路径常量**（原 `__file__` 深度 hack 已消除）：`__init__.py` 注入 `_PKG_ROOT`（包根）、
+   `_PKG_DIR`（tfpkg 包目录）、`_SLICE_DIR`（_slice 目录）三个显式常量，替代分片里
+   `dirname(__file__)/../..` 之类的路径计算；`__file__` 保持真实值 `tfpkg/__init__.py`。
+   **不要移动 `_slice/` 目录的层级**（`_SLICE_DIR` 仍指向它）。
 2. **`COLLECTOR` 独立成 `_collector_remote.py`**：远端采集脚本现在是一个真实、可 lint
    的 `.py` 文件 `tfpkg/_collector_remote.py`；`__init__.py` 装配时把它读回成字符串注入
    命名空间，运行时字节与原单体完全一致（base64 下发超算的行为不变）。
@@ -83,6 +83,25 @@ v2.0 的做法：
 
 - `06_state ↔ 09_submit ↔ 13_advance ↔ 11_actions`（工作流执行主环）
 - `15_hpc ↔ 17_cli ↔ 16_watch`（命令路由环）
+
+**环的具体边（函数级，2025 实测）**：
+
+- 环1（工作流执行，真正纠缠，破环需延迟 import）：
+  - `06_state → 09_submit`：`remote_gen`
+  - `09_submit → 06_state`：`_scancel_clear`
+  - `09_submit → 13_advance`：`_fetch_stamp_clear`、`_relay_prev_across_host`、`fetch_material`
+  - `13_advance → 09_submit`：`_fanout_guard`、`do_submit`、`kill_if_queued`、`remote_gen`、`remote_scancel`
+  - `13_advance → 11_actions`：`guard_predecessors`、`step_targets`
+  - `11_actions → 06_state`：`_SkillGate`、`_dag_max_inflight`、`_dag_recompute`、`_gen_step_input`、`_pregenerate_ready`、`_scancel_clear`、`_scancel_set`
+  - `11_actions → 09_submit`：`_scancel_desc`、`do_rerun_step`、`do_submit`、`kill_if_queued`、`remote_scancel`、`tag_of`
+- 环2（命令路由，有清晰缝）：
+  - `15_hpc → 17_cli`：`collect_data`
+  - `17_cli → 15_hpc`：`cmd_adopt`、`cmd_auto`、`cmd_auto_project`、`cmd_auto_skill`、`cmd_hpc`、`cmd_level`、`cmd_migrate_subdir`
+  - `16_watch → 17_cli`：`_snapshot`、`_state_cache_save`、`apply_exclude`、`collect_data`、`filter_projs`
+  - `17_cli → 16_watch`：`_watch_cron`、`_watch_daemon`、`_watch_ensure`、`_watch_stop`、`cmd_watch`
+  - 破环缝：把 `collect_data`/`_snapshot`/`_state_cache_save`/`apply_exclude`/`filter_projs`
+    （数据采集/过滤工具，17 定义、被 15/16 依赖）抽成叶子深模块 `tfpkg/data.py`，
+    15/16 依赖它而非 17，环2 即破。
 
 这正是 v2.0 选用「单一命名空间装配」而非真实 import 的原因——它是唯一能
 在不改动任何函数体、保证行为等价的前提下完成拆分的方案。
@@ -150,10 +169,13 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
   `--json` 输出的 step 加 `diag_code`、summary 的 `fails[].code` 也带 code，
   agent 无需 grep（如 `relax_summary_missing` / `relax_summary_incomplete` /
   `force_not_converged` / `relax_oscillating` / `stepconf_unknown_params`）。
-- **测试**：`test/test_tfpkg.py` 14 → 18 个用例（新增 stepconf 白名单回归、
-  retry 目标、dry-run 语义、diag_code）。
+- **测试**：`test/test_tfpkg.py` 14 → 19 个用例（新增 stepconf 白名单回归、
+  retry 目标、dry-run 语义、diag_code、yamlmini 深模块）。
 
-**待办（未做）**：
-- 深模块化：消除单一命名空间装配的 `__file__` hack 与循环依赖（见 §5），改真模块/深模块，
-  成本高、风险高，需先理清依赖图再动手。
+**深模块化（进行中）**：
+- 已完成：`__file__` 深度 hack 消除（改 `_PKG_ROOT`/`_PKG_DIR`/`_SLICE_DIR` 常量）；
+  YAML 解析器抽成真深模块 `tfpkg/yamlmini.py`（对外接口 `parse()`，4 个内部函数
+  隐藏 ~200 行实现，由 `__init__.py` 导入后注入共享命名空间）。
+- 待办：两个环的破环（函数级边图见 §5）——环2 有清晰缝（抽 `tfpkg/data.py`），
+  环1 需延迟 import；均影响在跑的 tf，高风险，建议逐环、逐函数测试推进。
 

@@ -24,10 +24,9 @@ TF_VERSION = "1.0"
 # ===== CONFIG_SEARCH (原 L735-L743) =====
 CONFIG_SEARCH = [
     "./tf.yaml", "./tf.yml", "./tf.json",
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "tf.yaml"),
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "tf.yaml"),
-    os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..",
-                 "setting", "tf.yaml"),  # v1.0：也可放 setting/tf.yaml
+    os.path.join(_PKG_DIR, "tf.yaml"),
+    os.path.join(_PKG_ROOT, "tf.yaml"),
+    os.path.join(_PKG_ROOT, "setting", "tf.yaml"),  # v1.0：也可放 setting/tf.yaml
     os.path.expanduser("~/.config/taskflow/tf.yaml"),
     os.path.expanduser("~/.tf.yaml"),
 ]

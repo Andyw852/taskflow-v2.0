@@ -238,17 +238,14 @@ def main():
         return
     if any(a in ("-V", "--version") for a in sys.argv[1:]):
         print("taskflow (tf) version %s" % TF_VERSION)
-        exe = os.path.realpath(__file__)
-        pkg = os.path.dirname(os.path.dirname(os.path.dirname(exe)))
-        if not os.path.basename(pkg).startswith("taskflow"):  # 非 versions 布局
-            pkg = os.path.dirname(exe)
-        _prog = os.path.realpath(globals().get("_PROG_PATH") or exe)
+        pkg = _PKG_ROOT
+        _prog = os.path.realpath(globals().get("_PROG_PATH") or _PKG_ROOT)
         print("程序: %s" % _prog)
         print("包根: %s（setting/ = 默认模板，skill/ = 技能脚本）" % pkg)
         return
     if len(sys.argv) == 1:   # patch_auto：纯 tf = 只报版本，不采集/不提交
         print("taskflow (tf) version %s" % TF_VERSION)
-        print("程序: %s" % os.path.realpath(globals().get("_PROG_PATH") or __file__))
+        print("程序: %s" % os.path.realpath(globals().get("_PROG_PATH") or _PKG_ROOT))
         print("")
         print("  tf list      只读总表（不拉取、不提交）")
         print("  tf summary   只读极简汇总（巡检省 token，见 AGENTS.md）")

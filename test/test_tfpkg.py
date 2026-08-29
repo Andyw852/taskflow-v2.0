@@ -247,6 +247,15 @@ def test_diag_code():
     assert j["types"][0]["fails"][0]["code"] == "force_not_converged"
 
 
+def test_yamlmini_module():
+    # yamlmini 是真深模块：可独立 import，parse() 是唯一对外接口
+    import tfpkg.yamlmini as y
+    assert y.parse("a: 1\nb:\n  - 2\n  - 3") == {"a": 1, "b": [2, 3]}
+    # 装配后注入共享命名空间，行为不变（_mini_yaml 同源）
+    assert tfpkg._mini_yaml is y._mini_yaml
+    assert tfpkg.parse is y.parse
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

@@ -97,9 +97,8 @@ def load_project_settings(ps_dir):
 # ===== pkg_setting_path (原 L1692-L1700) =====
 def pkg_setting_path(name):
     """taskflow 包内 setting/<name>.yaml 的位置（兼容 versions/vX 与平铺布局）。"""
-    here = os.path.dirname(os.path.realpath(__file__))
-    for cand in (os.path.join(here, "..", "..", "setting", name),
-                 os.path.join(here, "..", "setting", name),
+    for cand in (os.path.join(_PKG_ROOT, "setting", name),
+                 os.path.join(_PKG_DIR, "setting", name),
                  os.path.expanduser("~/.config/taskflow/setting/" + name)):
         if os.path.isfile(cand):
             return cand

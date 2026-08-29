@@ -129,10 +129,9 @@ def cmd_hpc(cfg, types, projs, cluster, tt, yes):
 
 # ===== _list_pkg_clusters (原 L6016-L6025) =====
 def _list_pkg_clusters():
-    here = os.path.dirname(os.path.realpath(__file__))
     out = []
-    for d in (os.path.join(here, "..", "..", "setting"),
-              os.path.join(here, "..", "setting"),
+    for d in (os.path.join(_PKG_ROOT, "setting"),
+              os.path.join(_PKG_DIR, "setting"),
               os.path.expanduser("~/.config/taskflow/setting")):
         if os.path.isdir(d):
             out += [f[:-5] for f in os.listdir(d)
