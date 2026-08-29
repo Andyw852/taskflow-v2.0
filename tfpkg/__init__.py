@@ -53,6 +53,15 @@ for _nm in ("_dbg_t", "_state_cache_path", "_state_cache_sig", "_state_cache_sav
     _NS[_nm] = getattr(_data_mod, _nm)
 del _data_mod
 
+# 深模块：工作流执行引擎（06/09/13/11 合并）注入共享命名空间 → 环1 消除。
+# 外部依赖在函数内 from tfpkg import ... 延迟解析。
+import tfpkg.workflow as _wf_mod
+for _nm, _obj in vars(_wf_mod).items():
+    if _nm.startswith("__") or _nm in ("os", "sys", "re", "json", "time", "shlex"):
+        continue
+    _NS[_nm] = _obj
+del _wf_mod
+
 # COLLECTOR（远端采集脚本）已独立成 tfpkg/_collector_remote.py —— 一个真实、
 # 可 lint / 可单测的 .py 文件。这里读回成字符串注入命名空间，运行时字节与
 # 原单体脚本里的 r'''...''' 字面量完全一致。

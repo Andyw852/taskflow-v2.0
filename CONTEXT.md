@@ -63,14 +63,11 @@ v2.0 的做法：
 | 03_projects | 项目配置扫描合并 / 任务类型 | merge_project_configs, get_types, step_cfg |
 | 04_discover | 本地材料 / 目录发现 | discover_local, resolve_material_local |
 | 05_collect | 远端采集（ssh + COLLECTOR） | collect, collect_v3_batch, run_remote |
-| 06_state | 步骤状态机 / DAG / 门控 | step_state, _dag_recompute, _SkillGate, annotate |
+| workflow.py | ★ 工作流执行引擎（06_state+09_submit+13_advance+11_actions 合并的真模块，环1 消除） | step_state, do_submit, auto_advance, remote_gen, cmd_start/stop/retry/rerun/clean, annotate |
 | 07_render | 表格 / 详情渲染 + 查找 | render_table, render_detail, find_material |
 | 08_assets | 技能资源 / step.conf | find_asset, build_step_conf, fill_local_dim |
-| 09_submit | 远端生成 / 提交 / 取消 | remote_gen, remote_sbatch, do_submit, do_rerun_step |
 | 10_summary | status / summary | cmd_status, cmd_summary, _summary_json |
-| 11_actions | start / stop / retry / rerun | cmd_start, cmd_stop, cmd_retry, cmd_rerun |
 | 12_hang | 挂死检测 / 恢复 | auto_recover_hung, _hung_scan |
-| 13_advance | 自动推进 / 拉回 / clean | auto_advance, auto_fetch, cmd_clean |
 | 14_init | 项目初始化 | cmd_init, _init_one_skill |
 | 15_hpc | hpc / level / auto / adopt / migrate | cmd_hpc, cmd_level, cmd_auto, cmd_adopt |
 | 16_watch | 后台监控 | cmd_watch, _watch_daemon |
@@ -81,8 +78,8 @@ v2.0 的做法：
 拆分前做了全量依赖分析，发现以下循环。若将来把分片改成真实 import 的独立模块，
 必须**先打破这些环**（用延迟 import / 接口抽取），否则会 import 失败：
 
-- `06_state ↔ 09_submit ↔ 13_advance ↔ 11_actions`（工作流执行主环）
-- `15_hpc ↔ 17_cli ↔ 16_watch`（命令路由环）
+- `06_state ↔ 09_submit ↔ 13_advance ↔ 11_actions`（工作流执行主环）✅ **已破**：四片合并为真模块 `tfpkg/workflow.py`
+- `15_hpc ↔ 17_cli ↔ 16_watch`（命令路由环）✅ **已破**：数据簇抽 `tfpkg/data.py`
 
 **环的具体边（函数级，2025 实测）**：
 
@@ -94,6 +91,8 @@ v2.0 的做法：
   - `13_advance → 11_actions`：`guard_predecessors`、`step_targets`
   - `11_actions → 06_state`：`_SkillGate`、`_dag_max_inflight`、`_dag_recompute`、`_gen_step_input`、`_pregenerate_ready`、`_scancel_clear`、`_scancel_set`
   - `11_actions → 09_submit`：`_scancel_desc`、`do_rerun_step`、`do_submit`、`kill_if_queued`、`remote_scancel`、`tag_of`
+  - **✅ 已破**：四片合并成 `tfpkg/workflow.py`（上述内部边全变模块内引用，无 import），
+    外部依赖（00/02/03/04/05/07/08/14）在函数内 `from tfpkg import ...` 延迟解析。
 - 环2（命令路由，有清晰缝）：
   - `15_hpc → 17_cli`：`collect_data`
   - `17_cli → 15_hpc`：`cmd_adopt`、`cmd_auto`、`cmd_auto_project`、`cmd_auto_skill`、`cmd_hpc`、`cmd_level`、`cmd_migrate_subdir`
@@ -173,12 +172,13 @@ python3 -c "import tfpkg"    # 装配成功 = 184 个定义就位
 - **测试**：`test/test_tfpkg.py` 14 → 19 个用例（新增 stepconf 白名单回归、
   retry 目标、dry-run 语义、diag_code、yamlmini 深模块）。
 
-**深模块化（进行中）**：
+**深模块化**：
 - 已完成：`__file__` 深度 hack 消除（改 `_PKG_ROOT`/`_PKG_DIR`/`_SLICE_DIR` 常量）；
   YAML 解析器抽成真深模块 `tfpkg/yamlmini.py`（对外接口 `parse()`）；
   数据簇抽成真深模块 `tfpkg/data.py`（collect_data + 过滤 + 缓存 + 快照，
   collect_data/filter_status 用函数内 `from tfpkg import ...` 延迟取依赖）——
-  **环2 已破**（15/16 依赖 data 而非 17）。
-- 待办：环1 的破环（06↔09↔13↔11，函数级边图见 §5）——工作流执行核心真正纠缠，
-  需延迟 import；建议逐环、逐函数测试推进。
+  **环2 已破**（15/16 依赖 data 而非 17）；
+  工作流执行引擎抽成大深模块 `tfpkg/workflow.py`（06_state+09_submit+13_advance+11_actions
+  四片合并，内部引用变模块内，32 处函数内延迟 import 取外部依赖）——**环1 已破**。
+- 两个循环依赖环均已消除；剩余 14 个 slice 仍走单一命名空间装配（00/01/02/03/04/05/07/08/10/12/14/15/16/17）。
 

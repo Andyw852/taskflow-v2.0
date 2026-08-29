@@ -268,6 +268,19 @@ def test_data_module():
     assert "from tfpkg import" in src
 
 
+def test_workflow_module():
+    # workflow 是大深模块：06/09/13/11 合并，环1 消除
+    import tfpkg.workflow as w
+    for name in ("step_state", "do_submit", "auto_advance", "auto_fetch",
+                 "remote_gen", "cmd_start", "cmd_stop", "cmd_retry",
+                 "cmd_rerun", "cmd_clean", "annotate", "check_duplicates",
+                 "do_rerun_step", "kill_if_queued"):
+        assert callable(getattr(w, name, None)), name
+    # 注入共享命名空间，行为不变
+    assert tfpkg.step_state is w.step_state
+    assert tfpkg.do_submit is w.do_submit
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
