@@ -180,6 +180,58 @@ def _snapshot(data):
                       sort_keys=True)
 
 # ===== main (原 L7078-L7453) =====
+def _dry_run_steps_for(cmd, m, jb):
+    """--dry-run：某材料在命令 cmd、步骤筛选 jb 下实际会动的步骤。
+    返回步骤列表；None 表示"整材料级"（rerun/clean 无 -j 时）。"""
+    if jb:
+        s = find_step_soft(m, jb)
+        return [s] if s is not None else []
+    if cmd == "retry":
+        return [s for s in m["steps"] if s["kind"] == "FAIL"]
+    if cmd == "start":
+        ready = m.get("actives")
+        if ready is None:
+            ready = [m.get("active")] if m.get("active") is not None else []
+        return [s for s in ready if s and s["kind"] in ("TODO", "PREP")]
+    if cmd == "stop":
+        return [s for s in m["steps"] if s.get("job")]
+    if cmd == "fetch":
+        return [s for s in m["steps"] if s["kind"] == "OK"]
+    return None   # rerun / clean：无 -j 时整材料级
+
+
+def _dry_run_report(cfg, data, cmd, projs, jobs):
+    """--dry-run：打印真实目标对象（复用 _dry_run_steps_for 的语义）。"""
+    mats = []
+    if projs:
+        for pj in projs:
+            try:
+                mats.append(find_material(data, pj)[1])
+            except SystemExit:
+                print("  材料 %s  （未能解析）" % pj)
+    else:
+        mats = [m for t in data["types"] for m in t["materials"]]
+    shown = 0
+    for m in mats:
+        for jb in jobs:
+            steps = _dry_run_steps_for(cmd, m, jb)
+            if steps is None:
+                print("  材料 %s  （整材料 %s）" % (m["name"], cmd))
+                shown += 1
+                continue
+            if not steps:
+                print("  材料 %s  %s（无需操作）"
+                      % (m["name"], ("步骤 %s " % jb) if jb else ""))
+                continue
+            for s in steps:
+                print("  材料 %s  步骤 %s [%s]  ->  %s"
+                      % (m["name"], s.get("label", s.get("name", "?")),
+                         s.get("kind", "?"), s.get("dir", "?")))
+                shown += 1
+    if shown == 0:
+        print("  （共 %d 个材料，无任何目标）" % len(mats))
+
+
 def main():
     if any(a in ("-h", "--help") for a in sys.argv[1:]):
         print(USAGE)
@@ -442,27 +494,14 @@ def main():
     jobs = jobs or [None]
 
     # v2.0：--dry-run 排练。破坏性/有副作用命令只打印将影响的对象，不执行。
+    # 按命令语义打印【真实】目标：retry=FAIL 步，start=就绪步，stop=有作业步，
+    # fetch=已完成可拉回步；rerun/clean 无 -j 时是整材料级（不再笼统"全部步骤"）。
     _eff_cmd = "clean" if (a.clean or cmd == "clean") else cmd
     if a.dry and _eff_cmd in ("start", "stop", "retry", "rerun", "clean",
                               "fetch"):
         print("【dry-run】命令 '%s' 将影响以下对象（未执行任何变更、未提交作业）："
               % _eff_cmd)
-        if projs:
-            for pj in projs:
-                for jb in jobs:
-                    try:
-                        t, m = find_material(data, pj)
-                        if jb:
-                            s = find_step(m, jb)
-                            print("  材料 %s  步骤 %s  ->  %s"
-                                  % (pj, jb, s.get("dir", "?")))
-                        else:
-                            print("  材料 %s  （全部步骤）" % pj)
-                    except SystemExit:
-                        print("  材料 %s  步骤 %s  （未能解析）" % (pj, jb or "<全部>"))
-        else:
-            nmat = sum(len(t["materials"]) for t in data["types"])
-            print("  全部 %d 个材料（无 -p 过滤）" % nmat)
+        _dry_run_report(cfg, data, _eff_cmd, projs, jobs)
         return
 
     if cmd == "watch":   # v3.15：监控模式（循环 采集→fetch→advance）

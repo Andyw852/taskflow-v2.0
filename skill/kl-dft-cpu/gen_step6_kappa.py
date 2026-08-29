@@ -135,10 +135,11 @@ def build_extract(factor, meta):
 
 def build_phono3py_cmd(mesh, ts, isotope, use_nac, extract, bte="rta"):
     method = "--lbte" if str(bte).lower() == "lbte" else "--br"
-    # phono3py 3.24：有 nac_params/BORN 就默认启用 NAC；无 --nac 开关（会被当 --nac-method）。
-    #   要关才 --nonac。这里 use_nac=True 就默认带上（不加开关），否则显式 --nonac。
+    # NAC：有 nac_params/BORN 就默认启用；无 --nac 开关（会被当 --nac-method），要关才 --nonac。
+    #   phono3py 3.24/4.x 行为一致。use_nac=True 就默认带上（不加开关），否则显式 --nonac。
     nac_flag = "" if use_nac else " --nonac"
-    p3 = ('phono3py-load phono3py_disp.yaml %s --mesh %s --ts="%s"%s%s'
+    # phono3py 4.x：phono3py-load 是 phono3py 的 deprecated 别名，直接用 phono3py（读 disp.yaml 跑 BTE）。
+    p3 = ('phono3py phono3py_disp.yaml %s --mesh %s --ts="%s"%s%s'
           % (method, mesh, ts, " --isotope" if isotope else "", nac_flag))
     return "%s 2>&1 | tee phono3py_kappa.log\n%s" % (p3, extract)
 

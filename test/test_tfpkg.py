@@ -189,6 +189,50 @@ def test_cli_dry_run():
         os.unlink(path)
 
 
+def test_stepconf_reserved_params():
+    # 集群注入键（POTCAR_DIR/REFERENCES_DIR 等）必须在白名单里，
+    # 否则 MACE gen 脚本会误报"不认识的键"（v2.0 拷贝回归的回归测试）。
+    import importlib.util
+    sp = importlib.util.spec_from_file_location(
+        "_stepconf", os.path.join(_ROOT, "skill/_common/opt/stepconf.py"))
+    mod = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(mod)
+    for k in ("POTCAR_DIR", "REFERENCES_DIR", "MACE_MODEL_DIR", "AMSET_ENV",
+              "CONDA_SH", "CONDA_ENV", "BANDGAP"):
+        assert k in mod.RESERVED_PARAMS, "%s 缺失" % k
+    # StepConf 对保留键应无条件放行（spec 里没有也不报错）
+    merged = mod.parse("[params]\nFMAX = 0.01\nPOTCAR_DIR = /x\nREFERENCES_DIR = /y\n")
+    sc = mod.StepConf(merged, {"FMAX": (0.01, "float")}, path="t")
+    assert sc["FMAX"] == 0.01
+
+
+def test_retry_targets():
+    m = {"steps": [
+        {"name": "s1", "label": "s1", "kind": "FAIL"},
+        {"name": "s2", "label": "s2", "kind": "OK"},
+        {"name": "s3", "label": "s3", "kind": "R"},
+    ]}
+    retryable = lambda s: s["kind"] == "FAIL"
+    tgt = tfpkg._retry_targets(m, retryable)
+    assert [s["name"] for s in tgt] == ["s1"], "retry 应只命中 FAIL 步"
+
+
+def test_dry_run_steps_for():
+    # --dry-run 按命令语义筛真实目标：retry=FAIL，start=就绪，stop=有作业
+    s1 = {"name": "s1", "label": "S1", "kind": "FAIL"}
+    s2 = {"name": "s2", "label": "S2", "kind": "TODO"}
+    s3 = {"name": "s3", "label": "S3", "kind": "R", "job": {"id": "9"}}
+    m = {"steps": [s1, s2, s3], "actives": [s2]}
+    assert [s["name"] for s in tfpkg._dry_run_steps_for("retry", m, None)] == ["s1"]
+    assert [s["name"] for s in tfpkg._dry_run_steps_for("start", m, None)] == ["s2"]
+    assert [s["name"] for s in tfpkg._dry_run_steps_for("stop", m, None)] == ["s3"]
+    assert [s["name"] for s in tfpkg._dry_run_steps_for("fetch", m, None)] == []
+    # 带 -j 指定步骤时按名字命中（即使非 FAIL）
+    assert [s["name"] for s in tfpkg._dry_run_steps_for("retry", m, "S2")] == ["s2"]
+    # rerun/clean 无 -j 是整材料级
+    assert tfpkg._dry_run_steps_for("rerun", m, None) is None
+
+
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
