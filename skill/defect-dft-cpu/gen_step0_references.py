@@ -71,7 +71,7 @@ def main():
             D.assemble_potcar(order, potdir, out_path=str(d / "POTCAR"))
             D.render_submit(D.find_submit_tpl(True), str(d / "submit.sh"), "ref_" + name)
         if not (d / "OUTCAR").exists():
-            q = subprocess.run(["squeue", "-u", user, "-h", "-o", "%.12j"],
+            q = subprocess.run(["squeue", "-u", user, "-h", "-o", "%j"],
                                capture_output=True, text=True).stdout
             if ("ref_" + name) not in q:
                 subprocess.run(["sbatch", "submit.sh"], cwd=str(d))
