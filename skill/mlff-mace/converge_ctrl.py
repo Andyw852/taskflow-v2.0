@@ -53,11 +53,16 @@ def main():
     matdir = Path(a.matdir)
     cwd = Path.cwd()
     val = json.loads(Path(a.validation).read_text(encoding="utf-8"))
-    rmse = float(val.get("phonon_rmse_THz"))
+    # [FIX-lite] phonon_rmse_THz 可为 None（轻量模式：无 DFT fc2 基准，声子闸 NA）——
+    # 不崩、不出误导性停机判定，status=not_benchmarked（S9 不发布，等补 displ/REF_FC2）
+    _rmse_v = val.get("phonon_rmse_THz")
+    rmse = float(_rmse_v) if _rmse_v not in (None, "NA") else None
     curve = json.loads(Path(a.curve).read_text(encoding="utf-8")) if a.curve and Path(a.curve).is_file() \
         else {}
     plateau = bool(curve.get("curve_plateau", False))
-    gates_failed = [g["name"] for g in val.get("gates", []) if g.get("required") and not g.get("pass")]
+    # pass is False 才算失败；NA（pass=None）不算（轻量模式声子闸）
+    gates_failed = [g["name"] for g in val.get("gates", [])
+                    if g.get("required") and g.get("pass") is False]
 
     hist = mc.conv_history(str(matdir / mc.CONV_HISTORY))
     # 上一代 = 最后一条 gen < 当前代 的记录。同一代重跑时 hist[-1] 是本代旧记录，
@@ -65,7 +70,7 @@ def main():
     _prev = [r for r in hist if int(r.get("gen", -1)) != a.gen]
     prev = _prev[-1] if _prev else None
     prev_rmse = prev.get("rmse_thz") if prev else None
-    delta = (prev_rmse - rmse) if prev_rmse is not None else None
+    delta = (prev_rmse - rmse) if (prev_rmse is not None and rmse is not None) else None
     stagnant = bool(delta is not None and delta < a.improve_min)
     prev_status = prev.get("status") if prev else None
     n_stagnant = 1 if stagnant else 0
@@ -79,7 +84,11 @@ def main():
 
     # [FIX-REQUIRED] required 闸必须影响 status：主闸过但 required 闸有失败
     # 判 fail（S9 不发布），不能只靠主闸就 pass——否则 required 标记是装饰。
-    if rmse < a.rmse_max and not gates_failed:
+    if rmse is None:
+        status = "not_benchmarked"
+        reason = ("本代无 DFT fc2 基准（0 应变 displ 帧未算或未给 REF_FC2_PATH）——"
+                  "声子主闸 NA，无法判定收敛。要出正式 status：跑完 displ 帧 S5 或给 REF_FC2_PATH")
+    elif rmse < a.rmse_max and not gates_failed:
         status = "pass"
         reason = "声子 RMSE %.3f THz < RMS_MAX=%.2f，required 闸全过" % (rmse, a.rmse_max)
     elif rmse < a.rmse_max:
@@ -132,7 +141,7 @@ def main():
     record = {
         "gen": a.gen,
         "n_frames": int(val.get("n_frames_total") or val.get("n_frames") or 0),
-        "rmse_thz": round(rmse, 4),
+        "rmse_thz": (round(rmse, 4) if rmse is not None else None),
         "force_rmse_meV_A": round(float(val.get("test_force_rmse_meV_A") or 0.0), 2),
         "delta_rmse": (round(delta, 4) if delta is not None else None),
         "curve_plateau": bool(plateau),

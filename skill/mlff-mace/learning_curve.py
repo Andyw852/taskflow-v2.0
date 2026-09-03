@@ -128,6 +128,8 @@ def eval_point(model_path, a, cwd, matdir, ref_freqs, reps):
                    cwd=str(rel), capture_output=True)
     if not (rel / "CONTCAR").is_file():
         return f_rmse, None
+    if ref_freqs is None:          # [FIX-lite] 无 DFT 基准（displ 未算/无 REF_FC2）→ 只出力曲线
+        return f_rmse, None
     prim_m = ase_read(str(rel / "CONTCAR"), format="vasp")
     ph_m, _, _ = bm.phonopy_from_model(prim_m, reps, calc, 0.01)
     f_m, _, _ = bm.freqs_on_mesh(ph_m, reps, with_eig=False)
@@ -170,7 +172,9 @@ def main():
     reps = [int(x) for x in sc_sum["supercell_reps"]]
 
     # DFT 基准频率（幂等：ref_freqs.npy 存在就复用，免重算）
+    # [FIX-lite] 无 displ 帧力 → ref_freqs=None，声子 MAE 曲线 NA（只出力 RMSE 曲线），不崩
     ref_path = Path(a.ref_freqs) if a.ref_freqs else outdir / "ref_freqs.npy"
+    ref_freqs = None
     if ref_path.is_file():
         ref_freqs = np.load(str(ref_path))
         print("[..] 复用 DFT 基准频率 %s" % ref_path)
@@ -181,14 +185,20 @@ def main():
         if int(man.get("generation", 0)) > 0:
             _m0 = mc.read_json(matdir / "step4_genstruct" / "gen-0" / "struct_manifest.json", {})
             man["displ_frames"] = _m0.get("displ_frames", [])
-        from dataset_build import parse_outcar
+        from dataset_build import parse_outcar, outcar_done
         d0 = [e for e in man.get("displ_frames", []) if abs(e["strain_grun"]) < 1e-9]
-        forces = [parse_outcar(matdir / "step5_label" / e["cfg_id"] / "OUTCAR")["F"]
-                  for e in d0]
-        ph_dft = bm.phonopy_from_manifest(prim_dft, reps, d0, forces, a.ref_disp)
-        ref_freqs, _, _ = bm.freqs_on_mesh(ph_dft, reps, with_eig=False)
-        ref_freqs = bm.sorted_freqs(ref_freqs)
-        np.save(str(ref_path), ref_freqs)
+        _miss = [e["cfg_id"] for e in d0
+                 if not outcar_done(matdir / "step5_label" / e["cfg_id"] / "OUTCAR")]
+        if d0 and not _miss:
+            forces = [parse_outcar(matdir / "step5_label" / e["cfg_id"] / "OUTCAR")["F"]
+                      for e in d0]
+            ph_dft = bm.phonopy_from_manifest(prim_dft, reps, d0, forces, a.ref_disp)
+            ref_freqs, _, _ = bm.freqs_on_mesh(ph_dft, reps, with_eig=False)
+            ref_freqs = bm.sorted_freqs(ref_freqs)
+            np.save(str(ref_path), ref_freqs)
+        else:
+            print("[WARN] 轻量模式：无可用 displ 帧力（缺 %d/%d）→ 学习曲线只出力 RMSE"
+                  % (len(_miss), len(d0)))
 
     rows = []
     for n in want:
@@ -209,9 +219,13 @@ def main():
         if rows[i]["n"] * 2 != rows[i + 1]["n"]:
             continue
         r0, r1 = rows[i], rows[i + 1]
-        if None in (r0["phonon_mae_THz"], r1["phonon_mae_THz"]):
-            continue
         rel_f = (r0["force_rmse_meV_A"] - r1["force_rmse_meV_A"]) / max(r0["force_rmse_meV_A"], 1e-9)
+        if None in (r0["phonon_mae_THz"], r1["phonon_mae_THz"]):
+            # [FIX-lite] 无 DFT 基准（声子 MAE NA）→ 只用力 RMSE 判平
+            if rel_f < a.tol:
+                plateau = True
+                break
+            continue
         rel_p = (r0["phonon_mae_THz"] - r1["phonon_mae_THz"]) / max(r0["phonon_mae_THz"], 1e-9)
         if rel_f < a.tol and rel_p < a.tol:
             plateau = True
