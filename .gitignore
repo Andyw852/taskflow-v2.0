@@ -56,15 +56,20 @@ tmp/
 
 # ---- 系统 / 其它 ----
 .DS_Store
-# ---- 临时/调试残留（一次性清理后防复发）----
+# ---- 临时/调试残留（含并行 fp13 GPU 修复会话的产物，只忽略不删除）----
 scratch_*.py
 scratch_*.txt
-poll_fp*.sh
+poll*.sh
 fp13_*.slurm
 fp_arch.make_3090
 DSH_WSL_CRASH_REPORT.md
 shengbte_test_summary.md
-poll_*.sh
 CONTROL.*
 test_launch.sh
 fp13_gpu_bug_report.md
+fp13_gpu_fix_attempts.md
+apply_*.py
+rewrite*.py
+fix_*.sh
+dl_*.sh
+processes_local.f90
