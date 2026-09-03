@@ -275,5 +275,6 @@ CHECKERS = {
     "finetune": ck_finetune,
     "benchmark": ck_benchmark,
     "publish": ck_publish,
-    "relax_injob": ck_relax_injob,
+    # relax_injob 已由公共池 skill/_common/opt/checks_relax.py 注册，此处不再重复
+    # （本技能 step1 用 check: step1，内部直接调用上方 ck_relax_injob 函数，无需注册该名）
 }

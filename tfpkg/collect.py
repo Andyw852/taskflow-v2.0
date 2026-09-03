@@ -165,7 +165,7 @@ def collect_v3_batch(cfg, segs):
         (host, wdir), entries = item
         seg_ms = {}
         for t, steps, m in entries:   # 同组内按段聚合（保持首次出现顺序）
-            seg_ms.setdefault(id(t), {"t": t, "steps": steps, "ms": []})["ms"].append(m)
+            seg_ms.setdefault(id(t), {"t": t, "steps": steps, "ms": [], "wdir": wdir})["ms"].append(m)
         subs, back = [], []
         for g in seg_ms.values():
             # v1.1 skill_subdir：采集键 = 材料名/技能子目录（远端步骤目录多一层），
@@ -223,6 +223,10 @@ def collect_v3_batch(cfg, segs):
                           "log_dir", "fetch_files", "template_map",
                           "_subdir", "_skill_dir_local", "rpath"):
                     r[k] = m[k]
+                # v1.13：per-step hpc 拆分时材料会出现在多个 (host, work_dir) 组，
+                # 材料级 path 必须用「材料默认集群」的 rpath（work_dir_eff），
+                # 不能是采集顺序里第一个组的路径（否则 Dir 显示错集群、gen 推送错目录）。
+                r["path"] = m["rpath"]
                 r["_seg"] = {"steps_cfg": t.get("steps"),
                              "gen_need": t.get("gen_need"),
                              "aux_files": t.get("aux_files"),
@@ -237,6 +241,7 @@ def collect_v3_batch(cfg, segs):
                 # v1.12：每步记自己所在集群的 host（跨集群拆分时各组 host 不同）。
                 for s in r["steps"]:
                     s["_host"] = _host or m["host_eff"]
+                    s["_wd"] = g.get("wdir")
                 # v1.12：材料可能出现在多个 (host, wd) 组（每步可指定超算），
                 # 步骤要合并而不是覆盖（保持原顺序，追加新组的步骤）。
                 _lst = seg_results[id(t)]
@@ -290,15 +295,23 @@ def _ssh_cmd_pre(cfg, host, pre_opts, remote_args):
 # ===== collect (原 L2069-L2097) =====
 def collect(cfg, types, host="__default__"):
     # v1.2：把本次涉及技能的 checks.py 源码一起打包，远端注册成判据
-    from tfpkg import COLLECTOR, skill_checks_for
+    from tfpkg import COLLECTOR, _load_yaml_file, pkg_setting_path, skill_checks_for
     extra = skill_checks_for(cfg, [td.get("key") for td in types])
+    if host == "__default__":
+        host = cfg.get("host")
+    _pp = (cfg.get("remote_path_prefix") or "").strip()
+    # 集群级 remote_path_prefix 覆盖（同 run_remote）
+    if host:
+        _cp = pkg_setting_path(str(host) + ".yaml")
+        if _cp:
+            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
+            if _cpp:
+                _pp = str(_cpp).strip()
     payload = base64.b64encode(
         json.dumps({"user": cfg.get("user"), "types": types,
                     "extra_checks": extra,
-                    "path_prefix": (cfg.get("remote_path_prefix") or "")}).encode()).decode()
+                    "path_prefix": _pp}).encode()).decode()
     args = ["python3", "-", "--config64", payload]
-    if host == "__default__":
-        host = cfg.get("host")
     cmd = (_ssh_cmd_pre(cfg, host, ["-o", "ConnectTimeout=60"], ["timeout", "170"] + args)
            if host else args)
     try:
@@ -323,9 +336,18 @@ def collect(cfg, types, host="__default__"):
 def run_remote(cfg, shell_line, host="__default__", use_stdin=False):
     """use_stdin=True 时整个脚本经 stdin 投递（bash -s），不受 argv 长度限制
     （gen 推送大量 base64 文件时必须用，否则 Argument list too long）。"""
+    from tfpkg import _load_yaml_file, pkg_setting_path
     if host == "__default__":
         host = cfg.get("host")
     _pp = (cfg.get("remote_path_prefix") or "").strip()
+    # 集群级 remote_path_prefix 覆盖：setting/<ssh_host>.yaml 里可写 remote_path_prefix
+    # （hanhai25 等新集群用自己的 pybin，含 python/python3/vaspkit 软链，供 gen 脚本用）。
+    if host:
+        _cp = pkg_setting_path(str(host) + ".yaml")
+        if _cp:
+            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
+            if _cpp:
+                _pp = str(_cpp).strip()
     if _pp and host:
         shell_line = "export PATH=\"%s:$PATH\"; %s" % (_pp, shell_line)
     if use_stdin:

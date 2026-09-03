@@ -7,6 +7,7 @@
 import os
 import sys
 import time
+import hashlib
 import json
 
 # ===== _dbg_t (原 L6656-L6660) =====

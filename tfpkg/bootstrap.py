@@ -17,6 +17,7 @@ _PKG_ROOT = os.path.normpath(os.path.dirname(_PKG_DIR))
 """
 import argparse
 import base64
+import datetime
 import glob
 import hashlib
 import json
@@ -239,6 +240,9 @@ USAGE = """\
   summary   极简汇总（只读，省 token）：每任务类型一行计数 + FAIL 清单。
             巡检首选：无异常时输出只有几行；有 FAIL 再按清单单点深挖。
             同 list，默认走本地缓存，--refresh 强制刷新
+  probe     只读探测作业健康度：判每作业 弛豫/收敛/SCF发散/崩溃/掉队/排队，
+            输出结构化 JSON（判据+结论），不采集、不提交、不改文件。
+            需 -p 材料，可配 -j 步骤（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）
   start     开始/提交：输入没生成先 gen 再 sbatch。无 -p = 一键推进全部材料。
             ★ 唯一会向超算提交作业的命令（init/retry/rerun 都只生成不提交）
   stop      取消作业。无 -p = 一键停止全部作业（有确认）；-p = 该材料全部作业；-p -job = 指定步骤。
@@ -254,7 +258,7 @@ USAGE = """\
             -p X = 该材料清空；-p C20 = 该体系所有材料；-p X -j Y = 只删该步骤目录。
             关联作业一并取消（有确认，-y 跳过）
   auto      一键开关自动提交：tf auto on 开 / tf auto off 关 / 无参看当前。
-            改写全局 tf.yaml 的 auto_advance；关后 status/watch 只看不提交，
+            改写全局 tf.yaml 的 auto_advance；关后 status/monitor 只看不提交，
             手动 start/retry/rerun 不受影响（动目录、恢复备份前先 off）
   hpc       把 -p 指定的项目分配到指定超算（未指定的项目一律不动）：
             tf -p X,Y hpc 集群名              材料级（该材料全部技能生效）
@@ -279,17 +283,21 @@ USAGE = """\
             tf -tt elastic init 追加 elastic 段，并建技能子目录）
   fetch     手动强制拉回结果（status 时已自动保存完成的步骤到 result/，
             项目 setting.yaml 里 auto_fetch: false 可关闭自动保存）
-  watch     监控模式：每 -i 秒（默认 300）自动刷新状态、auto-fetch 算完步骤、
+  monitor   监控模式：每 -i 秒（默认 300）自动刷新状态、auto-fetch 算完步骤、
             auto-advance 提交下一步；挂死作业自动恢复（hang_check，默认开，见 5.6）；有变化才打印总表；Ctrl+C 退出。
             每轮自动检测配置文件改动（tf.yaml、project_setting/*.yaml、
             材料或技能的 hpc.yaml）并重载——改配置不用重启监控。
             加 -d 放后台运行（日志 .tf_watch.log，不占用终端），
-            tf watch --stop 停止后台监控（任意目录可执行）。
+            tf monitor --stop 停止后台监控（任意目录可执行），
+            tf monitor restart 重做后台监控（先停旧的再起新的）。
             零输入全自动：tf.yaml 里 auto_watch: true（任何 tf 命令顺带拉起
-            监控）+ tf watch --install（crontab 保活，重启后自动恢复，
-            --uninstall 移除）
+            监控）+ tf monitor --install（crontab 保活，重启后自动恢复，
+            --uninstall 移除）。watch 是 monitor 的旧名，仍可用。
   json      输出 JSON
   config    打印示例配置
+  push      把「当前目录」git 仓库的改动提交到 GitHub（本地真实版 + 远端脱敏版，
+            敏感信息自动脱敏）；消息作位置参数：tf push "改了 formation_energy"。
+            等价独立脚本 ~/.local/bin/tfpush；内部调 scripts/tf-git-push.sh
   help      显示本帮助
 
 选项:
@@ -316,7 +324,7 @@ USAGE = """\
                   --show-done 临时取消）
   --diff          summary 与上次快照对比，无变化不输出（省 token，巡检用）
   --refresh       list/summary 强制跳过本地状态缓存，重新 ssh 采集
-  -i, --interval  watch 刷新间隔秒数（默认 300）
+  -i, --interval  monitor 刷新间隔秒数（默认 300）
   -y, --yes       stop/rerun 免确认
   -V, --version   显示版本号
   -h, --help      显示帮助（同 tf help）
@@ -803,6 +811,13 @@ def scan_project_configs(roots):
     result/log/隐藏目录——比旧实现 7 个 glob（各遍历整棵树）更快，且不枚举
     数据文件（os.walk 在 WSL DrvFS 等慢盘上枚举文件极慢）。"""
     seen, found = {}, []
+    # [FIX-重复配置] 归档/备份目录不参与扫描（软件画图/备份/archive/backup/回收站等），
+    # 否则整棵 taskflow 归档副本的 tf_*.yaml 会与活跃仓库同名冲突、让 init 直接退出。
+    _ARCHIVE_MARK = ("软件画图", "备份", "archive", "backup", "回收站", "Trash", ".bak", "_bak", "旧")
+
+    def _is_archive(p):
+        return any(m in p for m in _ARCHIVE_MARK)
+
     for r in roots:
         r = os.path.realpath(os.path.expanduser(str(r)))
         if not os.path.isdir(r):
@@ -825,15 +840,27 @@ def scan_project_configs(roots):
                         continue
                     if e.name == "project_setting":
                         ps_entries.append(e.path)
-                    elif e.name not in ("result", "log") and not e.name.startswith("."):
+                    elif e.name not in ("result", "log") and not e.name.startswith(".") \
+                            and not _is_archive(e.path):   # [FIX-重复配置] 归档目录不下探
                         subdirs.append(e.path)
             for ps in ps_entries:
                 for p in sorted(glob.glob(os.path.join(ps, "tf_*.yaml"))):
                     name = os.path.basename(p)[len("tf_"):-len(".yaml")]
                     if name in seen and seen[name] != p:
-                        sys.exit("错误：项目配置名重复 tf_%s.yaml：\n  %s\n  %s\n"
-                                 "命名规则 tf_<项目名>.yaml，全局唯一，请改其中一个的名字。"
-                                 % (name, seen[name], p))
+                        # [FIX-重复配置] 同名冲突不直接退出：归档/备份副本忽略（保留活跃的），
+                        # 其余警告取先扫到的。真正的活跃同名仍是数据问题，但不再阻塞流程。
+                        if _is_archive(p) and not _is_archive(seen[name]):
+                            print("警告：配置名 tf_%s.yaml 重复，忽略归档副本：%s"
+                                  % (name, p), file=sys.stderr)
+                            continue
+                        if _is_archive(seen[name]) and not _is_archive(p):
+                            print("警告：配置名 tf_%s.yaml 重复，忽略归档副本：%s"
+                                  % (name, seen[name]), file=sys.stderr)
+                        else:
+                            print("警告：配置名 tf_%s.yaml 重复，取第一个：\n  %s\n  %s"
+                                  % (name, seen[name], p), file=sys.stderr)
+                        seen[name] = p
+                        found = [(n2, p2, d2) for n2, p2, d2 in found if n2 != name]
                     seen[name] = p
                     found.append((name, p, os.path.dirname(os.path.dirname(p))))
             stack.extend(subdirs)

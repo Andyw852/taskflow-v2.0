@@ -9,6 +9,7 @@ import re
 import json
 import time
 import shlex
+import shutil
 import hashlib
 import base64
 import collections
@@ -1474,10 +1475,10 @@ def cmd_auto(cfg, arg):
         return 1
     print("auto_advance 已%s（%s）。" % ("开启" if on else "关闭", path))
     if on:
-        print("status/watch 会自动提交可开始的步骤；手动 start/retry/rerun 不受影响。")
+        print("status/monitor 会自动提交可开始的步骤；手动 start/retry/rerun 不受影响。")
     else:
-        print("status/watch 只看不提交；手动 start/retry/rerun 不受影响。")
-        print("后台监控仍在跑（只拉结果）；停监控用 tf watch --stop。")
+        print("status/monitor 只看不提交；手动 start/retry/rerun 不受影响。")
+        print("后台监控仍在跑（只拉结果）；停监控用 tf monitor --stop。")
     return 0
 
 # ===== cmd_adopt (原 L6278-L6388) =====
@@ -1711,7 +1712,7 @@ def cmd_migrate_subdir(cfg, data, proj, yes, dry):
 def _watch_files(cfg=None):
     from tfpkg import WATCH_LOG, WATCH_PID
     """watch 的 pid/log 路径：v1.10 起锚定配置文件所在目录（setting/），
-    在任何目录执行 tf watch --stop 都找得到；旧版 cwd 下的 pid 文件由
+    在任何目录执行 tf monitor --stop 都找得到；旧版 cwd 下的 pid 文件由
     _watch_stop 兜底识别。"""
     base = (cfg or {}).get("_config_dir") or os.getcwd()
     return (os.path.join(base, WATCH_PID), os.path.join(base, WATCH_LOG))
@@ -1743,12 +1744,12 @@ def _watch_pid_alive(pid):
 
 # ===== _watch_daemon (原 L6878-L6908) =====
 def _watch_daemon(a, mat_toks, root, cfg=None):
-    """tf watch -d：把监控作为 detached 子进程放后台，日志写配置目录下。"""
+    """tf monitor -d：把监控作为 detached 子进程放后台，日志写配置目录下。"""
     pidfile, logfile = _watch_files(cfg)
     pid, _ = _watch_running_pid(cfg)
     if pid:
-        print("tf watch 已在后台运行 (PID %d)" % pid)
-        print("日志：%s（tail -f 查看）；停止：tf watch --stop" % logfile)
+        print("tf monitor 已在后台运行 (PID %d)" % pid)
+        print("日志：%s（tail -f 查看）；停止：tf monitor --stop" % logfile)
         return
     argv = [sys.executable, os.path.realpath(sys.argv[0])]
     if a.config:
@@ -1761,7 +1762,7 @@ def _watch_daemon(a, mat_toks, root, cfg=None):
         argv += ["-x", a.exclude]
     if a.user:
         argv += ["-u", a.user]
-    argv += ["watch", "-i", str(a.interval)]
+    argv += ["monitor", "-i", str(a.interval)]
     if root:
         argv.append(root)
     argv += mat_toks
@@ -1770,13 +1771,13 @@ def _watch_daemon(a, mat_toks, root, cfg=None):
                          stderr=subprocess.STDOUT, start_new_session=True)
     with open(pidfile, "w") as f:
         f.write(str(p.pid))
-    print("tf watch 已转入后台 (PID %d)" % p.pid)
+    print("tf monitor 已转入后台 (PID %d)" % p.pid)
     print("日志：%s（tail -f %s 查看）" % (logfile, logfile))
-    print("停止：tf watch --stop")
+    print("停止：tf monitor --stop")
 
 # ===== _watch_stop (原 L6911-L6924) =====
 def _watch_stop(cfg=None):
-    """tf watch --stop：按 pid 文件停止后台监控（任意目录可执行）。"""
+    """tf monitor --stop：按 pid 文件停止后台监控（任意目录可执行）。"""
     import signal as _sig
     pid, pidfile = _watch_running_pid(cfg)
     if pid:
@@ -1785,15 +1786,15 @@ def _watch_stop(cfg=None):
             os.remove(pidfile)
         except OSError:
             pass
-        print("已停止 tf watch (PID %d)。" % pid)
+        print("已停止 tf monitor (PID %d)。" % pid)
         return 0
-    print("没有运行中的 tf watch。")
+    print("没有运行中的 tf monitor。")
     return 1
 
 # ===== _watch_ensure (原 L6927-L6950) =====
 def _watch_ensure(cfg):
     """v1.10 auto_watch：任何 tf 命令顺带确保后台监控在跑（没在跑就拉起）。
-    配合 tf watch --install 的 crontab 保活 = 零输入全自动：
+    配合 tf monitor --install 的 crontab 保活 = 零输入全自动：
     重启/WSL 关闭后 cron 拉起；平时敲任何 tf 命令也会顺带拉起。
     保活失败绝不影响主命令。"""
     if not cfg.get("auto_watch"):
@@ -1806,32 +1807,32 @@ def _watch_ensure(cfg):
         argv = [sys.executable, os.path.realpath(sys.argv[0])]
         if cfg.get("_config_path"):
             argv += ["-c", cfg["_config_path"]]
-        argv += ["watch", "-i", str(cfg.get("watch_interval") or 300)]
+        argv += ["monitor", "-i", str(cfg.get("watch_interval") or 300)]
         log = open(logfile, "ab", buffering=0)
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
         with open(pidfile, "w") as f:
             f.write(str(p.pid))
-        print("已自动启动后台监控 tf watch (PID %d)。日志：%s" % (p.pid, logfile))
+        print("已自动启动后台监控 tf monitor (PID %d)。日志：%s" % (p.pid, logfile))
     except Exception:
         pass
 
 # ===== _watch_cron (原 L6953-L6979) =====
 def _watch_cron(install):
-    """tf watch --install/--uninstall：crontab 保活——每 10 分钟检查，
-    监控死了（重启/崩溃）自动拉起。tf watch -d 有 pid 检查，不会重复启动。"""
+    """tf monitor --install/--uninstall：crontab 保活——每 10 分钟检查，
+    监控死了（重启/崩溃）自动拉起。tf monitor -d 有 pid 检查，不会重复启动。"""
     import shutil as _sh
     marker = "# tf-watch-keepalive"
     if not _sh.which("crontab"):
         print("系统没有 crontab 命令。手动保活方案：")
-        print("  每 10 分钟执行一次：%s watch -d" % os.path.realpath(sys.argv[0]))
+        print("  每 10 分钟执行一次：%s monitor -d" % os.path.realpath(sys.argv[0]))
         return 1
     cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     old = [] if cur.returncode else [l for l in cur.stdout.splitlines()
                                      if marker not in l]
     if install:
         exe = os.path.realpath(sys.argv[0])
-        old.append("*/10 * * * * %s watch -d >/dev/null 2>&1  %s"
+        old.append("*/10 * * * * %s monitor -d >/dev/null 2>&1  %s"
                    % (exe, marker))
     r = subprocess.run(["crontab", "-"], input="\n".join(old) + "\n",
                        text=True, capture_output=True)
@@ -1839,8 +1840,8 @@ def _watch_cron(install):
         print("写入 crontab 失败：%s" % (r.stderr or "").strip())
         return 1
     if install:
-        print("已写入 crontab 保活：每 10 分钟确保 tf watch 在跑（重启后自动恢复）")
-        print("查看：crontab -l；移除：tf watch --uninstall")
+        print("已写入 crontab 保活：每 10 分钟确保 tf monitor 在跑（重启后自动恢复）")
+        print("查看：crontab -l；移除：tf monitor --uninstall")
     else:
         print("已移除 crontab 保活。")
     return 0

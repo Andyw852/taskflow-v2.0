@@ -15,6 +15,12 @@ import re
 import json
 import time
 import shlex
+import base64
+import glob
+import hashlib
+import shutil
+import subprocess
+import threading
 
 
 # ===== 来自 06_state.py =====
@@ -232,7 +238,7 @@ def _gen_step_input(cfg, t, m, s):
     sc = step_cfg(t, s["name"], m)
     if sc.get("run") == "gen" or s["has_incar"]:
         return True
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s[%s|%s]：预生成输入失败：%s"
               % (m["name"], m["tt"], s["label"], (out or "").strip()))
@@ -414,7 +420,7 @@ def remote_scancel(cfg, jobids, host="__default__"):
     return rc == 0, out
 
 # ===== remote_gen (原 L3282-L3366) =====
-def remote_gen(cfg, t, m, sname, host=None):
+def remote_gen(cfg, t, m, sname, host=None, wd=None):
     from tfpkg import STEP_CONF, build_step_conf, find_asset, run_remote, sh_b64, step_cfg
     """执行 gen：先建目录、补 POSCAR（v3 本地模式）和 gen_need 依赖文件、gen 脚本，
     再运行。文件来源：find_asset 查找链（project_setting > skill_dir，支持
@@ -424,7 +430,15 @@ def remote_gen(cfg, t, m, sname, host=None):
     gen = sc.get("gen")
     if not gen:
         return False, "任务类型 %s 的步骤 %s 没有配置 gen" % (t["key"], sname)
-    gen = gen.format(mat=m["name"], matdir=m["path"], root=t["root"],
+    # v1.13：per-step hpc 拆分时步骤远端目录用自己集群的 work_dir（_wd），
+    # 不能用材料级 m["path"]（那是材料默认集群的路径，别的集群上用会 mkdir 错目录）。
+    if wd:
+        _wd0 = os.path.normpath(os.path.expanduser(str(wd)))
+        step_dir = (os.path.join(_wd0, m["name"], m["_subdir"])
+                    if m.get("_subdir") else os.path.join(_wd0, m["name"]))
+    else:
+        step_dir = m["path"]
+    gen = gen.format(mat=m["name"], matdir=step_dir, root=t["root"],
                      step=sname, tt=t["key"])
     seg = (m.get("_seg") or {})
     gd = seg.get("gen_dir") or t.get("gen_dir")
@@ -446,8 +460,8 @@ def remote_gen(cfg, t, m, sname, host=None):
         for lg in (m.get("template_map") or {}):
             if lg not in need:
                 need.append(lg)
-    line = "mkdir -p %s && cd %s && " % (shlex.quote(m["path"]),
-                                         shlex.quote(m["path"]))
+    line = "mkdir -p %s && cd %s && " % (shlex.quote(step_dir),
+                                         shlex.quote(step_dir))
     if is_py:  # gen 脚本以 skill 为唯一样板：总是覆盖推送（本地改了立即生效）
         gsrc = find_asset(cfg, t, m, gen_script, sname)
         if gsrc:
@@ -618,7 +632,7 @@ def do_run_gen_step(cfg, t, m, s, tag):
     状态显示 error，retry/rerun 可重来。"""
     if s.get("job") and not kill_if_queued(cfg, s, True, tag):
         return False
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s: 运行失败。%s" % (tag, out))
         return False
@@ -659,7 +673,7 @@ def do_submit(cfg, t, m, s, force, gen_first, contcar_cp, tag, submit=True):
         return False
     if gen_first or not s["has_incar"]:
         _relay_prev_across_host(cfg, m, s)   # v1.12：跨集群回传前序产物
-        ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+        ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
         if not ok:
             print("%s: gen 失败。%s" % (tag, out))
             return False
@@ -907,7 +921,7 @@ def cmd_step_init(cfg, data, proj, job, force):
               % (tag, s["dir"], proj, job))
         return 0
     sc = step_cfg(t, s["name"], m)
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s: gen 失败。%s" % (tag, out))
         return 1
@@ -1879,4 +1893,3 @@ def rerun_project(cfg, t, m, yes):
     s0["job"] = None
     return do_submit(cfg, t, m, s0, force=False, gen_first=True, contcar_cp=False,
                      tag="rerun " + tag_of(m, first), submit=False)
-
