@@ -67,3 +67,4 @@ shengbte_test_summary.md
 poll_*.sh
 CONTROL.*
 test_launch.sh
+fp13_gpu_bug_report.md

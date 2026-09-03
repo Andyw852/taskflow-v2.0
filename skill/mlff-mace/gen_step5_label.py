@@ -84,6 +84,84 @@ def write_kpoints(out, grid):
     Path(out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
+def poscar_elements(poscar_text):
+    """POSCAR 的元素段序列（符号行 + 数量行，都在 Direct/Cartesian 之前）。
+    返回 (symbols, counts)。
+
+    VASP POSCAR 布局：0 注释 / 1 缩放 / 2-4 晶格 / 5 符号行 / 6 数量行 /
+    7 (Selective dynamics | Direct | Cartesian)。mlff 自写盘恒为：5 符号、
+    6 数量、7 Direct；但 step1 CONTCAR 由 VASP 写，可能带 Selective dynamics
+    （在数量行之后）。只认两种模式：
+      A. 第 5 行是元素符号（首 token 像 "C"/"Ba"/"Ba_sv"）→ 符号行=5，数量行=6
+      B. 第 5 行直接是数量（无符号行变体，少见）→ 符号行=[]，数量行=5
+    折行：VASP 符号/数量行不折行（每行 ≤ 10 种元素的限制对 mlff 不触发），
+    但保险起见把 Direct 前的所有行按 token 归类。"""
+    lines = poscar_text.splitlines()
+    body = []
+    for ln in lines[5:]:
+        s = ln.strip()
+        if not s:
+            continue
+        if s.lower().startswith(("direct", "cartesian", "selective")):
+            break
+        body.append(s)
+    if not body:
+        sys.exit("[ERROR] POSCAR 解析不出元素区：\n%s" % poscar_text[:300])
+    syms, cnts = [], []
+    for s in body:
+        toks = s.split()
+        if all(t.isdigit() for t in toks):
+            cnts += [int(t) for t in toks]
+        else:
+            syms += toks
+    if not cnts:
+        sys.exit("[ERROR] POSCAR 解析不出数量行：\n%s" % poscar_text[:300])
+    return syms, cnts
+
+
+def build_potcar_for_frame(frame_potcar_syms, step1_potcar_text):
+    """按该帧 POSCAR 的元素列表（有序、可能缺某元素如 iso 帧）从 step1 的完整
+    POTCAR 里重拼一份：切出每个元素的段，按 POSCAR 段序拼接。
+
+    POTCAR 每段以一行 "  PAW_PBE <sym> ..." 开头（真实文件段首如
+    "  PAW_PBE C 08Apr2002"）。切分后把
+    各段头部 TITEL 里的元素名（第二个空白 token，去掉 _sv/_pv/_d 后缀）作为键。
+    找不到某元素 → [ERROR]（比让 VASP 悄悄用错势好）。"""
+    lines = step1_potcar_text.splitlines(keepends=True)
+    starts = []
+    for idx, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("PAW_PBE "):
+            tok = s.split()[1]
+            base = tok.split("_")[0]
+            starts.append((idx, base, tok))
+    if not starts:
+        sys.exit("[ERROR] step1 POTCAR 解析不出 PAW_PBE 段首行")
+    segs = {}
+    for k, (idx, base, tok) in enumerate(starts):
+        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
+        segs.setdefault(base, []).append("".join(lines[idx:end]))
+    out = []
+    for sym in frame_potcar_syms:
+        base = sym.split("_")[0]
+        if base not in segs:
+            sys.exit("[ERROR] 该帧需要元素 %s，但 step1 POTCAR 里只有 %s —— "
+                     "POTCAR 与结构元素不一致（基座模型元素覆盖检查应拦住）"
+                     % (sym, sorted(segs)))
+        out.append(segs[base][0])
+    return "".join(out)
+
+
+def potcar_element_syms(potcar_text):
+    """从 POTCAR 文本提取各段元素（TITEL 行第二 token，去 _sv/_pv/_d 后缀）。"""
+    out = []
+    for ln in potcar_text.splitlines():
+        if "TITEL" in ln and "PAW_PBE" in ln:
+            tok = ln.split("PAW_PBE")[1].strip().split()[0]
+            out.append(tok.split("_")[0])
+    return out
+
+
 def main():
     cwd = Path.cwd()
     out = cwd / OUTDIR
@@ -148,8 +226,12 @@ def main():
     base["GGA"] = incar1.get("GGA", "")
     base["IVDW"] = incar1.get("IVDW", "")
 
-    # ---- POTCAR 元素顺序 = step1；超胞 POSCAR 由 S4 按同一顺序写出 ----
-    potcar = (cwd / "step1_relax" / "POTCAR").read_text(errors="ignore")
+    # ---- POTCAR：不整段复制 step1，按每帧 POSCAR 的元素列表重拼 ----
+    # [FIX-Ba1C20] 此前把所有 cfg 都写成 step1 完整 POTCAR（多元素体系 = 多段），
+    # iso 帧（单元素孤立原子）的 POSCAR 只有一段，VASP 顺序取第一段 → 孤立 Ba 被
+    # 当 C 算（OUTCAR VRHFIN=C、NELECT=4.0），能量静默错——单元素 Si 无感。
+    # 现在按帧元素列表拼（iso 帧只含自己的元素），并断言与 POSCAR 段序一致。
+    step1_potcar = (cwd / "step1_relax" / "POTCAR").read_text(errors="ignore")
 
     here = Path(__file__).resolve().parent
     n_new, n_done = 0, 0
@@ -177,6 +259,22 @@ def main():
         cfgdir.mkdir(exist_ok=True)
         shutil.copyfile(str(poscar_src), str(cfgdir / "POSCAR"))
         stamp.write_text(md5, encoding="utf-8")
+        # [FIX-Ba1C20] 断言：POSCAR 的元素段序列（数量行>0 的段）与后续重拼的
+        # POTCAR 段序一致。这同时堵死两个静默坑：
+        #   ① 超胞 POSCAR 符号行被写成 18 段交替（C Ba C Ba …）——元素段 ≠
+        #      POTCAR 段数，VASP 直接 ERROR（S4 未 atom-major 排序时发生）；
+        #   ② iso 帧 POTCAR 没按元素裁剪——元素段对不上，VASP 静默用错势。
+        _poscar_text = (cfgdir / "POSCAR").read_text(encoding="utf-8")
+        frame_syms, frame_cnts = poscar_elements(_poscar_text)
+        if len(frame_syms) != len(frame_cnts):
+            sys.exit("[ERROR] %s POSCAR 元素段数与数量行不一致（%d vs %d）——"
+                     "S4 生成的符号行有问题？\n%s"
+                     % (ent["id"], len(frame_syms), len(frame_cnts),
+                        "\n".join(_poscar_text.splitlines()[:8])))
+        if len(frame_syms) > 1 and any(
+                frame_syms[i] == frame_syms[i + 1] for i in range(len(frame_syms) - 1)):
+            sys.exit("[ERROR] %s POSCAR 元素段重复相邻（%s）——同元素被拆成多段，"
+                     "S4 应把同元素聚拢再写盘" % (ent["id"], frame_syms))
         # MAGMOM（磁性体系逐原子继承；iso 帧有自己的）
         mag_file = cwd / STEP4 / ("gen-%d" % ent["gen"]) / \
             ent["file"].replace(".poscar", ".magmom")
@@ -204,7 +302,15 @@ def main():
         incar_lines += ["KPAR    = %s   # 12核：从 IBZKPT 推（Γ-only 强制 1）" % vals2["KPAR"]]
         (cfgdir / "INCAR").write_text("\n".join(incar_lines) + "\n",
                                       encoding="utf-8", newline="\n")
-        (cfgdir / "POTCAR").write_text(potcar, encoding="utf-8")
+        # [FIX-Ba1C20] 按该帧 POSCAR 元素列表重拼 POTCAR（iso 帧只有自己的元素段）
+        potcar_text = build_potcar_for_frame(frame_syms, step1_potcar)
+        (cfgdir / "POTCAR").write_text(potcar_text, encoding="utf-8")
+        # 断言：拼出的 POTCAR 元素序 == POSCAR 元素段序（防切段 bug 静默错势）
+        _pot_syms = potcar_element_syms(
+            (cfgdir / "POTCAR").read_text(encoding="utf-8"))
+        if _pot_syms != frame_syms:
+            sys.exit("[ERROR] %s 重拼 POTCAR 元素序 %s ≠ POSCAR %s——切段有 bug"
+                     % (ent["id"], _pot_syms, frame_syms))
 
         # ---- submit.sh（12 核来自 step.conf [submit]）----
         dim = man["dim"]

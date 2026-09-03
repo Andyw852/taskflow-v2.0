@@ -334,12 +334,20 @@ def main():
             return None
         return "  ".join("%.4f" % moments[i] for i in prim_index_of(frac_sc))
 
-    # ---- 超胞基准坐标（image-major；static/rattle 共用）----
+    # ---- 超胞基准坐标（static/rattle 共用）----
+    # ★ [FIX-Ba1C20] 必须与 phonopy 的 displ 超胞同一原子顺序（atom-major：
+    # 原胞原子 0 的所有 image → 原子 1 …）。此前用 image-major 展开（image 外层、
+    # 原胞原子内层），多元素原胞（C20 Ba1）会得到 C Ba C Ba … 交替序列，
+    # write_poscar 按相邻合并写出 18 段符号行，VASP 判 18 species 而 POTCAR 只有
+    # 2 段 → "number of potentials on File POTCAR incompatible" 崩（单元素 Si 无感）。
+    # 排一次（stable：同元素保持展开次序），之后所有下游（POSCAR/MAGMOM/displ
+    # 帧对比）看到同一顺序。注意：只排 base（static/rattle），displ 帧由 phonopy
+    # 自己 generate_displacements 生成（本就是 atom-major），不要动那一路。
     base_frac, base_sym = [], []
-    for i in range(reps[0]):
-        for j in range(reps[1]):
-            for k in range(reps[2]):
-                for ai in range(natom_prim):
+    for ai in range(natom_prim):
+        for i in range(reps[0]):
+            for j in range(reps[1]):
+                for k in range(reps[2]):
                     base_frac.append([(frac[ai][0] + i) / reps[0],
                                       (frac[ai][1] + j) / reps[1],
                                       (frac[ai][2] + k) / reps[2]])
