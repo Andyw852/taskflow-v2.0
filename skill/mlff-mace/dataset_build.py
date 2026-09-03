@@ -118,6 +118,23 @@ def parse_outcar(path):
     return {"E": e, "F": f, "stress": stress}
 
 
+def outcar_vasp_version(path):
+    """从 OUTCAR 首行提取 VASP 版本（如 "vasp.6.6.0" / "vasp.6.4.3"）。
+
+    dft_fingerprint 只含 INCAR 键 + POTCAR + k 点密度，没有版本项——同一设置
+    用不同 VASP 版本（如 CPU 6.4.3 vs GPU 6.6.0）算的帧指纹完全相同，混训时
+    靠指纹发现不了。dataset_build 逐帧记版本，dataset_summary.json 汇总 +
+    混用 WARN（README §15 补记）。"""
+    try:
+        import re as _re
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            first = fh.readline()
+        m = _re.search(r"(vasp\.[0-9]+\.[0-9]+\.[0-9]+)", first)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
 # ============================================================ 特征 / 过滤 / FPS
 def fps_order(features, seed=42):
     """贪心最远点采样，返回索引顺序（前缀天然嵌套）。"""
@@ -276,8 +293,10 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     # ---- 收集 step5 已算完的帧（跨代累积：遍历 step4 所有 gen-* 清单）----
+    from collections import Counter as _Counter
     manifests = sorted((cwd / a.step4_dir).glob("gen-*/struct_manifest.json"))
     frames = []
+    vasp_versions = _Counter()      # 逐帧 VASP 版本（fingerprint 不含版本项，见 outcar_vasp_version）
     for mp in manifests:
         man = json.loads(mp.read_text())
         for ent in man.get("frames", []):
@@ -289,6 +308,7 @@ def main():
             except Exception as e:
                 print("[WARN] %s 解析失败：%s" % (ent["id"], e))
                 continue
+            vasp_versions[outcar_vasp_version(cfgdir / "OUTCAR") or "unknown"] += 1
             from ase.io import read as ase_read
             atoms = ase_read(str(cwd / a.step4_dir / ("gen-%d" % ent["gen"]) /
                                 ent["file"]), format="vasp")
@@ -308,6 +328,9 @@ def main():
             })
     if not frames:
         sys.exit("[ERROR] step5_label 里一帧算完的 OUTCAR 都没有 —— 先让 S5 跑完。")
+    if len(vasp_versions) > 1:
+        print("[WARN] VASP 版本混用：%s —— dft_fingerprint 不含版本项，靠指纹发现不了；"
+              "跨版本帧混训可能带系统误差，请核对是否换过 VASP" % dict(vasp_versions))
 
     # ---- 指纹（本数据集所有 DFT 帧共用 step5 的生成设置）----
     incar = ds.read_incar(cwd / a.step1_dir / "INCAR")
@@ -461,6 +484,7 @@ def main():
         "energy_limit": a.energy_limit,
         "force_limit": a.force_limit,
         "fingerprint": fp,
+        "vasp_versions": dict(sorted(vasp_versions.items())),   # {版本: 帧数}；fingerprint 不含版本，靠它发现换 VASP
         "kspacing_1_A": round(ksp, 4),
         "fps_seed": a.fps_seed,
         "e0s": e0s,

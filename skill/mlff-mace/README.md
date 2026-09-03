@@ -469,6 +469,28 @@ sw 10→100 让 B0 摆 33 GPa，说明 B0 对超参极敏感。再去调 sw 找�
   （末段 std ~700 且涨），seed 间 B0 散布 ~20 GPa；`force_mh_ft_lr=false`
   （MACE 官方策略）时 pt_head 末段 std ~24。**重训后先确认是早停停下的、
   Default head 末段已平，指标才有意义。**
+- **POTCAR 与 POSCAR 的元素一致性（Ba1C20 首次踩，2D 双元素体系）**：
+  S5 曾把所有 cfg 写成 step1 完整 POTCAR——多元素体系 = 多段，而 iso 帧（孤立原子）
+  POSCAR 只有单元素，VASP 顺序取第一段 → **孤立 Ba 被当 C 算**（OUTCAR
+  `VRHFIN=C`、NELECT=4.0，C/Ba 两 iso 帧能量完全一致），标签静默错。
+  默认 `E0S_MODE=estimated` 根本没用 iso 帧算 E0s，**默认值掩盖了 bug**——
+  直到 Ba1C20 训练才暴露（与「机制在报告它没有真正执行的东西」同族）。
+  已修：`gen_step5_label.py` 按每帧 POSCAR 元素列表重拼 POTCAR + 断言段序一致
+  （`poscar_elements`/`build_potcar_for_frame`/`potcar_element_syms`）。
+- **超胞 POSCAR 符号行必须按 phonopy 同序聚拢（Ba1C20 首次踩）**：
+  S4 的 static/rattle 曾用 image-major 展开（image 外层、原胞原子内层），多元素原胞
+  （C20 Ba1）得到 `C Ba C Ba …` 交替序列，write_poscar 相邻合并写出 18 段符号行，
+  VASP 判 18 species 而 POTCAR 只有 2 段 → 直接 ERROR 崩（单元素 Si 无感）。
+  已修：`rattle_gen.py` 展开改 atom-major（原胞原子外层），与 phonopy 的 displ
+  超胞同序；displ 帧本就由 phonopy 生成（atom-major），不要动那一路。
+  **教训：改原子顺序前先确认 phonopy/ASE 的排序语义，fc2 拟合静默吃顺序错。**
+- **大超胞 DFT 单点用 GPU 模板（Ba1C20 实测）**：S5 单点（IBRION=-1 不变胞）
+  不需要 IOPTCELL，但曾继承 S1 2D 弛豫的 optcell CPU 模板 → 189 原子超胞
+  12 核 CPU 首步 SCF ~3h 还没出第一个 DAV（LREAL=F 倒空间 + ENCUT=600 极贵）。
+  换 GPU 版 vasp.6.6.0（gpu 分区 1 rank + gres:gpu:1）后 ~40s/电子步、十几分钟
+  收敛。做法：`project_setting/templates/<步骤>/submit_std_2d.tpl` 项目级覆盖 +
+  step.conf `[submit] ntasks_per_node=1`（GPU 1 rank/卡）。**大超胞单点先想清楚
+  跑哪台机器/哪种 vasp，别被「继承模板」坑掉几十个机时。**
 
 ### 9.2 随机源未固定 = seed 扫描测不出方差（Si 实测，最隐蔽的一类坑）
 
