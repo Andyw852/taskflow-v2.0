@@ -335,6 +335,15 @@ def main():
     t = time.time()
 
     def gate(name, value, threshold, passed, required=True, note=""):
+        # [FIX-lite] passed=None → NA：无 DFT fc2 基准（displ 帧未算 / 无
+        # REF_FC2_PATH）时声子类闸不判 pass/fail，标 NA 并可追溯。converge_ctrl
+        # 里 required 闸只统计 pass is False（NA 不当作失败）。
+        if passed is None:
+            gates.append({"name": name, "value": value, "threshold": threshold,
+                          "pass": None, "required": bool(required), "note": note})
+            print("[GATE] %-28s %-22s 阈值 %-12s -> NA（%s）"
+                  % (name, value, threshold, note or "无 DFT 基准，未测"))
+            return
         gates.append({"name": name, "value": value, "threshold": threshold,
                       "pass": bool(passed), "required": bool(required), "note": note})
         print("[GATE] %-28s %-22s 阈值 %-12s -> %s%s"
@@ -342,31 +351,56 @@ def main():
                  ("  " + note) if note else ""))
 
     # ================================================================
-    # REF_FC2（DFT）：优先外部 REF_FC2_PATH，否则用 step5 的 displ 帧力拟
+    # REF_FC2（DFT）：优先外部 REF_FC2_PATH，否则用 step5 的 displ 帧力拟。
+    # [FIX-lite] 无 displ 帧力且无外部 REF_FC2_PATH → 轻量模式：跳过 DFT 声子
+    # 基准（#1/#2/#10 + 学习曲线声子段标 NA），不再 sys.exit 崩。适合小样本验证
+    # 链（未跑 displ 帧）或数据未齐的中间态；正式验收跑完整 displ 帧仍是全量路径。
     # ================================================================
-    from dataset_build import parse_outcar
+    from dataset_build import parse_outcar, outcar_done
+    have_dft_bench = False
+    ph_dft = f_dft = f_dft_grun = qs = None
+    _s5dir = cwd / a.step5_dir
     if a.ref_fc2_path and Path(a.ref_fc2_path).is_file():
         import phonopy
         ph_dft = phonopy.load(a.ref_fc2_path, produce_fc=True, is_symmetry=True)
         print("[..] REF_FC2 用外部 %s" % a.ref_fc2_path)
+        have_dft_bench = True
     else:
         d0 = [e for e in man.get("displ_frames", []) if abs(e["strain_grun"]) < 1e-9]
-        forces = []
-        for e in d0:
-            d = parse_outcar(cwd / a.step5_dir / e["cfg_id"] / "OUTCAR")
-            if d is None:
-                sys.exit("[ERROR] displ 帧 %s 的 OUTCAR 没算完" % e["cfg_id"])
-            forces.append(d["F"])
-        ph_dft = phonopy_from_manifest(prim_dft, reps, d0, forces, a.ref_disp)
-    f_dft, _, qs = freqs_on_mesh(ph_dft, reps, with_eig=False)
-    f_dft_grun = {}
-    for st in (-a.grun_strain, a.grun_strain):
-        ds_ = [e for e in man.get("displ_frames", [])
-               if abs(e["strain_grun"] - st) < 1e-9]
-        prim_s = strain_prim(prim_dft, st, dim, sc_sum.get("vac_axis") or 2)
-        forces = [parse_outcar(cwd / a.step5_dir / e["cfg_id"] / "OUTCAR")["F"]
-                  for e in ds_]
-        f_dft_grun[st] = phonopy_from_manifest(prim_s, reps, ds_, forces, a.ref_disp)
+        if d0:
+            _miss = [e["cfg_id"] for e in d0
+                     if not outcar_done(_s5dir / e["cfg_id"] / "OUTCAR")]
+            if _miss:
+                print("[WARN] 轻量模式：displ 帧缺 %d/%d 个已算力（如 %s）→ "
+                      "跳过 DFT 声子基准（#1/#2/#10 标 NA）"
+                      % (len(_miss), len(d0), _miss[0]))
+            else:
+                forces = [parse_outcar(_s5dir / e["cfg_id"] / "OUTCAR")["F"]
+                          for e in d0]
+                ph_dft = phonopy_from_manifest(prim_dft, reps, d0, forces, a.ref_disp)
+                have_dft_bench = True
+        else:
+            print("[WARN] 轻量模式：清单里无 0 应变 displ 帧 → 跳过 DFT 声子基准")
+    if have_dft_bench:
+        f_dft, _, qs = freqs_on_mesh(ph_dft, reps, with_eig=False)
+        f_dft_grun = {}
+        for st in (-a.grun_strain, a.grun_strain):
+            ds_ = [e for e in man.get("displ_frames", [])
+                   if abs(e["strain_grun"] - st) < 1e-9]
+            # [FIX-lite] ±1% 应变 displ 缺力（如只跑了 0 应变）→ Grüneisen(#10) 降级 NA，
+            # 0 应变的 #1/#2 仍可用
+            if not ds_ or any(not outcar_done(_s5dir / e["cfg_id"] / "OUTCAR")
+                              for e in ds_):
+                f_dft_grun = None
+                print("[WARN] 轻量模式：缺 ±%g 应变 displ 力 → #10 Grüneisen 标 NA"
+                      % a.grun_strain)
+                break
+            prim_s = strain_prim(prim_dft, st, dim, sc_sum.get("vac_axis") or 2)
+            forces = [parse_outcar(_s5dir / e["cfg_id"] / "OUTCAR")["F"]
+                      for e in ds_]
+            f_dft_grun[st] = phonopy_from_manifest(prim_s, reps, ds_, forces, a.ref_disp)
+    if not have_dft_bench:
+        print("[..] 轻量模式：本次无 DFT 声子基准（声子闸 NA），非声子闸照常验收")
     print("[OK] REF_FC2（DFT）：%.1f s" % (time.time() - t))
 
     # ================================================================
@@ -402,32 +436,42 @@ def main():
     ph_mace, asr_viol, f0max = phonopy_from_model(prim_mace, reps, calc, a.ref_disp)
     gate("#4 ASR 违反量 < 1e-3", "%.2e eV/Å²" % (asr_viol or 0.0), "1e-3 eV/Å²",
          (asr_viol or 99.0) < 1e-3)
-    f_mace, eig_mace, _ = freqs_on_mesh(ph_mace, reps, with_eig=True)
+    f_mace, eig_mace, qs_mace = freqs_on_mesh(ph_mace, reps, with_eig=True)
     print("[OK] MACE fc2：%.1f s" % (time.time() - t))
 
-    # ---- #1 / #2 声子对比 ----
-    rmse = phonon_rmse(f_dft, f_mace)
-    gate("#1 声子谱 RMSE < RMS_MAX", "%.3f THz" % rmse, "%.2f THz" % a.rmse_max,
-         rmse < a.rmse_max)
-    thr_img = -0.1
-    img_dft = bool((f_dft.min() < thr_img))
-    img_mace = bool((f_mace.min() < thr_img))
-    gate("#2 imagmodes(pot)==imagmodes(dft)", "pot=%s dft=%s" % (img_mace, img_dft),
-         "阈值 %.1f THz" % thr_img, img_mace == img_dft,
-         note="fmin pot=%.3f dft=%.3f" % (f_mace.min(), f_dft.min()))
+    # ---- #1 / #2 声子对比（无 DFT 基准 → NA，见 gate 注释）----
+    img_mace = bool((f_mace.min() < -0.1))
+    if have_dft_bench:
+        rmse = phonon_rmse(f_dft, f_mace)
+        gate("#1 声子谱 RMSE < RMS_MAX", "%.3f THz" % rmse, "%.2f THz" % a.rmse_max,
+             rmse < a.rmse_max)
+        img_dft = bool((f_dft.min() < -0.1))
+        gate("#2 imagmodes(pot)==imagmodes(dft)", "pot=%s dft=%s" % (img_mace, img_dft),
+             "阈值 -0.1 THz", img_mace == img_dft,
+             note="fmin pot=%.3f dft=%.3f" % (f_mace.min(), f_dft.min()))
+    else:
+        rmse = None
+        img_dft = None
+        gate("#1 声子谱 RMSE < RMS_MAX", "NA", "%.2f THz" % a.rmse_max, None,
+             note="无 DFT fc2 基准（轻量模式：0 应变 displ 帧未算 / 未给 REF_FC2_PATH）")
+        gate("#2 imagmodes(pot)==imagmodes(dft)", "pot=%s dft=NA" % img_mace,
+             "阈值 -0.1 THz", None,
+             note="无 DFT fc2 基准，dft 侧无法判定")
+    # 2D ZA 支（#2b）：只依赖 MACE 侧频率，无基准也照验；q 网格取 MACE 的
     if dim == "2d":
-        bmin = 1.0
-        q_norms = np.linalg.norm(qs @ np.linalg.inv(np.array(prim_mace.cell[:])), axis=1)
+        _qs2b = qs if qs is not None else qs_mace
+        q_norms = np.linalg.norm(_qs2b @ np.linalg.inv(np.array(prim_mace.cell[:])), axis=1)
         zone = q_norms < 0.05
         za = float(np.min(f_mace[zone])) if zone.any() else float("nan")
         gate("#2b ZA 支（2D）", "%.3f THz" % za, "≥ -0.05 THz", za >= -0.05,
              note="|q|<0.05|b| 内最低频率")
 
-    # ---- q 点逐点 RMSE 图（下一代定向加采靠它）----
+    # ---- q 点逐点 RMSE 图（下一代定向加采靠它；无基准时为空）----
     qmap = {}
-    for i in range(f_dft.shape[0]):
-        qmap["%.2f,%.2f,%.2f" % tuple(qs[i])] = round(
-            float(np.sqrt(np.mean((np.sort(f_dft[i]) - np.sort(f_mace[i])) ** 2))), 3)
+    if have_dft_bench:
+        for i in range(f_dft.shape[0]):
+            qmap["%.2f,%.2f,%.2f" % tuple(qs[i])] = round(
+                float(np.sqrt(np.mean((np.sort(f_dft[i]) - np.sort(f_mace[i])) ** 2))), 3)
 
     # ================================================================
     # #5/#6 测试集 E/F RMSE（发布模型 seed-1）+ #9 committee σ_F
@@ -605,7 +649,7 @@ def main():
     print("[OK] 晶格/EOS：%.1f s" % (time.time() - t))
 
     # ================================================================
-    # #10 Grüneisen（±1% 应变 fc2，两边同法）
+    # #10 Grüneisen（±1% 应变 fc2，两边同法；无 DFT 基准 → NA）
     # ================================================================
     t = time.time()
     f_m_grun = {}
@@ -614,34 +658,41 @@ def main():
         ph_s, _, _ = phonopy_from_model(prim_s, reps, calc, a.ref_disp)
         f, eig, _ = freqs_on_mesh(ph_s, reps, with_eig=True)
         f_m_grun[st] = (f, eig)
-    f_neg, eig_neg, _ = freqs_on_mesh(f_dft_grun[-a.grun_strain], reps, with_eig=True)
-    f_pos, eig_pos, _ = freqs_on_mesh(f_dft_grun[a.grun_strain], reps, with_eig=True)
-    g_dft = gruneisen_from_fc2(f_neg, f_pos, eig_neg, eig_pos, a.grun_strain, dim)
-    g_mace = gruneisen_from_fc2(f_m_grun[-a.grun_strain][0], f_m_grun[a.grun_strain][0],
-                                f_m_grun[-a.grun_strain][1], f_m_grun[a.grun_strain][1],
-                                a.grun_strain, dim)
-    g_mae, n_common = gruneisen_mae(g_dft, g_mace)
-    if n_common:
-        gate("#10 Grüneisen γ MAE < 0.3", "%.2f（n=%d）" % (g_mae, n_common),
-             "0.3", g_mae < a.grun_mae_tol,
-             note="dft γ∈[%.2f,%.2f] mace γ∈[%.2f,%.2f]"
-             % (min(x[2] for x in g_dft), max(x[2] for x in g_dft),
-                min(x[2] for x in g_mace), max(x[2] for x in g_mace)))
+    if have_dft_bench and f_dft_grun:
+        f_neg, eig_neg, _ = freqs_on_mesh(f_dft_grun[-a.grun_strain], reps, with_eig=True)
+        f_pos, eig_pos, _ = freqs_on_mesh(f_dft_grun[a.grun_strain], reps, with_eig=True)
+        g_dft = gruneisen_from_fc2(f_neg, f_pos, eig_neg, eig_pos, a.grun_strain, dim)
+        g_mace = gruneisen_from_fc2(f_m_grun[-a.grun_strain][0], f_m_grun[a.grun_strain][0],
+                                    f_m_grun[-a.grun_strain][1], f_m_grun[a.grun_strain][1],
+                                    a.grun_strain, dim)
+        g_mae, n_common = gruneisen_mae(g_dft, g_mace)
+        if n_common:
+            gate("#10 Grüneisen γ MAE < 0.3", "%.2f（n=%d）" % (g_mae, n_common),
+                 "0.3", g_mae < a.grun_mae_tol,
+                 note="dft γ∈[%.2f,%.2f] mace γ∈[%.2f,%.2f]"
+                 % (min(x[2] for x in g_dft), max(x[2] for x in g_dft),
+                    min(x[2] for x in g_mace), max(x[2] for x in g_mace)))
+        else:
+            gate("#10 Grüneisen", "无有效模式", "MAE<0.3", False, required=False,
+                 note="±1% 应变 fc2 缺失")
     else:
-        gate("#10 Grüneisen", "无有效模式", "MAE<0.3", False, required=False,
-             note="±1% 应变 fc2 缺失")
+        gate("#10 Grüneisen γ MAE < 0.3", "NA", "0.3", None,
+             note="无 DFT fc2 基准（轻量模式）；MACE 侧 γ 已算仅作产出")
     print("[OK] Grüneisen：%.1f s" % (time.time() - t))
 
     # ================================================================
     # 图 1/2/5：band_comparison / rmse_phonons / gruneisen_compare
+    # （band/qrmse 需要 DFT 基准；无基准时跳过，qmap 为空）
     # ================================================================
     try:
-        _plot_bands(f_dft, f_mace, qs, out / ("%s_band_comparison.png" % a.mat))
-        _plot_qrmse(qmap, out / ("%s_rmse_phonons.png" % a.mat))
-        _d_b = {(q, k): g for q, k, g in g_mace}
-        _pairs = [(g, _d_b[(q, k)]) for q, k, g in g_dft if (q, k) in _d_b]
-        _plot_grun([p[0] for p in _pairs], [p[1] for p in _pairs],
-                   out / "gruneisen_compare.png")
+        if have_dft_bench:
+            _plot_bands(f_dft, f_mace, qs, out / ("%s_band_comparison.png" % a.mat))
+            _plot_qrmse(qmap, out / ("%s_rmse_phonons.png" % a.mat))
+        if have_dft_bench and f_dft_grun:
+            _d_b = {(q, k): g for q, k, g in g_mace}
+            _pairs = [(g, _d_b[(q, k)]) for q, k, g in g_dft if (q, k) in _d_b]
+            _plot_grun([p[0] for p in _pairs], [p[1] for p in _pairs],
+                       out / "gruneisen_compare.png")
     except Exception as e:
         print("[WARN] 画图失败：%s" % e)
 
@@ -683,9 +734,10 @@ def main():
         "mat": a.mat, "generation": a.gen, "dim": dim,
         "model": Path(a.model).name,
         "n_frames_total": man.get("n_frames", 0),
-        "phonon_rmse_THz": round(rmse, 4),
+        "phonon_rmse_THz": (round(rmse, 4) if rmse is not None else None),
         "rmse_max_THz": a.rmse_max,
-        "imagmodes_pot": bool(img_mace), "imagmodes_dft": bool(img_dft),
+        "imagmodes_pot": bool(img_mace),
+        "imagmodes_dft": (bool(img_dft) if img_dft is not None else None),
         "test_force_rmse_meV_A": round(f_rmse, 2),
         "test_energy_rmse_meV_atom": round(e_rmse, 2),
         "committee_extrapolation_rate": round(extrap, 4),
@@ -723,9 +775,11 @@ def main():
     # results_<材料>.txt（autoplex 一行摘要）
     hyper = "multihead,f_w=%g,e_w=%g,s_w=%g,lr=%g,%dep,b%s" % (
         a.forces_weight, a.energy_weight, a.stress_weight, a.lr, a.epochs, a.batch_size)
-    line = ("MACE-ft    %-10s %-3s %d    %-6.3f          %-8.3f %-10s %-10s %-6d %-8s %s"
-            % (a.mat, dim, a.gen, a.ref_disp, rmse,
-               str(img_mace), str(img_dft), man.get("n_frames", 0), status, hyper))
+    _rmse_s = ("%.3f" % rmse) if rmse is not None else "NA"
+    _imgdft_s = str(bool(img_dft)) if img_dft is not None else "NA"
+    line = ("MACE-ft    %-10s %-3s %d    %-6.3f          %-8s %-10s %-10s %-6d %-8s %s"
+            % (a.mat, dim, a.gen, a.ref_disp, _rmse_s,
+               str(img_mace), _imgdft_s, man.get("n_frames", 0), status, hyper))
     (out / ("results_%s.txt" % a.mat)).write_text(line + "\n", encoding="utf-8", newline="\n")
     print("[DONE] status=%s，总用时 %.1f min" % (status, (time.time() - t0) / 60.0))
 
