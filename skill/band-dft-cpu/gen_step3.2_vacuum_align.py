@@ -223,7 +223,7 @@ def main():
     args = ap.parse_args()
 
     scf = Path(args.scf_dir).resolve()
-    bnd = Path(args.band_dir).resolve()
+    bnd = Path(args.band_dft_cpu_dir).resolve()
     out = Path(args.out_dir).resolve()
     phs = args.ph if args.ph else DEFAULT_PH
     base = {"step": "vacuum_align", "scf_dir": str(scf), "band_dir": str(bnd),
@@ -233,7 +233,10 @@ def main():
     if not locpot.exists():
         emit({**base, "status": "error",
               "reason": "缺少 LOCPOT(%s)——step3 必须开 LVHAR=.TRUE. 并跑完自洽" % locpot}, 40)
-    bsum = bnd / "band_summary.json"
+    # fix-band：画能带脚本产出的是 {prefix}_summary.json（如 band-dft-cpu_summary.json），
+    # 不是固定名 band_summary.json。glob 找 band_dir 下任一 *_summary.json 兜底。
+    _sums = sorted(bnd.glob("*_summary.json")) if bnd.is_dir() else []
+    bsum = _sums[0] if _sums else (bnd / "band_summary.json")
     if not bsum.exists():
         emit({**base, "status": "error",
               "reason": "缺少 %s——请先运行画能带脚本" % bsum}, 40)
@@ -263,9 +266,15 @@ def main():
             except Exception:
                 vac_axis = None
     if vac_axis is None:
-        emit({**base, "status": "error",
-              "reason": "无法自动判定真空轴(可能是 3D 体相或 1D/0D)。3D 无真空能级可对齐；"
-                        "2D 请用 --vac-axis 指定"}, 40)
+        # fix-band：3D 体相没有真空能级可对齐，属正常跳过（不是错误）。落盘
+        # vacuum_align_summary.json（status=skipped）并退出 0，让 tf 判「完成（跳过）」。
+        out.mkdir(parents=True, exist_ok=True)
+        skip_result = {**base, "status": "skipped",
+                       "reason": "3D 体相无真空能级可对齐（vacuum_align 仅对 2D 有意义）",
+                       "summary": str(out / "vacuum_align_summary.json")}
+        (out / "vacuum_align_summary.json").write_text(
+            json.dumps(skip_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        emit(skip_result, 0)
     log("[..] 真空轴 = %s" % "abc"[vac_axis])
 
     # 3) 读 LOCPOT -> 平面平均 -> 真空能级

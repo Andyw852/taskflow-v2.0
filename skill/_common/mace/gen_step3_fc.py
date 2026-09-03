@@ -45,6 +45,7 @@ SPEC = {
     "FIT_SOFTWARE": ("phono3py", "str"),  # phono3py（symfc/alm）| pheasy
     "PHEASY_METHOD": ("OLS", "str"),      # pheasy 拟合方法：OLS | LASSO | RFE | RFE_TSQR
     "PHEASY_C3_CUTOFF": ("6.0", "str"),   # pheasy 三阶截断(Å)；None/空=不截断
+    "PHEASY_BIN": ("pheasy", "str"),        # pheasy 可执行名：pheasy | pheasy-gpu（GPU 版）
 }
 
 
@@ -126,16 +127,17 @@ env.update({
 })
 
 cflag = "" if c3 in ("None", "none", "") else "--c3 %s" % c3
-fit = ("pheasy --dim %s -w 3 -f %s --ndata %d --eps 0.001 --full_ifc -l %s --hdf5"
-       % (dim, cflag, ndata, method))
+bin = os.environ.get("PHEASY_BIN", "pheasy")
+fit = ("%s --dim %s -w 3 -f %s --ndata %d --eps 0.001 --full_ifc -l %s --hdf5"
+       % (bin, dim, cflag, ndata, method))
 if method == "LASSO":
     fit += " --std --mu_min -8 --mu_max -2 --max_iter 2000 --cv 5 --nmu 10 --tol 0.0001"
 elif method in ("RFE", "RFE_TSQR"):
     fit += " --mu_min -8 --mu_max -5 --max_iter 1000 --cv 5 --nmu 5 --tol 0.001"
 steps = [
-    "pheasy --dim %s -w 3 -s %s --eps 0.001" % (dim, cflag),
-    "pheasy --dim %s -w 3 -c %s --eps 0.001" % (dim, cflag),
-    "pheasy --dim %s -w 3 -d %s --ndata %d --disp_file --eps 0.001" % (dim, cflag, ndata),
+    "%s --dim %s -w 3 -s %s --eps 0.001" % (bin, dim, cflag),
+    "%s --dim %s -w 3 -c %s --eps 0.001" % (bin, dim, cflag),
+    "%s --dim %s -w 3 -d %s --ndata %d --disp_file --eps 0.001" % (bin, dim, cflag, ndata),
 ]
 for s in steps:
     print("[pheasy]", s, flush=True)
@@ -215,11 +217,16 @@ def main():
     use_nac = stage_born(out, conf)
 
     software = str(conf["FIT_SOFTWARE"] or "phono3py").lower()
+    # p_bin 先落默认值：fit_cfg 无论哪种 software 都引用它（此前只在校验分支内赋值，
+    # phono3py 路会 NameError）。PHEASY_BIN 校验对两条路都生效。
+    p_bin = str(conf["PHEASY_BIN"] or "pheasy").lower()
+    if p_bin not in ("pheasy", "pheasy-gpu"):
+        sys.exit("[ERROR] PHEASY_BIN 只允许 pheasy / pheasy-gpu")
     if software == "pheasy":
         p_method = str(conf["PHEASY_METHOD"] or "OLS").upper()
         if p_method not in ("OLS", "LASSO", "RFE", "RFE_TSQR"):
             sys.exit("[ERROR] PHEASY_METHOD 只允许 OLS / LASSO / RFE / RFE_TSQR")
-        fit = "pheasy-" + p_method.lower()
+        fit = ("pheasy-gpu" if p_bin == "pheasy-gpu" else "pheasy") + " (" + p_method + ")"
         (out / "_pheasy_fit.py").write_text(_PHEASY_FIT, encoding="utf-8")
     else:
         fit = str(conf["FIT"] or "auto").lower()
@@ -241,6 +248,7 @@ def main():
         "software": software,
         "fit": fit,
         "pheasy_method": str(conf["PHEASY_METHOD"] or "OLS").upper(),
+        "pheasy_bin": p_bin,
         "c3_cutoff": str(conf["PHEASY_C3_CUTOFF"]),
         "method": method,
         "imag_thr": float(conf["IMAG_THR"]),
@@ -251,7 +259,19 @@ def main():
     (out / "fit_config.json").write_text(
         json.dumps(fit_cfg, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
 
-    tpl = kc.resolve_submit(here, "submit_fc")
+    # GPU 拟合（FIT_SOFTWARE=pheasy + PHEASY_BIN=pheasy-gpu）走 submit_fc_gpu.tpl（--gres）；
+    # 集群没配该模板 → gen 期报错（pheasy-gpu 需要 GPU 节点，别等排进队才失败）。
+    _kind = ("submit_fc_gpu" if (software == "pheasy" and p_bin == "pheasy-gpu")
+             else "submit_fc")
+    try:
+        tpl = kc.resolve_submit(here, _kind)
+    except SystemExit:
+        if _kind == "submit_fc_gpu":
+            sys.exit("[ERROR] PHEASY_BIN=pheasy-gpu 需要 GPU 拟合模板 submit_fc_gpu.tpl"
+                     "（a800/3090 已配）。\n"
+                     "        当前集群没有 → 改用 PHEASY_BIN=pheasy（CPU），"
+                     "或把材料 hpc 切到 a800/3090。")
+        raise
     kc.write_submit(tpl, out / "submit.sh",
                     {"JOBNAME": kc.new_jobname(cwd, "S3fit"),
                      "CONDA_SH": conf["CONDA_SH"] or kc.DEFAULT_CONDA_SH,

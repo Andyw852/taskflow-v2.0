@@ -95,3 +95,27 @@
   默认。关掉写 hang_check: false，不想自动改 INCAR 写 hang_fix_scf: false。
 - SOC 缺陷弛豫 SCF 易空转（空位悬挂键电荷涨落），INCAR 模板默认 ALGO=All + AMIX=0.1 +
   BMIX=0.0001（精细混合），配合上面的挂死自动恢复，整条流水线可无人值守。
+
+---
+
+---
+
+## 输运增强（κe/σ/S/μ）—— 用现成的 ke-dft-cpu 技能，不要重复造
+
+本技能（S0-S4）输出 **P/N 型 + 自洽载流子浓度 p0**（供输运标点）。
+
+要电子输运（κe/σ/S/PF），**直接用现成技能 **（完整 AMSET 散射，
+非 CRTA）：
+
+  S1_opt -> S2_bandgap -> S3_uniform -> S4_wave -> S5_dielect
+         -> S6_elastic -> S7_deform -> S7.1_read -> S8_kappa(amset run)
+
+其中 S5_dielect(DFPT介电ε∞)、S6_elastic(弹性常数C)、S7_deform(形变势E_dp)
+就是完整散射(ADP/IMP/POP)所需的三类参考 DFT——ke-dft-cpu 已全部自动。
+本技能的 S3/S4 缺陷电荷态 Z 是 IMP 散射的输入（受主 -1/-2）。
+
+**用法**：（材料目录需完美原胞 POSCAR）。
+缺陷结论（本技能 S4 的 p0/P/N）用于 AMSET 的 doping 标点。
+
+**注意**：窄隙(<0.1eV)或重带(Bi系)若 AMSET 误判金属需 patch is_metal 并核查
+doping 机制(S 应随浓度变, σ 不应恒定)。此前为占位跑过 CRTA，最终以完整散射为准。

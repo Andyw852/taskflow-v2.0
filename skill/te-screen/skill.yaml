@@ -29,12 +29,12 @@ fetch_files: [te_features.json, te_screen_summary.json]
 
 steps:
   - {seq: 1, name: step1_features, label: S1_feat, check: marker,
-     marker: 'te_features.json:"n_sites"', run: gen,
+     marker: 'te_features.json:"n_sites"', run: gen, done_marker: te_features.json,
      gen: gen_step1_features.py,
      gen_need: [cheap_features.py, element_properties.json]}
 
   - {seq: 2, name: step2_predict, label: S2_pred, check: marker,
-     marker: 'te_screen_summary.json:"PREDICTED"', run: gen,
+     marker: 'te_screen_summary.json:"PREDICTED"', run: gen, done_marker: te_screen_summary.json,
      gen: gen_step2_predict.py,
      gen_need: [cheap_features.py, n_ZT_e.json, p_ZT_e.json,
                 n_log10_PF.json, p_log10_PF.json],

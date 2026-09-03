@@ -93,31 +93,48 @@ def resolve_dim(poscar, dimension="auto", vacuum_min=VACUUM_MIN):
 # ==========================================================================
 # 超胞倍数 / phono3py --dim / --mesh 字符串（2D 真空方向恒 1）
 # ==========================================================================
-def supercell_matrix(poscar, dim, min_len=15.0, max_multiple=8, vac_axis=2):
-    """按"每个非真空方向胞长 ≥ min_len"定对角超胞倍数 [na,nb,nc]。纯标准库。
+def supercell_matrix(poscar, dim, min_len=15.0, max_multiple=8, vac_axis=2,
+                     cutoff=6.0):
+    """对齐 kl-dft-cpu compute_supercell_reps 的双判据定对角超胞倍数 [na,nb,nc]。
 
-    尺寸判据用**垂直胞高**（最短周期距离 = V/|a_j×a_k|）而不是晶格矢量模长 |a_i|：
-    非正交原胞（如 Si 菱形原胞 |a|=3.84 Å 但垂直胞高只有 3.14 Å）按 |a_i| 判会
-    把最短周期方向做小，扩胞后该方向不足 min_len。垂直胞高恒 ≤ |a_i|，所以用它判
-    同时保证 |n·a_i| ≥ min_len。2D 真空方向恒 1。
+    ① 边长判据（|a_i|×n ≥ min_len）：每条边模长 ≥ min_len，取 ceil(min_len/|a_i|)。
+    ② 内切球判据（perp_i×n ≥ 分子投影范围 + 2×cutoff）：perp_i = V/|a_j×a_k| 是
+       该方向的垂直胞高（最短周期距离，恒 ≤ |a_i|）。cutoff 取 MACE 截断半径 r_max
+       （缺省 6.0 Å）：单分子/团簇原胞太小时，分子与其周期镜像会在截断半径内重叠，
+       声子力常数被镜像的虚假相互作用污染、产生非物理虚频。故要求垂直胞高
+       ≥ 分子在该方向的投影范围 + 2×cutoff，取 ceil((范围+2×cutoff)/perp_i)。
+    两个判据取较大值。2D 真空方向恒 1。
     """
-    lat, _ = read_poscar_cell_frac(poscar)
+    lat, frac = read_poscar_cell_frac(poscar)
+    lengths = [_norm(lat[i]) for i in range(3)]
     vol = abs(_det3(lat))
     perp = []
     for i in range(3):
         j, k = (i + 1) % 3, (i + 2) % 3
         area = _norm(_cross(lat[j], lat[k]))
         perp.append(vol / area if area > 1e-12 else 0.0)
+    # 分子在每方向的笛卡尔投影范围（纯标准库，登录节点 python 也能跑）
+    extent = [0.0, 0.0, 0.0]
+    for i in range(3):
+        lo = hi = sum(frac[0][k] * lat[k][i] for k in range(3))
+        for n in range(1, len(frac)):
+            c = sum(frac[n][k] * lat[k][i] for k in range(3))
+            lo = min(lo, c)
+            hi = max(hi, c)
+        extent[i] = hi - lo
     reps = []
     for i in range(3):
         if dim == "2d" and i == (vac_axis if vac_axis is not None else 2):
             reps.append(1)
             continue
-        n = max(1, int(math.ceil(min_len / max(perp[i], 1e-6))))
+        n_len = max(1, int(math.ceil(min_len / max(lengths[i], 1e-6))))
+        n_diam = max(1, int(math.ceil((extent[i] + 2.0 * cutoff) / max(perp[i], 1e-6))))
+        n = max(n_len, n_diam)
         if n > max_multiple:
-            print("[WARN] 方向 %d 需 %d 倍才达 %.1f Å（垂直胞高 %.3f Å），"
-                  "被 MAX_MULTIPLE=%d 截断 → 该方向实际仅 %.2f Å"
-                  % (i, n, min_len, perp[i], max_multiple, max_multiple * perp[i]))
+            print("[WARN] 方向 %d 需 %d 倍（边长 %.3f Å，垂直胞高 %.3f Å，"
+                  "分子范围 %.3f Å），被 MAX_MULTIPLE=%d 截断 → 该方向实际仅 %.2f Å"
+                  % (i, n, lengths[i], perp[i], extent[i], max_multiple,
+                     max_multiple * perp[i]))
             n = max_multiple
         reps.append(n)
     return reps

@@ -86,6 +86,19 @@ pip install mace-torch phono3py symfc pheasy ase spglib h5py
 python -c "import torch;print(torch.__version__, torch.cuda.is_available())"
 ```
 
+GPU 集群上想把 S3 拟合换成 **pheasy-gpu**（`pheasy_gpu` 包 + `pheasy-gpu` 命令，CUDA/PyTorch 后端，与 `pheasy` 同参数、可并存安装）：
+
+```bash
+pip install -e '.[gpu]'    # 在 ~/software/pheasy-gpu 里执行，装出 pheasy-gpu 命令 + torch(CUDA)
+# 然后把 S3 的拟合软件指过去：
+tf -tt kl-mace-gpu -p <材料> -j 3 conf --set params.FIT_SOFTWARE=pheasy params.PHEASY_BIN=pheasy-gpu
+```
+
+> S3 拟合作业模板：`PHEASY_BIN=pheasy-gpu` 时 gen 自动改选 **submit_fc_gpu.tpl**
+> （自动加 `--gres=gpu:<类型>:1` 并降核），只有 a800/3090 配了该模板；纯 CPU 集群
+> （jzzn/hanhai25）gen 期直接报错提示换 `PHEASY_BIN=pheasy`，不会排进队才失败。
+> 旧项目需重跑一次 `tf -p X init`（刷新项目 templates/）才能拿到新 GPU 模板。
+
 `tf.yaml` 里加两条 work_dir（**两个 task_type，同一材料可以各跑一遍互相对照**，
 目录不会打架）：
 

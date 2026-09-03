@@ -238,6 +238,8 @@ class _VacSkip(Exception):
     """[C1] 合法跳过真空对齐（3D 无真空），与「守卫失败」区分开。"""
 
 
+_resolved_paths = {}   # 模块级兜底：3D 走 _VacSkip 提前跳过 try 内初始化，结尾 read_paths 仍可引用
+
 try:
     from pymatgen.io.vasp.outputs import Locpot, Vasprun
     from pymatgen.core import Structure

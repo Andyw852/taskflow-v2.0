@@ -171,9 +171,13 @@ def main():
     if method not in ("findiff", "random"):
         sys.exit("[ERROR] METHOD 只允许 findiff / random")
 
+    # 截断半径取较大者（二阶/三阶）驱动超胞内切球判据，别用写死的 6.0 ——
+    # 否则用户调大 ALM_CUT3 时内切球判据不跟着变，会漏检周期镜像污染。
+    cuts = [c for c in (conf["ALM_CUT2"], conf["ALM_CUT3"]) if c is not None]
+    cut_max = max(cuts) if cuts else 6.0
     reps = (kc.parse_reps(conf["SUPERCELL"], dim, ax) if conf["SUPERCELL"]
             else kc.supercell_matrix(out / "POSCAR", dim, conf["MIN_SC_LEN"],
-                                     conf["MAX_MULTIPLE"], ax))
+                                     conf["MAX_MULTIPLE"], ax, cutoff=cut_max))
     reps2 = kc.parse_reps(conf["FC2_SUPERCELL"], dim, ax) if conf["FC2_SUPERCELL"] else None
     mesh = kc.mesh_str(conf["KAPPA_MESH"].split(), dim, ax)
     print("[..] 维度=%s 方法=%s fc3超胞=%s fc2超胞=%s mesh=%s 位移=%.3f Å"

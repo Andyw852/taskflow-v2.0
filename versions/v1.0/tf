@@ -1375,6 +1375,13 @@ def scan_project_configs(roots):
     result/log/隐藏目录——比旧实现 7 个 glob（各遍历整棵树）更快，且不枚举
     数据文件（os.walk 在 WSL DrvFS 等慢盘上枚举文件极慢）。"""
     seen, found = {}, []
+    # [FIX-重复配置] 归档/备份目录不参与扫描（软件画图/备份/archive/backup/回收站等），
+    # 否则整棵 taskflow 归档副本的 tf_*.yaml 会与活跃仓库同名冲突、让 init 直接退出。
+    _ARCHIVE_MARK = ("软件画图", "备份", "archive", "backup", "回收站", "Trash", ".bak", "_bak", "旧")
+
+    def _is_archive(p):
+        return any(m in p for m in _ARCHIVE_MARK)
+
     for r in roots:
         r = os.path.realpath(os.path.expanduser(str(r)))
         if not os.path.isdir(r):
@@ -1397,15 +1404,27 @@ def scan_project_configs(roots):
                         continue
                     if e.name == "project_setting":
                         ps_entries.append(e.path)
-                    elif e.name not in ("result", "log") and not e.name.startswith("."):
+                    elif e.name not in ("result", "log") and not e.name.startswith(".") \
+                            and not _is_archive(e.path):   # [FIX-重复配置] 归档目录不下探
                         subdirs.append(e.path)
             for ps in ps_entries:
                 for p in sorted(glob.glob(os.path.join(ps, "tf_*.yaml"))):
                     name = os.path.basename(p)[len("tf_"):-len(".yaml")]
                     if name in seen and seen[name] != p:
-                        sys.exit("错误：项目配置名重复 tf_%s.yaml：\n  %s\n  %s\n"
-                                 "命名规则 tf_<项目名>.yaml，全局唯一，请改其中一个的名字。"
-                                 % (name, seen[name], p))
+                        # [FIX-重复配置] 同名冲突不直接退出：归档/备份副本忽略（保留活跃的），
+                        # 其余警告取先扫到的。真正的活跃同名仍是数据问题，但不再阻塞流程。
+                        if _is_archive(p) and not _is_archive(seen[name]):
+                            print("警告：配置名 tf_%s.yaml 重复，忽略归档副本：%s"
+                                  % (name, p), file=sys.stderr)
+                            continue
+                        if _is_archive(seen[name]) and not _is_archive(p):
+                            print("警告：配置名 tf_%s.yaml 重复，忽略归档副本：%s"
+                                  % (name, seen[name]), file=sys.stderr)
+                        else:
+                            print("警告：配置名 tf_%s.yaml 重复，取第一个：\n  %s\n  %s"
+                                  % (name, seen[name], p), file=sys.stderr)
+                        seen[name] = p
+                        found = [(n2, p2, d2) for n2, p2, d2 in found if n2 != name]
                     seen[name] = p
                     found.append((name, p, os.path.dirname(os.path.dirname(p))))
             stack.extend(subdirs)
@@ -1943,7 +1962,7 @@ def collect_v3_batch(cfg, segs):
         (host, wdir), entries = item
         seg_ms = {}
         for t, steps, m in entries:   # 同组内按段聚合（保持首次出现顺序）
-            seg_ms.setdefault(id(t), {"t": t, "steps": steps, "ms": []})["ms"].append(m)
+            seg_ms.setdefault(id(t), {"t": t, "steps": steps, "ms": [], "wdir": wdir})["ms"].append(m)
         subs, back = [], []
         for g in seg_ms.values():
             # v1.1 skill_subdir：采集键 = 材料名/技能子目录（远端步骤目录多一层），
@@ -2001,6 +2020,10 @@ def collect_v3_batch(cfg, segs):
                           "log_dir", "fetch_files", "template_map",
                           "_subdir", "_skill_dir_local", "rpath"):
                     r[k] = m[k]
+                # v1.13：per-step hpc 拆分时材料会出现在多个 (host, work_dir) 组，
+                # 材料级 path 必须用「材料默认集群」的 rpath（work_dir_eff），
+                # 不能是采集顺序里第一个组的路径（否则 Dir 显示错集群、gen 推送错目录）。
+                r["path"] = m["rpath"]
                 r["_seg"] = {"steps_cfg": t.get("steps"),
                              "gen_need": t.get("gen_need"),
                              "aux_files": t.get("aux_files"),
@@ -2015,6 +2038,7 @@ def collect_v3_batch(cfg, segs):
                 # v1.12：每步记自己所在集群的 host（跨集群拆分时各组 host 不同）。
                 for s in r["steps"]:
                     s["_host"] = _host or m["host_eff"]
+                    s["_wd"] = g.get("wdir")
                 # v1.12：材料可能出现在多个 (host, wd) 组（每步可指定超算），
                 # 步骤要合并而不是覆盖（保持原顺序，追加新组的步骤）。
                 _lst = seg_results[id(t)]
@@ -2069,13 +2093,21 @@ def _ssh_cmd_pre(cfg, host, pre_opts, remote_args):
 def collect(cfg, types, host="__default__"):
     # v1.2：把本次涉及技能的 checks.py 源码一起打包，远端注册成判据
     extra = skill_checks_for(cfg, [td.get("key") for td in types])
+    if host == "__default__":
+        host = cfg.get("host")
+    _pp = (cfg.get("remote_path_prefix") or "").strip()
+    # 集群级 remote_path_prefix 覆盖（同 run_remote）
+    if host:
+        _cp = pkg_setting_path(str(host) + ".yaml")
+        if _cp:
+            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
+            if _cpp:
+                _pp = str(_cpp).strip()
     payload = base64.b64encode(
         json.dumps({"user": cfg.get("user"), "types": types,
                     "extra_checks": extra,
-                    "path_prefix": (cfg.get("remote_path_prefix") or "")}).encode()).decode()
+                    "path_prefix": _pp}).encode()).decode()
     args = ["python3", "-", "--config64", payload]
-    if host == "__default__":
-        host = cfg.get("host")
     cmd = (_ssh_cmd_pre(cfg, host, ["-o", "ConnectTimeout=60"], ["timeout", "170"] + args)
            if host else args)
     try:
@@ -2103,6 +2135,14 @@ def run_remote(cfg, shell_line, host="__default__", use_stdin=False):
     if host == "__default__":
         host = cfg.get("host")
     _pp = (cfg.get("remote_path_prefix") or "").strip()
+    # 集群级 remote_path_prefix 覆盖：setting/<ssh_host>.yaml 里可写 remote_path_prefix
+    # （hanhai25 等新集群用自己的 pybin，含 python/python3/vaspkit 软链，供 gen 脚本用）。
+    if host:
+        _cp = pkg_setting_path(str(host) + ".yaml")
+        if _cp:
+            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
+            if _cpp:
+                _pp = str(_cpp).strip()
     if _pp and host:
         shell_line = "export PATH=\"%s:$PATH\"; %s" % (_pp, shell_line)
     if use_stdin:
@@ -2356,7 +2396,7 @@ def _gen_step_input(cfg, t, m, s):
     sc = step_cfg(t, s["name"], m)
     if sc.get("run") == "gen" or s["has_incar"]:
         return True
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s[%s|%s]：预生成输入失败：%s"
               % (m["name"], m["tt"], s["label"], (out or "").strip()))
@@ -3279,7 +3319,7 @@ def remote_scancel(cfg, jobids, host="__default__"):
     return rc == 0, out
 
 
-def remote_gen(cfg, t, m, sname, host=None):
+def remote_gen(cfg, t, m, sname, host=None, wd=None):
     """执行 gen：先建目录、补 POSCAR（v3 本地模式）和 gen_need 依赖文件、gen 脚本，
     再运行。文件来源：find_asset 查找链（project_setting > skill_dir，支持
     template_map 映射，本地 base64 经 ssh 推送，超算无需存放）> gen_dir
@@ -3288,7 +3328,15 @@ def remote_gen(cfg, t, m, sname, host=None):
     gen = sc.get("gen")
     if not gen:
         return False, "任务类型 %s 的步骤 %s 没有配置 gen" % (t["key"], sname)
-    gen = gen.format(mat=m["name"], matdir=m["path"], root=t["root"],
+    # v1.13：per-step hpc 拆分时步骤远端目录用自己集群的 work_dir（_wd），
+    # 不能用材料级 m["path"]（那是材料默认集群的路径，别的集群上用会 mkdir 错目录）。
+    if wd:
+        _wd0 = os.path.normpath(os.path.expanduser(str(wd)))
+        step_dir = (os.path.join(_wd0, m["name"], m["_subdir"])
+                    if m.get("_subdir") else os.path.join(_wd0, m["name"]))
+    else:
+        step_dir = m["path"]
+    gen = gen.format(mat=m["name"], matdir=step_dir, root=t["root"],
                      step=sname, tt=t["key"])
     seg = (m.get("_seg") or {})
     gd = seg.get("gen_dir") or t.get("gen_dir")
@@ -3310,8 +3358,8 @@ def remote_gen(cfg, t, m, sname, host=None):
         for lg in (m.get("template_map") or {}):
             if lg not in need:
                 need.append(lg)
-    line = "mkdir -p %s && cd %s && " % (shlex.quote(m["path"]),
-                                         shlex.quote(m["path"]))
+    line = "mkdir -p %s && cd %s && " % (shlex.quote(step_dir),
+                                         shlex.quote(step_dir))
     if is_py:  # gen 脚本以 skill 为唯一样板：总是覆盖推送（本地改了立即生效）
         gsrc = find_asset(cfg, t, m, gen_script, sname)
         if gsrc:
@@ -3482,7 +3530,7 @@ def do_run_gen_step(cfg, t, m, s, tag):
     状态显示 error，retry/rerun 可重来。"""
     if s.get("job") and not kill_if_queued(cfg, s, True, tag):
         return False
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s: 运行失败。%s" % (tag, out))
         return False
@@ -3522,7 +3570,7 @@ def do_submit(cfg, t, m, s, force, gen_first, contcar_cp, tag, submit=True):
         return False
     if gen_first or not s["has_incar"]:
         _relay_prev_across_host(cfg, m, s)   # v1.12：跨集群回传前序产物
-        ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+        ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
         if not ok:
             print("%s: gen 失败。%s" % (tag, out))
             return False
@@ -4914,7 +4962,7 @@ def cmd_step_init(cfg, data, proj, job, force):
               % (tag, s["dir"], proj, job))
         return 0
     sc = step_cfg(t, s["name"], m)
-    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"))
+    ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
     if not ok:
         print("%s: gen 失败。%s" % (tag, out))
         return 1
@@ -6268,10 +6316,10 @@ def cmd_auto(cfg, arg):
         return 1
     print("auto_advance 已%s（%s）。" % ("开启" if on else "关闭", path))
     if on:
-        print("status/watch 会自动提交可开始的步骤；手动 start/retry/rerun 不受影响。")
+        print("status/monitor 会自动提交可开始的步骤；手动 start/retry/rerun 不受影响。")
     else:
-        print("status/watch 只看不提交；手动 start/retry/rerun 不受影响。")
-        print("后台监控仍在跑（只拉结果）；停监控用 tf watch --stop。")
+        print("status/monitor 只看不提交；手动 start/retry/rerun 不受影响。")
+        print("后台监控仍在跑（只拉结果）；停监控用 tf monitor --stop。")
     return 0
 
 
@@ -6498,6 +6546,9 @@ USAGE = """\
   summary   极简汇总（只读，省 token）：每任务类型一行计数 + FAIL 清单。
             巡检首选：无异常时输出只有几行；有 FAIL 再按清单单点深挖。
             同 list，默认走本地缓存，--refresh 强制刷新
+  probe     只读探测作业健康度：判每作业 弛豫/收敛/SCF发散/崩溃/掉队/排队，
+            输出结构化 JSON（判据+结论），不采集、不提交、不改文件。
+            需 -p 材料，可配 -j 步骤（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）
   start     开始/提交：输入没生成先 gen 再 sbatch。无 -p = 一键推进全部材料。
             ★ 唯一会向超算提交作业的命令（init/retry/rerun 都只生成不提交）
   stop      取消作业。无 -p = 一键停止全部作业（有确认）；-p = 该材料全部作业；-p -job = 指定步骤。
@@ -6513,7 +6564,7 @@ USAGE = """\
             -p X = 该材料清空；-p C20 = 该体系所有材料；-p X -j Y = 只删该步骤目录。
             关联作业一并取消（有确认，-y 跳过）
   auto      一键开关自动提交：tf auto on 开 / tf auto off 关 / 无参看当前。
-            改写全局 tf.yaml 的 auto_advance；关后 status/watch 只看不提交，
+            改写全局 tf.yaml 的 auto_advance；关后 status/monitor 只看不提交，
             手动 start/retry/rerun 不受影响（动目录、恢复备份前先 off）
   hpc       把 -p 指定的项目分配到指定超算（未指定的项目一律不动）：
             tf -p X,Y hpc 集群名              材料级（该材料全部技能生效）
@@ -6538,17 +6589,21 @@ USAGE = """\
             tf -tt elastic init 追加 elastic 段，并建技能子目录）
   fetch     手动强制拉回结果（status 时已自动保存完成的步骤到 result/，
             项目 setting.yaml 里 auto_fetch: false 可关闭自动保存）
-  watch     监控模式：每 -i 秒（默认 300）自动刷新状态、auto-fetch 算完步骤、
+  monitor   监控模式：每 -i 秒（默认 300）自动刷新状态、auto-fetch 算完步骤、
             auto-advance 提交下一步；挂死作业自动恢复（hang_check，默认开，见 5.6）；有变化才打印总表；Ctrl+C 退出。
             每轮自动检测配置文件改动（tf.yaml、project_setting/*.yaml、
             材料或技能的 hpc.yaml）并重载——改配置不用重启监控。
             加 -d 放后台运行（日志 .tf_watch.log，不占用终端），
-            tf watch --stop 停止后台监控（任意目录可执行）。
+            tf monitor --stop 停止后台监控（任意目录可执行）。
+            tf monitor restart 重做后台监控（先停旧的再起新的；改配置/换 tf 版本后建议用它）。
             零输入全自动：tf.yaml 里 auto_watch: true（任何 tf 命令顺带拉起
-            监控）+ tf watch --install（crontab 保活，重启后自动恢复，
-            --uninstall 移除）
+            监控）+ tf monitor --install（crontab 保活，重启后自动恢复，
+            --uninstall 移除）。watch 是 monitor 的旧名，仍可用。
   json      输出 JSON
   config    打印示例配置
+  push      把「当前目录」git 仓库的改动提交到 GitHub（本地真实版 + 远端脱敏版，
+            敏感信息自动脱敏）；消息作位置参数：tf push "改了 formation_energy"。
+            等价独立脚本 ~/.local/bin/tfpush；内部调 scripts/tf-git-push.sh
   help      显示本帮助
 
 选项:
@@ -6575,7 +6630,7 @@ USAGE = """\
                   --show-done 临时取消）
   --diff          summary 与上次快照对比，无变化不输出（省 token，巡检用）
   --refresh       list/summary 强制跳过本地状态缓存，重新 ssh 采集
-  -i, --interval  watch 刷新间隔秒数（默认 300）
+  -i, --interval  monitor 刷新间隔秒数（默认 300）
   -y, --yes       stop/rerun 免确认
   -V, --version   显示版本号
   -h, --help      显示帮助（同 tf help）
@@ -6845,7 +6900,7 @@ WATCH_LOG = ".tf_watch.log"     # watch 后台模式的日志文件名
 
 def _watch_files(cfg=None):
     """watch 的 pid/log 路径：v1.10 起锚定配置文件所在目录（setting/），
-    在任何目录执行 tf watch --stop 都找得到；旧版 cwd 下的 pid 文件由
+    在任何目录执行 tf monitor --stop 都找得到；旧版 cwd 下的 pid 文件由
     _watch_stop 兜底识别。"""
     base = (cfg or {}).get("_config_dir") or os.getcwd()
     return (os.path.join(base, WATCH_PID), os.path.join(base, WATCH_LOG))
@@ -6876,12 +6931,12 @@ def _watch_pid_alive(pid):
 
 
 def _watch_daemon(a, mat_toks, root, cfg=None):
-    """tf watch -d：把监控作为 detached 子进程放后台，日志写配置目录下。"""
+    """tf monitor -d：把监控作为 detached 子进程放后台，日志写配置目录下。"""
     pidfile, logfile = _watch_files(cfg)
     pid, _ = _watch_running_pid(cfg)
     if pid:
-        print("tf watch 已在后台运行 (PID %d)" % pid)
-        print("日志：%s（tail -f 查看）；停止：tf watch --stop" % logfile)
+        print("tf monitor 已在后台运行 (PID %d)" % pid)
+        print("日志：%s（tail -f 查看）；停止：tf monitor --stop" % logfile)
         return
     argv = [sys.executable, os.path.realpath(sys.argv[0])]
     if a.config:
@@ -6894,7 +6949,7 @@ def _watch_daemon(a, mat_toks, root, cfg=None):
         argv += ["-x", a.exclude]
     if a.user:
         argv += ["-u", a.user]
-    argv += ["watch", "-i", str(a.interval)]
+    argv += ["monitor", "-i", str(a.interval)]
     if root:
         argv.append(root)
     argv += mat_toks
@@ -6903,13 +6958,13 @@ def _watch_daemon(a, mat_toks, root, cfg=None):
                          stderr=subprocess.STDOUT, start_new_session=True)
     with open(pidfile, "w") as f:
         f.write(str(p.pid))
-    print("tf watch 已转入后台 (PID %d)" % p.pid)
+    print("tf monitor 已转入后台 (PID %d)" % p.pid)
     print("日志：%s（tail -f %s 查看）" % (logfile, logfile))
-    print("停止：tf watch --stop")
+    print("停止：tf monitor --stop")
 
 
 def _watch_stop(cfg=None):
-    """tf watch --stop：按 pid 文件停止后台监控（任意目录可执行）。"""
+    """tf monitor --stop：按 pid 文件停止后台监控（任意目录可执行）。"""
     import signal as _sig
     pid, pidfile = _watch_running_pid(cfg)
     if pid:
@@ -6918,15 +6973,15 @@ def _watch_stop(cfg=None):
             os.remove(pidfile)
         except OSError:
             pass
-        print("已停止 tf watch (PID %d)。" % pid)
+        print("已停止 tf monitor (PID %d)。" % pid)
         return 0
-    print("没有运行中的 tf watch。")
+    print("没有运行中的 tf monitor。")
     return 1
 
 
 def _watch_ensure(cfg):
     """v1.10 auto_watch：任何 tf 命令顺带确保后台监控在跑（没在跑就拉起）。
-    配合 tf watch --install 的 crontab 保活 = 零输入全自动：
+    配合 tf monitor --install 的 crontab 保活 = 零输入全自动：
     重启/WSL 关闭后 cron 拉起；平时敲任何 tf 命令也会顺带拉起。
     保活失败绝不影响主命令。"""
     if not cfg.get("auto_watch"):
@@ -6939,32 +6994,32 @@ def _watch_ensure(cfg):
         argv = [sys.executable, os.path.realpath(sys.argv[0])]
         if cfg.get("_config_path"):
             argv += ["-c", cfg["_config_path"]]
-        argv += ["watch", "-i", str(cfg.get("watch_interval") or 300)]
+        argv += ["monitor", "-i", str(cfg.get("watch_interval") or 300)]
         log = open(logfile, "ab", buffering=0)
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log,
                              stderr=subprocess.STDOUT, start_new_session=True)
         with open(pidfile, "w") as f:
             f.write(str(p.pid))
-        print("已自动启动后台监控 tf watch (PID %d)。日志：%s" % (p.pid, logfile))
+        print("已自动启动后台监控 tf monitor (PID %d)。日志：%s" % (p.pid, logfile))
     except Exception:
         pass
 
 
 def _watch_cron(install):
-    """tf watch --install/--uninstall：crontab 保活——每 10 分钟检查，
-    监控死了（重启/崩溃）自动拉起。tf watch -d 有 pid 检查，不会重复启动。"""
+    """tf monitor --install/--uninstall：crontab 保活——每 10 分钟检查，
+    监控死了（重启/崩溃）自动拉起。tf monitor -d 有 pid 检查，不会重复启动。"""
     import shutil as _sh
     marker = "# tf-watch-keepalive"
     if not _sh.which("crontab"):
         print("系统没有 crontab 命令。手动保活方案：")
-        print("  每 10 分钟执行一次：%s watch -d" % os.path.realpath(sys.argv[0]))
+        print("  每 10 分钟执行一次：%s monitor -d" % os.path.realpath(sys.argv[0]))
         return 1
     cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     old = [] if cur.returncode else [l for l in cur.stdout.splitlines()
                                      if marker not in l]
     if install:
         exe = os.path.realpath(sys.argv[0])
-        old.append("*/10 * * * * %s watch -d >/dev/null 2>&1  %s"
+        old.append("*/10 * * * * %s monitor -d >/dev/null 2>&1  %s"
                    % (exe, marker))
     r = subprocess.run(["crontab", "-"], input="\n".join(old) + "\n",
                        text=True, capture_output=True)
@@ -6972,8 +7027,8 @@ def _watch_cron(install):
         print("写入 crontab 失败：%s" % (r.stderr or "").strip())
         return 1
     if install:
-        print("已写入 crontab 保活：每 10 分钟确保 tf watch 在跑（重启后自动恢复）")
-        print("查看：crontab -l；移除：tf watch --uninstall")
+        print("已写入 crontab 保活：每 10 分钟确保 tf monitor 在跑（重启后自动恢复）")
+        print("查看：crontab -l；移除：tf monitor --uninstall")
     else:
         print("已移除 crontab 保活。")
     return 0
@@ -7095,7 +7150,7 @@ def main():
         print("  tf list      只读总表（不拉取、不提交）")
         print("  tf summary   只读极简汇总（巡检省 token，见 AGENTS.md）")
         print("  tf status    刷新状态 + auto-fetch + auto-advance")
-        print("  tf watch     后台监控（-i 秒，-d 放后台）")
+        print("  tf monitor   后台监控（-i 秒，-d 后台，restart 重做；watch 为旧名）")
         print("  tf -h        全部命令")
         return
     p = argparse.ArgumentParser(prog="tf")
@@ -7112,15 +7167,17 @@ def main():
                         "waiting/scancel（逗号分隔），对任意命令生效；"
                         "如 -status scancel start 重跑全部被 stop 取消的")
     p.add_argument("-i", "--interval", type=int, default=300,
-                   help="watch 刷新间隔秒数（默认 300）")
+                   help="monitor 刷新间隔秒数（默认 300）")
     p.add_argument("-d", "--daemon", action="store_true",
-                   help="watch 放后台运行（日志 .tf_watch.log）")
+                   help="monitor 放后台运行（日志 .tf_watch.log）")
     p.add_argument("--stop", action="store_true",
-                   help="停止后台运行的 tf watch")
+                   help="停止后台运行的 tf monitor")
     p.add_argument("--install", action="store_true",
-                   help="写入 crontab 保活（tf watch 重启后自动恢复）")
+                   help="写入 crontab 保活（tf monitor 重启后自动恢复）")
     p.add_argument("--uninstall", action="store_true",
                    help="移除 crontab 保活")
+    p.add_argument("--restart", action="store_true",
+                   help="重启后台监控（先停旧的再起新的）")
     p.add_argument("-f", "--force", action="store_true")
     p.add_argument("--all", dest="all_files", action="store_true",
                    help="fetch 时拉回每个步骤的全部文件（不只 fetch_files 清单）")
@@ -7149,8 +7206,8 @@ def main():
 
     commands = {"status", "list", "summary", "start", "stop", "retry", "rerun",
                 "json", "config", "dir", "fetch", "init", "clean", "watch",
-                "help", "auto", "adopt", "migrate-subdir", "hpc", "skills",
-                "conf", "level"}   # patch_level
+                "monitor", "restart", "help", "auto", "adopt", "migrate-subdir",
+                "hpc", "skills", "conf", "level", "probe", "push"}
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -7173,6 +7230,29 @@ def main():
     if cmd == "config":
         print(EXAMPLE_CONFIG)
         return
+    if cmd == "probe":   # 只读探测：delegate 到 scripts/probe_jobs.py（不采集/不提交/不改文件）
+        import subprocess as _sp
+        _pkg = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        if not os.path.basename(_pkg).startswith("taskflow"):
+            _pkg = os.path.dirname(os.path.realpath(__file__))
+        _probe = os.path.join(_pkg, "scripts", "probe_jobs.py")
+        _mats = [m.strip() for m in (a.proj or "").split(",") if m.strip()] + mat_toks
+        if not _mats:
+            sys.exit("错误：probe 需要 -p 材料名（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）。")
+        _argv = [sys.executable, _probe, "-p", ",".join(_mats)]
+        if a.job:
+            _argv += ["-j", a.job]
+        if a.host:
+            _argv += ["--host", a.host]
+        sys.exit(_sp.call(_argv))
+    if cmd == "push":   # git 提交：delegate 到 scripts/tf-git-push.sh（本地真实版 + 远端脱敏版）
+        import subprocess as _sp
+        _pkg = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+        if not os.path.basename(_pkg).startswith("taskflow"):
+            _pkg = os.path.dirname(os.path.realpath(__file__))
+        _push = os.path.join(_pkg, "scripts", "tf-git-push.sh")
+        _msg = " ".join(mat_toks) if mat_toks else "update"
+        sys.exit(_sp.call(["bash", _push, _msg]))
     if a.job and not a.proj and not mat_toks and cmd not in (
             "start", "stop", "retry", "rerun", "clean", "status"):
         sys.exit("错误：-j 必须和 -p 一起用（start/stop/retry/rerun/clean "
@@ -7182,6 +7262,20 @@ def main():
     cfg["_config_dir"] = (os.path.dirname(os.path.abspath(cfg_path))
                           if cfg_path else os.getcwd())
     cfg["_config_path"] = cfg_path
+    if cmd in ("watch", "monitor", "restart"):   # 控制类操作不采集状态，提前短路
+        if a.install:
+            sys.exit(_watch_cron(True))
+        if a.uninstall:
+            sys.exit(_watch_cron(False))
+        if a.stop:
+            sys.exit(_watch_stop(cfg))
+        if a.restart or cmd == "restart":
+            _watch_stop(cfg)
+            _watch_daemon(a, mat_toks, root, cfg)
+            return
+        if a.daemon:
+            _watch_daemon(a, mat_toks, root, cfg)
+            return
     cfg = apply_skills(cfg, verbose=True)   # v1.2：先装配 skill/*/skill.yaml
     if cmd == "skills":
         return cmd_skills(cfg, tt=a.tt)
@@ -7193,7 +7287,7 @@ def main():
     types = get_types(cfg, tt=a.tt,
                       root_override=None if cmd == "init" else root,
                       quiet=(cmd == "init"))
-    if cmd != "watch":
+    if cmd not in ("watch", "monitor"):
         _watch_ensure(cfg)   # v1.10：auto_watch 时顺带确保后台监控在跑
     if cmd in ("status", "json") and not types and not a.tt:
         sys.exit("错误：没有任何任务类型"
@@ -7328,16 +7422,7 @@ def main():
                          % (tok, ("，你是不是想 '%s'？" % close[0]) if close else "。"))
     jobs = jobs or [None]
 
-    if cmd == "watch":   # v3.15：监控模式（循环 采集→fetch→advance）
-        if a.install:                    # v1.10：crontab 保活（重启自动恢复）
-            sys.exit(_watch_cron(True))
-        if a.uninstall:
-            sys.exit(_watch_cron(False))
-        if a.stop:
-            sys.exit(_watch_stop(cfg))
-        if a.daemon:                     # v3.16：后台监控，不占终端
-            _watch_daemon(a, mat_toks, root, cfg)
-            return
+    if cmd in ("watch", "monitor", "restart"):   # 前台监控（控制标志已在前面短路）
         _ov = {}                        # v1.8：自动重载时命令行覆盖照旧生效
         if a.host is not None:
             _ov["host"] = a.host or None

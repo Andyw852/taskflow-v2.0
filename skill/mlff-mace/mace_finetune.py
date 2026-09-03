@@ -41,7 +41,7 @@ def parse_args():
     p.add_argument("--force-mh-ft-lr", default="false")
     p.add_argument("--replay", default="")
     p.add_argument("--num-samples-pt", type=int, default=30000)
-    p.add_argument("--multiheads-finetuning", default="true")   # true=多头replay / false=naive单头
+    p.add_argument("--multiheads-finetuning", default="false")   # true=多头replay / false=naive单头（默认 naive，单材料专用势）
     p.add_argument("--energy-weight", type=float, required=True)
     p.add_argument("--forces-weight", type=float, required=True)
     p.add_argument("--stress-weight", type=float, required=True)
@@ -105,7 +105,7 @@ def main():
     # 配方/E0S_MODE 变了必须重训——能量零点/训练配置不同，旧模型不能混用）
     target = cwd / ("%s.model" % a.name)
     old_sum = mc.read_json(cwd / "finetune_summary.json", {})
-    recipe = "%s|%g|%d|%s|ew%g|fw%g|sw%g|bs%d|hd%g|mh%s|pt%d" % (a.e0s_mode, a.lr, a.epochs, a.loss, a.energy_weight, a.forces_weight, a.stress_weight, a.batch_size, a.huber_delta, str(a.force_mh_ft_lr).lower(), a.patience)
+    recipe = "%s|%g|%d|%s|ew%g|fw%g|sw%g|bs%d|hd%g|mh%s|pt%d|multi%s|npt%d" % (a.e0s_mode, a.lr, a.epochs, a.loss, a.energy_weight, a.forces_weight, a.stress_weight, a.batch_size, a.huber_delta, str(a.force_mh_ft_lr).lower(), a.patience, str(a.multiheads_finetuning).lower(), a.num_samples_pt)
     if target.is_file() and old_sum.get("e0s_mode") == a.e0s_mode \
             and old_sum.get("recipe") == recipe:
         print("[SKIP] %s 已存在（幂等跳过），不再重训" % target.name)
@@ -144,11 +144,11 @@ def main():
         sys.exit("[ERROR] 训练集不存在：%s（step6 没跑成？）" % a.train_file)
     if not Path(a.test_file).is_file():
         sys.exit("[ERROR] 测试集不存在：%s（step6 没跑成？）" % a.test_file)
-    if not a.replay or not Path(a.replay).is_file():
+    if str(a.multiheads_finetuning).lower() in ("1", "true", "yes") \
+            and (not a.replay or not Path(a.replay).is_file()):
         sys.exit("[ERROR] REPLAY_XYZ 缺失：%s。\n"
-                 "         多头微调的 replay 数据是必需的（集群无外网，mace 的自动下载"
-                 "必失败；没有它只能做 naive 微调，会把基座通用性洗掉、model_card 结论"
-                 "跨代不可比，本技能不做这种降级）。\n"
+                 "         多头微调（MULTIHEAD=true）的 replay 数据是必需的（集群无外网，"
+                 "mace 的自动下载必失败）。naive 单头（MULTIHEAD=false）不需要 replay。\n"
                  "         获取：在有网机器跑\n"
                  "           python -m mace.cli.fine_tuning_select --configs_pt <replay数据集>"
                  " --configs_ft train.xyz --subselect fps --num_samples 30000"
@@ -212,11 +212,28 @@ def main():
     else:
         cmd.append("--E0s=estimated")
 
+    # [FIX-PATIENCE] mace 单卡早停不生效（上游 bug）：非分布式时 train.py 的
+    # exit_now=None，patience 触发只打印日志不跳出循环，实际训到 max_num_epochs。
+    # 模型取的是最佳 checkpoint（验证损失改善才保存），所以结果仍有效，只是白烧 GPU。
+    try:
+        import mace as _mace_mod
+        _mver = getattr(_mace_mod, "__version__", "?")
+    except Exception:
+        _mver = "?"
+    print("[WARN] mace %s 单卡早停不生效（上游 bug）：PATIENCE 只打日志不跳出，实际训到 EPOCHS=%d。模型取最佳 checkpoint，结果有效。" % (_mver, a.epochs))
+
     logf = Path("train.log")
     print("[..] " + " ".join(cmd[1:]))
+    # [FIX-MH] 固定 replay 采样等子进程随机源：PYTHONHASHSEED + CUBLAS workspace。
+    # 注意 MACE 库的 set_seeds 只设了 np+torch CPU seed、漏 cuda seed；CUBLAS workspace
+    # 约束能消掉一部分 GPU 非确定性（更彻底要改库加 torch.cuda.manual_seed_all）。
+    import os as _os
+    _env = dict(_os.environ)
+    _env["PYTHONHASHSEED"] = str(a.seed)
+    _env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     try:
         with open(str(logf), "w") as fh:
-            r = subprocess.run(cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT)
+            r = subprocess.run(cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT, env=_env)
         rc = r.returncode
     except Exception as e:
         rc = -1

@@ -27,6 +27,9 @@ DIMENSION    = "auto"
 VASPKIT_EXE  = "vaspkit"
 KSCHEME      = "2"
 KSPACING     = "0.03"
+DK_MAX       = 0.05                   # 与 step3_uniform 同口径：面内笛卡尔 k 间距上限，
+                                      # 保证 step7 与 step3 的网格一致（否则 band 截断差 1，
+                                      # amset run 报 band 数不匹配——LS 2×11 vs 6×41 实锤）
 FUNC         = "inherit"      # patch_ke_dag: inherit=继承 step1
 # 注意：本步必须和 step3_uniform 同泛函，否则形变势里会掺进泛函差异
 MANUAL_ENCUT = None
@@ -131,6 +134,35 @@ def _reference_kpoints(out, dim, vac_axis, n_sub):
               "各形变的 k 网格可能不一致，形变势会失真")
         return None
     kc.vaspkit_kpoints(und, KSCHEME, KSPACING, VASPKIT_EXE, dim, vac_axis)
+    # [DK_MAX] 与 step3_uniform 同口径加密：面内笛卡尔间距上限，逐轴 max。
+    # 否则 step7(undeformed 网格) 与 step3 网格不同 → band 截断差 → amset 报错。
+    if DK_MAX and dim == "2d":
+        import numpy as np
+        _ln = (und / "POSCAR").read_text().splitlines()
+        _s = float(_ln[1].split()[0])
+        _a = np.array([float(x) for x in _ln[2].split()[:3]]) * _s
+        _b = np.array([float(x) for x in _ln[3].split()[:3]]) * _s
+        _c = np.array([float(x) for x in _ln[4].split()[:3]]) * _s
+        _vol = abs(float(np.dot(_a, np.cross(_b, _c))))
+        _b1 = 2.0 * np.pi * np.cross(_b, _c) / _vol
+        _b2 = 2.0 * np.pi * np.cross(_c, _a) / _vol
+        _len = [float(np.linalg.norm(_b1)), float(np.linalg.norm(_b2))]
+        _ratio = (max(_len) / min(_len)) if min(_len) > 0 else 1.0
+        if _ratio >= 1.5:      # 各向异性胞才加密（六方 |b1|≈|b2| 豁免，与 step3 一致）
+            _kpt = (und / "KPOINTS").read_text().splitlines()
+            try:
+                _nx, _ny, _nz = (int(x) for x in _kpt[3].split())
+            except (IndexError, ValueError):
+                _nx = _ny = _nz = 1
+            _need = [int(np.ceil(_len[i] / float(DK_MAX))) for i in (0, 1)]
+            _mx, _my = max(_nx, _need[0]), max(_ny, _need[1])
+            if (_mx, _my) != (_nx, _ny):
+                print("[WARN] undeformed 面内分割 %dx%d 间距 %.3f/%.3f > DK_MAX=%.3f，"
+                      "按轴提到 %dx%d（与 step3 一致）"
+                      % (_nx, _ny, _len[0] / _nx, _len[1] / _ny, float(DK_MAX), _mx, _my))
+                _kpt[3] = "  %d  %d  %d" % (_mx, _my, _nz)
+                (und / "KPOINTS").write_text(
+                    "\n".join(_kpt) + "\n", encoding="utf-8", newline="\n")
     kpts = und / "KPOINTS"
     if not kpts.is_file():
         print("[WARN] undeformed/KPOINTS 生成失败 —— 退回逐目录生成")

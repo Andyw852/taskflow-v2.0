@@ -19,7 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dim_common import (detect_dimension, force_kz1, read_poscar_cell_frac,  # noqa: E402
-                        validate_poscar, resolve_tpl, VACUUM_MIN, _norm)
+                        validate_poscar, resolve_tpl, VACUUM_MIN,
+                        _norm, _cross, _det3)
 
 METHOD_FILE = "workflow_method.txt"     # step1 写的 FUNC/GGA/DIM/MAG（继承泛函/维度）
 KL_PARAMS   = "kl_params.txt"           # 本技能跨步共享：DIM/SUPERCELL/MESH/METHOD/NAC
@@ -71,18 +72,71 @@ VDW_MAP = {"pbe": None, "pbesol": None, "pbe-d3": "12"}
 # ==========================================================================
 # 超胞倍数 / phono3py --dim / --mesh 字符串（2D 真空方向恒 1）
 # ==========================================================================
-def supercell_matrix(poscar, dim, min_len=15.0, max_multiple=6, vac_axis=2):
+def _supercell_geometry(poscar, reps):
+    """超胞几何（纯标准库）：返回 (lengths, perp, insphere)。
+    lengths = 三条边模长；perp = 每方向垂直胞高 V/|a_j×a_k|（周期性最短镜像距离，
+    恒 ≤ 对应边长）；insphere = min(perp) = 内切球直径。"""
+    lat, _ = read_poscar_cell_frac(poscar)
+    sc = [[reps[i] * lat[i][k] for k in range(3)] for i in range(3)]
+    lengths = [_norm(sc[i]) for i in range(3)]
+    vol = abs(_det3(sc))
+    perp = []
+    for i in range(3):
+        j, k = (i + 1) % 3, (i + 2) % 3
+        area = _norm(_cross(sc[j], sc[k]))
+        perp.append(vol / area if area > 1e-12 else 0.0)
+    return lengths, perp, min(perp)
+
+
+def warn_cutoff_vs_supercell(poscar, reps, cutoff, label="cutoff", margin=0.1):
+    """截断半径必须 ≤ 超胞安全截断（0.5×内切球直径 − margin），否则周期性镜像让
+    力常数对重复计数（参考 lattice_kappa._max_safe_cutoff）。只 WARN 不拦截。
+    返回安全截断 (Å)；cutoff 为 None 时返回 None。"""
+    if cutoff is None:
+        return None
+    _, _, insphere = _supercell_geometry(poscar, reps)
+    max_safe = 0.5 * insphere - margin
+    if float(cutoff) > max_safe:
+        print("[WARN] %s=%.2f Å > 超胞安全截断 %.2f Å（内切球直径 %.2f Å）——"
+              "周期镜像会污染力常数！建议 %s ≤ %.2f Å，或扩超胞（MIN_SC_LEN/SUPERCELL）。"
+              % (label, float(cutoff), max_safe, insphere, label, max_safe))
+    return max_safe
+
+
+def supercell_matrix(poscar, dim, min_len=15.0, max_multiple=6, vac_axis=2,
+                     cutoff=None, margin=0.1):
     """按"每个非真空方向胞长 ≥ min_len"定对角超胞倍数 [na,nb,nc]。
-    2D 真空方向恒 1。纯标准库（读 POSCAR 晶格），不依赖 ASE。"""
+    2D 真空方向恒 1。
+    cutoff 给定时（三阶/二阶截断半径 Å）再加内切球判据：垂直胞高 ≥ 2×(cutoff+margin)
+    （垂直胞高是周期性最短镜像距离，必须 ≥ 2×截断半径，否则镜像虚假相互作用污染力常数）。
+    被 max_multiple 截断时只 WARN 不拦截（对齐 reference engine validate_user_supercell）。
+    纯标准库（读 POSCAR 晶格），不依赖 ASE。"""
     lat, _ = read_poscar_cell_frac(poscar)
     lens = [_norm(lat[i]) for i in range(3)]
+    vol = abs(_det3(lat))
+    perp = []
+    for i in range(3):
+        j, k = (i + 1) % 3, (i + 2) % 3
+        area = _norm(_cross(lat[j], lat[k]))
+        perp.append(vol / area if area > 1e-12 else 0.0)
+    need = 2.0 * float(cutoff) + 2.0 * float(margin) if cutoff is not None else None
     reps = []
     for i in range(3):
         if dim == "2d" and i == (vac_axis if vac_axis is not None else 2):
             reps.append(1)
             continue
         n = max(1, int(math.ceil(min_len / max(lens[i], 1e-6))))
-        reps.append(min(n, max_multiple))
+        if need is not None:
+            n = max(n, int(math.ceil(need / max(perp[i], 1e-6))))
+        if n > max_multiple:
+            print("[WARN] 方向 %d 需 %d 倍（边长 %.3f Å，垂直胞高 %.3f Å%s），"
+                  "被 MAX_MULTIPLE=%d 截断 → 该方向实际仅 %.2f Å"
+                  % (i, n, lens[i], perp[i],
+                     "，截断 %.2f Å 要求垂直胞高 ≥ %.2f Å" % (float(cutoff), need)
+                     if need is not None else "",
+                     max_multiple, max_multiple * perp[i]))
+            n = max_multiple
+        reps.append(n)
     return reps
 
 

@@ -138,7 +138,9 @@ def build_phono3py_cmd(mesh, ts, isotope, use_nac, extract, bte="rta"):
     # NAC：有 nac_params/BORN 就默认启用；无 --nac 开关（会被当 --nac-method），要关才 --nonac。
     #   phono3py 3.24/4.x 行为一致。use_nac=True 就默认带上（不加开关），否则显式 --nonac。
     nac_flag = "" if use_nac else " --nonac"
-    # phono3py 4.x：phono3py-load 是 phono3py 的 deprecated 别名，直接用 phono3py（读 disp.yaml 跑 BTE）。
+    # fc2/fc3 已在 step5_fc 由 symfc/alm 拟好并拷到本目录（fc2.hdf5/fc3.hdf5）。
+    # phono3py 4.x 默认读 cwd 的 fc2.hdf5/fc3.hdf5（用 --no-read-fc2/--no-read-fc3 关闭）；
+    # 3.x 的 --fc2/--fc3 开关在 4.x 已移除，加了会报 "unrecognized arguments: --fc2 --fc3"。
     p3 = ('phono3py phono3py_disp.yaml %s --mesh %s --ts="%s"%s%s'
           % (method, mesh, ts, " --isotope" if isotope else "", nac_flag))
     return "%s 2>&1 | tee phono3py_kappa.log\n%s" % (p3, extract)

@@ -27,7 +27,7 @@ template_layout: per_step
 template_dir: templates
 
 defaults:
-  hpc: jzzn
+  hpc: "3090"
   skill_subdir: true
 
 # 只拉小文件。fc2/fc3.hdf5、kappa-m*.hdf5 动辄上 GB，留在超算。
@@ -64,7 +64,7 @@ steps:
      hpc: jzzn,
      gen: gen_step4_kappa.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
-                submit_p3py.tpl]}
+                submit_p3py.tpl, vdw_radii.py]}
 
 requires:
   python: [mace-torch, torch, ase, phonopy, phono3py, symfc, pheasy, spglib, numpy, h5py]

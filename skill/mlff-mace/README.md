@@ -27,7 +27,7 @@
 | 4 | `step4_genstruct` | S4_gen | 登录节点 run:gen | 停机守卫；生成本代全部待标注构型（rattle 网格 + 孤立原子 + 单原子位移集 + static EOS 帧），写 `struct_manifest.json` |
 | 5 | `step5_label` | S5_label | 计算节点，**fanout** `cfg-*`（12 核/帧） | DFT 单点。**唯一昂贵的一步** |
 | 6 | `step6_dataset` | S6_data | 登录节点 run:gen | OUTCAR → extxyz；指纹校验；extend 并入；离群过滤；FPS 排序；固定测试集；e0s.json |
-| 7 | `step7_finetune` | S7_ft | GPU/CPU，**fanout** `seed-*` | MACE 多头微调，N_COMMITTEE=4 个 seed，全量数据 |
+| 7 | `step7_finetune` | S7_ft | GPU/CPU，**fanout** `seed-*` | MACE **naive 单头**微调（MULTIHEAD=false，单材料专用势不需要多头），N_COMMITTEE=4 个 seed，全量数据 |
 | 8 | `step8_benchmark` | S8_bench | GPU/CPU（sbatch） | §9.2 全部验收闸 + 学习曲线 + 决策表 + 停机判定 + 5 张图 + `results_<材料>.txt` |
 | 9 | `step9_publish` | S9_pub | 登录节点 run:gen | 仅当 `status=="pass"` 才拷 `.model` 进 MACE_MODEL_DIR + 写 `model_card.json` |
 
@@ -75,8 +75,40 @@ tf -tt mlff-mace -p Si start         # 判据检测到「代数不一致」→ 5
 > 毁掉已经算完的 DFT 帧。`retry` 会先 `scancel` 在跑的作业再重跑 gen（gen 幂等，
 > 不删文件、不碰已算完的 `cfg-*`）；单独补某几帧就进对应 `cfg-*` 目录手工 `sbatch`。
 
----
+## 0.1 本技能在 Si 上验证后的关键经验（换材料必读）
 
+> 下面三条是从 B0 偏 29% 一路排查到 0.073 THz 声子谱的**实测结论**，不是理论推断。
+> 每条都直接决定你换材料时第一步怎么配。
+
+**① 基座选 OMat24 系，不是 MP-0。** MP-0（MACE-MP-0）在 Si 上未微调 B0=76.5
+（DFT 95.1，偏软 20%）——它的训练数据全是几何优化过的结构，系统性**低估**能量/力/声子
+（已知 softening）。换 `MACE-matpes-pbe-omat-ft`（OMat24 系）后未微调 B0=105，微调后 96.2。
+换基座只改 `MACE_MODEL` 一个键，零代码改动。先试 MACE 系更强基座（matpes / MACE-MPA-0 /
+MACE-omat），再谈换架构。
+
+**② 单材料专用势用 naive 单头，不用多头 replay。** 本技能产物是交给下游
+`kl-mace-cpu`/`phonon-mace-cpu` 算**单一体系** κ/声子的专用势，不需要跨体系泛化。
+多头 replay 的两个坑：`num_samples_pt=30000` 对百帧量级的训练集是 ~200:1 **反向淹没**
+（pt_head 主导梯度、Default head 饿着，Si 实测 B0 +21.5%）；且 replay 采样**没固定随机种子**，
+同 seed 同配置两次训练 B0 能差 20 GPa（§9.2 ①）。naive 单头（MULTIHEAD=false）是窄目标
+应用的第一强基线，且确定可复现。
+
+**③ 应力必须真的进损失函数。** 历史上 `--loss` 传两次/硬编码 `--loss=weighted` 覆盖用户配置，
+导致应力项从未进损失，B0 偏 29% 却无人发现。修掉之后还要注意权重：`STRESS_WEIGHT_3D` 默认
+1.0 时应力被力权重 100 淹没，B0 仍偏（Si 实测 sw=10 → B0=123）；提到与力平权（sw=100）后
+B0 收敛（→90.9）。**检查：训练命令里 `--stress_weight` 是不是真的在，且没被力权重压一个数量级。**
+
+**验证过的边界（别把 Si 的成功当普适）：**
+
+- **只在 Si 上完整跑通过一次**——单元素、高对称、基座样本最密，是最容易的情况。
+- **所有绝对阈值都是在 Si 上标定的**（§9.1 ① 的推广）：Si 在 ±6% 应变下 E(V) 曲率信号
+  约 20 meV/atom；换个软材料（体模量 20 GPa 量级）同样应变下信号只有 ~4 meV/atom，
+  "能量 RMSE < 3 meV/atom" 立刻变成空闸。**换体系第一件事是重算被测信号量级再定阈值。**
+- **2D 分支（应力权重归零、EOS 换 E(面积)、ZA 支闸）一次都没真实跑过**——代码写了没验。
+- **数据集偏小的后遗症还在**：验证集 ~12 帧让 `lowest_loss` 靠噪声刷新（seed4 的 1192），
+  测试集 14 帧让 #9 分辨率不足（§9.2）。同一个根：数据集太小，多个基于它的判据在测噪声。
+
+---
 ## 1. 出处与「与 autoplex 默认值的差异清单」
 
 物理配方与验收标准照抄 autoplex（数据生成 `data/phonons/`、拟合 `fit/`、基准
@@ -206,6 +238,19 @@ REF_FC2_PATH  =                # 外部 DFT fc2（给则跳过 displ 帧的 DFT 
   「未考虑 LO-TO 劈裂」。
 - **rattle 与平板漂移**：2D 的 rattle 仍是各向同性三维位移（面外位移是物理的，正是 ZA 模式），
   但检查质心沿真空方向漂移 < 0.5 Å 且原子不进入周期镜像真空区，超了重抽样。
+- **2D 弛豫（S1）必须锁真空方向，且必须用 optcell 版 VASP**：三段式弛豫的 b/c 段是
+  `ISIF=3`（放开胞），2D 必须用 `IOPTCELL` 锁死真空方向（c 轴）及含 c 的剪切，否则真空层
+  会被压扁——qHPC36（C36 笼）实测 c 轴 25→8.2 Å、能量爆炸。**这是两重坑**：① `IOPTCELL`
+  是 optcell 补丁版的标签，**标准 vasp.6.6.0 不认识它**，写了也无效。3090 的
+  `~/software/vasp_optcell/` 就是 **vasp 6.4.3 + optcell 补丁**（version.F 确认 6.4.3），
+  CPU 版（openmx_build 环境 + `--partition=cpu192`，gcc/gfortran+MPI 编译，非 GPU）；
+  jzzn 的 `vasp.6.4.3-optcell` 同理。Ba1C20 验证：b 段 ISIF=3 + IOPTCELL 下
+  c 轴保持 25 Å 未压扁（标准版 25→8.2 发散）。② 模板注释说
+  「IOPTCELL 由 relax_common 注入」，而 relax_common 的 `CELL_CONSTRAINT_2D='ioptcell_tag'`
+  模式是「原样保留」——两边各自以为对方在管，结果没人写（与 `--loss` 被覆盖、
+  `PATIENCE` 不跳出循环、required 闸不影响 status 同一类）。**验收侧（mace_relax.py 的
+  FrechetCellFilter mask）和应变侧（rattle_gen.py 的真空断言）都正确处理了 2D，唯独 S1
+  模板漏了**——这正说明「真空方向没锁」在 2D 路径上会重复出现，逐个位置查。
 
 ---
 
@@ -299,31 +344,41 @@ KPOINTS：默认 Γ-only（超胞取力标准做法），KPOINTS_GRID 可显式�
 
 ## 8. MACE 微调（step7，死规则）
 
+**默认 naive 单头微调（MULTIHEAD=false）**——单材料专用势不需要跨体系泛化，
+多头 replay 对百帧级训练集是反向淹没（§0.1 ②）。命令（naive 版）：
+
 ```bash
-mace_run_train --name=<材料>_gen<K>_seed<S> --foundation_model=<基座.model> \
-  --multiheads_finetuning=True --pt_train_file=<REPLAY_XYZ> --num_samples_pt=30000 \
-  --train_file=train.xyz --valid_fraction=0.10 --test_file=test.xyz --E0s=e0s.json \
-  --energy_key=REF_energy --forces_key=REF_forces --stress_key=REF_stress \
-  --energy_weight=… --forces_weight=100 --stress_weight=… \
-  --lr=1e-4 --max_num_epochs=30 --batch_size=4 --ema --ema_decay=0.99 --amsgrad \
-  --scaling=rms_forces_scaling --default_dtype=float64 --device=… --seed=S
+python mace_finetune.py --name=<材料>_gen<K>_seed<S> --foundation_model=<基座.model> \
+  --multiheads-finetuning false --num-samples-pt 30000 \
+  --train-file=train.xyz --valid-fraction 0.10 --test-file=test.xyz \
+  --energy-key=REF_energy --forces-key=REF_forces --stress-key=REF_stress \
+  --energy-weight=… --forces-weight=100 --stress-weight=… \
+  --lr=0.001 --epochs=1200 --batch-size=10 --huber-delta 0.1 \
+  --scaling=rms_forces_scaling --dtype=float64 --device=… --seed=S
 ```
 
-1. **`float64` 不许改**：float32 力误差 ~1e-3 eV/Å，足以在声学支造出几十 cm⁻¹ 的假虚频。
-2. **应力权重按维度自动设**：3D → STRESS=STRESS_WEIGHT_3D(默认1.0,autoplex)/ENERGY=1；2D → STRESS=0/ENERGY=10（§5）。
-3. **多头不是可选项**：基座参考 DFT 与本项目泛函/色散/截断多半不同，能量基准不同；
-   多头各头独立 E0s；naive 微调会把基座通用性洗掉。
-4. **replay 数据必需**：集群无外网，`--pt_train_file mp` 自动下载必失败。`REPLAY_XYZ`
-   指向本地文件；缺失时报可行动诊断（在有网机器跑
-   `python -m mace.cli.fine_tuning_select --configs_pt <replay数据集> --configs_ft train.xyz
-   --subselect fps --num_samples 30000 --model <基座> --output replay_sel.xyz` 再拷过来）。
-   **拿不到就报错退出，不做 naive 微调降级**——降级会让 model_card 结论跨代不可比。
-5. `BATCH_SIZE` 默认 4，GPU OOM 自动降 1 并记日志。
-6. `N_COMMITTEE=4`，seed 固定 1,2,3,4（可复现）。
-7. **GPU 分卡（`N_GPU`）**：fakeslurm（3090）把每个 `--gres=gpu` 作业都钉在
-   `CUDA_VISIBLE_DEVICES=0`，4 个 seed 挤一张 24G 卡 → replay 预处理 ~11.5G/seed
-   直接 OOM。gen 脚本按 seed s → `CUDA_VISIBLE_DEVICES=(s-1) % N_GPU` 均摊；
-   `N_GPU=0`（auto）= N_COMMITTEE 张卡，>0 显式卡数。DEVICE=cpu 不设。
+1. **`DTYPE=float64` 不许改**：float32 力误差 ~1e-3 eV/Å，足以在声学支造出几十 cm⁻¹ 的假虚频。
+2. **应力权重按维度自动设，且 3D 必须 ≥ 力权重量级**：3D → `STRESS_WEIGHT_3D`（默认 1.0，
+   **Si 实测要提到 100 与力平权**，否则应力被力权重 100 淹没、B0 学不到，§0.1 ③）/ENERGY=1；
+   2D → STRESS=0/ENERGY=10（§5）。
+3. **`MULTIHEAD`（默认 false=naive）**：单材料专用势用 naive。多头只留给需要分布外鲁棒性的
+   场合（如长时 MD 探索未知构型）；开多头必须按 10:1 **偏向目标数据**设 `NUM_SAMPLES_PT`
+   （百帧级 ~1500，别用 30000），且先做同 seed 复现检查（§9.2 ①，replay 采样无种子）。
+4. **replay 只在多头模式必需**（MULTIHEAD=true 时）：集群无外网，`REPLAY_XYZ` 指向本地文件，
+   缺失时报可行动诊断。naive 单头不读 replay。
+5. **`PATIENCE` 单卡训练不生效（上游 bug）**：mace-torch 0.3.16 非分布式时 `exit_now=None`，
+   早停只打日志不跳出循环，一定训到 `EPOCHS`。模型取的是**最佳 checkpoint**（验证损失改善才
+   保存），结果有效，但白烧 GPU。`EPOCHS` 按「真实收敛点 × 1.5」设（§9.2 ⑥）。
+6. `BATCH_SIZE` 默认 10，GPU OOM 自动降 1 并记日志。
+7. `N_COMMITTEE=4`，seed 固定 1,2,3,4（可复现）。
+8. **GPU 分卡（`N_GPU`）**：gen 按 seed s → `CUDA_VISIBLE_DEVICES=(s-1) % N_GPU` 均摊；
+   `N_GPU=0`（auto）= N_COMMITTEE 张卡，>0 显式卡数。**提交前看 `nvidia-smi`**：卡被别的
+   作业占满时该 seed 直接 OOM（Si 实测 GPU 0/1 被 VASP 占导致 seed1/2 OOM）。
+9. **`E0S_MODE` 默认 estimated**（mace 官方为微调做的零点对齐）。单元素体系影响小；
+   多元素体系换 `json`（用 DFT 孤立原子能）前先确认基座 E0 与目标泛函零点差不会让训练
+   从巨大初始误差起步。
+
+---
 
 ---
 
@@ -343,7 +398,7 @@ DFT 参考 = REF_FC2（DFT displ 帧力拟出，或外部 `REF_FC2_PATH`）；MA
 | 6 | 测试集能量 RMSE | < 3 meV/atom | ✅ |
 | 7 | 弛豫晶格常数 vs DFT | 各方向偏差 < 1%（2D 只看面内） | ✅ |
 | 8 | EOS：3D E(V)+体模量；2D E(面积)+面内二维模量（两边同法 BM 拟合） | 模量偏差 < 5% 且 4 seed 通过率 = 100%（#8a）；E 曲线残差 < 曲率信号 25%（#8b 相对判据） | ✅ |
-| 9 | committee σ_F 外推率（测试集 σ_F > 3× 训练集中位 σ_F 的帧占比） | < 5% | ✅ |
+| 9 | committee σ_F 外推率（测试集 σ_F > 3× 训练集中位 σ_F 的帧占比） | < 5% | ⚪ informational（分母仅 ~14 帧，5% 阈值等价 0% 闸，见 §9.1 ③ 与 benchmark.py 注释） |
 | 10 | **模式 Grüneisen γ(q,ν) 对照 DFT**（±1% 应变 fc2，两边同法，本征矢匹配模式） | 主要支 γ MAE < 0.3 | ✅ |
 
 **#1/#2 是 autoplex 的原始验收标准。**
@@ -415,6 +470,60 @@ sw 10→100 让 B0 摆 33 GPa，说明 B0 对超参极敏感。再去调 sw 找�
   （MACE 官方策略）时 pt_head 末段 std ~24。**重训后先确认是早停停下的、
   Default head 末段已平，指标才有意义。**
 
+### 9.2 随机源未固定 = seed 扫描测不出方差（Si 实测，最隐蔽的一类坑）
+
+> 结论之外的判据。以下每一条都来自 Si 实测，记**判据**不记结论。
+
+**① 同 seed 同命令行跑两次，差异必须为零；不为零说明有未固定的随机源。**
+
+Si 上 `multiheads_finetuning=true` + `num_samples_pt=1500`、`--seed=1` 完全相同的
+两次训练，B0 一次 94.3、一次 115.5（差 20 GPa），Default head loss 0.0140 vs 0.0211。
+根因：`num_samples_pt` 的 replay 随机采样**没有固定随机种子**，每次采到不同的子集。
+**结论：此时任何 seed 统计都是「给定 replay 子集」的条件方差，不是总方差。**
+mh1500 的 4-seed 极差 2.2 GPa 测的是同一次 replay 抽样内部的散布，换一次抽样整体平移 20 GPa
+——seed 极差这个指标在多头模式下**根本没在测真正的方差源**（又一个
+「指标在报告它没有测量的东西」的实例，与 committee 假 0%、#8a 单 seed 假阳性同类）。
+
+**标准动作（便宜，抓到最难发现的一类错误）**：任何要信 seed 统计之前，先同 seed
+同配置跑两次，差异应为零。不为零 → 先修随机源，再谈 seed 统计。
+
+**② replay 与目标数据的比例是主控变量。** MACE 开发者建议 replay:微调 ≈ 10:1
+**偏向目标数据**；而 `num_samples_pt=30000` 对百帧量级的数据集是 ~200:1 **反向**，
+pt_head 主导梯度、Default head 饿着。Si 实测 B0：多头 30000 → +21.5%，naive → +2.6%。
+
+**③ 单材料专用势用 naive 单头微调，不用多头 replay。** 本技能产物是交给
+`kl-mace-cpu`/`phonon-mace-cpu` 算**单一体系** κ/声子的专用势，不需要跨体系泛化；
+replay 头在这里纯粹消耗容量与梯度预算。naive 是窄目标应用的第一强基线
+（系统 benchmark 结论），多头 replay 留给需要广泛分布外鲁棒性的场合（如长时 MD
+探索未知构型）。Si 实测 naive 4-seed B0 极差 3.0 GPa、中心 97.6（DFT 95.1），可复现
+（两次 97.2）。
+
+**④ 多头路径没人走之后，别让它变成「没人测的死分支」。** `MULTIHEAD` 默认 false
+后，多头是留是删要明确：留就标注「多头未经充分验证，启用前先做同 seed 复现检查
+（见 ②）」；删就删干净，不留半活的分支。**半活分支比删掉更危险。**
+
+**⑤ replay 采样无种子这件事，进 recipe 指纹也修不了。** 指纹一样但采样不同，幂等
+检查会「配置没变、跳过」，而实际模型可能差 20 GPa。真要修：给 replay 采样传固定
+种子（和训练 seed 绑定或单独一个键），并把它也进指纹。不修就至少把这一路的
+不可复现性记进 `model_card.json`。
+
+**⑥ PATIENCE 在 mace 单卡训练里完全不生效（上游 bug）。** mace-torch 0.3.16 的
+`train.py` 里，非分布式时 `exit_now = None`，早停那段 `if exit_now is not None`
+跳过 break——所以 `patience_counter >= patience` 只打印 `Stopping optimization after
+N epochs without improvement`（从某 epoch 起每 27s 一条，一路打印到结束），**永不
+跳出循环**。`PATIENCE` 写在 step.conf 里看起来在把关，实际完全无效，一定训到
+`max_num_epochs`。
+
+判断方法与影响：`grep "Stopping optimization" seed-*/train.log` 能看到触发 epoch；
+`ls seed-1/checkpoints/` 里最后一个 `epoch-N.pt` 就是最后一次验证改善的 epoch（N），
+真正的收敛点在 N 而不是 EPOCHS。**模型没受影响**——checkpoint 只在验证损失改善时
+保存，训练结束 load 的是最佳 checkpoint（N），不是最后一个 epoch 的权重；声子谱/B0/
+力这些数都是最佳点的，有效。代价只是白烧 GPU。
+
+处置：EPOCHS 按「真实收敛点 N × 1.5」设，别指望 PATIENCE 提前停。`mace_finetune.py`
+训练前会打印一行 mace 版本警告说明「单卡早停不生效」。这是又一个「机制在报告它
+没有真正执行的东西」的实例——与 ①~⑤ 同类。
+
 ---
 
 ## 10. 下游怎么接（哪些下游吃哪些数据）
@@ -454,9 +563,10 @@ DTYPE / LR / EPOCHS / DEVICE / N_GPU / KPOINTS_GRID / EDIFF / NCORE / CONDA_SH /
 - 集群设了 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`。
 - 提交模板逻辑名：`submit_std_2d.tpl / submit_std_3d.tpl`（VASP，12 核由 step.conf
   `[submit] ntasks_per_node=12` 覆盖）、`submit_mace.tpl`（step7/8）。
-- 基座模型：默认 `MACE_MODEL=2023-12-03-mace-128-L1_epoch-199.model`（MACE-MP-0 medium，
-  需放进 `MACE_MODEL_DIR`；下载见 [mace-mp releases](https://github.com/ACEsuit/mace-mp/releases/tag/mace_mp_0)）。
-- replay：`REPLAY_XYZ` 必需；MPtrj 子集生成命令见 §8.4。
+- 基座模型：默认 `MACE_MODEL=MACE-matpes-pbe-omat-ft.model`（OMat24 系 PBE 微调，
+  **Si 实测远好于 MP-0**，§0.1 ①；下载见
+  [mace-foundations releases](https://github.com/ACEsuit/mace-foundations/releases/tag/mace_matpes_0)）。
+- replay：`REPLAY_XYZ` 只在 `MULTIHEAD=true` 时必需（§8 ③④）；naive 单头不需要。
 - 运行时检测：step3 缺 hiphive / 缺 phonopy / 基座模型不覆盖元素 / replay 缺失都会带
   可行动错误信息退出。
 
@@ -468,7 +578,10 @@ DTYPE / LR / EPOCHS / DEVICE / N_GPU / KPOINTS_GRID / EDIFF / NCORE / CONDA_SH /
 2. 磁性体系：MACE 无自旋自由度，模型只对训练磁序有效。
 3. 2D：未考虑 LO-TO 劈裂；面外应力未参与训练。
 4. commensurate q 分辨率受基准超胞大小限制，长波行为检验偏弱（差异清单 #1）。
-5. 学习曲线 / 验收的 committee 用 seed 固定的 4 头；σ_F 的绝对标度依赖训练集噪声水平。
+5. **只在 Si 上完整跑通过一次**（单元素、高对称、基座样本最密）；2D 分支（应力归零 / E(面积) / ZA 闸）一次没真实跑过。
+6. **所有绝对阈值在 Si 上标定**：换体系先重算被测信号量级再定阈值（§0.1 边界，§9.1 ①）。
+7. **数据集偏小的后遗症**：验证集 ~12 帧使 `lowest_loss` 部分靠噪声刷新（seed4 末段改善到 1192 是噪声）；测试集 14 帧使 #9 外推率分辨率不足（1 帧超阈即 7.1% > 5%）。
+8. **单卡早停不生效**（mace-torch 0.3.16 上游 bug）：`PATIENCE` 只打日志不跳出，`EPOCHS` 即实际轮数；模型取最佳 checkpoint，结果有效但白烧 GPU（§9.2 ⑥）。
 
 ---
 
@@ -497,19 +610,36 @@ DTYPE / LR / EPOCHS / DEVICE / N_GPU / KPOINTS_GRID / EDIFF / NCORE / CONDA_SH /
 
 ---
 
-## 15. 实测记录（Si，12 核验证）
+## 15. 实测记录（Si，完整走通一遍）
 
-- 环境：jzzn，Si 金刚石原胞（2 原子）→ 超胞 4×4×4（128 原子，r_max=6.0 Å 读自基座模型）。
-- 第 0 代：18 rattle + 3 displ + 3 static + 1 iso = **25 帧 × 12 核**。
-- 本地（mace_local_venv）验证通过：supercell_tool / fc2_calib（u_rms=0.168 Å →
-  RATTLE_STD=[0.084, 0.168, 0.269] Å）/ rattle_gen（RMS 命中三档、min_dist ≥ 0.75）/
-  dataset_build / mace_finetune / benchmark（全部 10 道闸 + 学习曲线 + 决策表 +
-  results_Si.txt 跑通）。
-- 集群实测：S1 紧弛豫 12 核（PBEsol，EDIFFG=-0.001，pressure 0.00 kB ✓）；
-  S2 超胞 4×4×4；S3 u_rms 标定；S4 生成 25 帧；S5 25 个 12 核单点全部完成；
-  S6 数据集 25 帧（train 23 / test 2，指纹 PBEsol/ENCUT=370/ISMEAR=0）；
-  S7 4-seed 多头微调（24 核，排队中）；S8/S9 待 S7 完成后推进。
-- 实测修掉的坑（已写回代码）：EARLY_EXIT 跳过变胞段、阶段标记残留致 retry 空转、
-  VASP 6.4 TOTAL-FORCE 六列格式（位置+力）、in-kB 应力符号（压缩为正→取负）、
-  phonopy 2.47 API（PhonopyAtoms/0-based number/Mesh.weights 是重数）、
-  autoplex force_max 默认 40.0（提示词 0.1 与源码冲突，以源码为准）。
+**最终结果（matpes 基座 + naive 单头，gen-3）：**
+
+| 指标 | 值 | 目标 |
+|---|---|---|
+| 声子谱 RMSE | **0.073 THz** | < 0.20 |
+| B0（4/4 seed） | 97.1/96.5/97.3/94.3，极差 3.0，中心 96.2 | 95.1±5% |
+| 力 RMSE | 47.6 meV/Å（相对 2.2%） | < 3% |
+| 能量 RMSE | 0.55 meV/atom | < 3 |
+| Grüneisen γ MAE | 0.12 | < 0.3 |
+| #9 committee | 14.3%（informational） | — |
+
+**关键过程数据：**
+
+- Si 金刚石原胞（2 原子）→ 超胞 4×4×4（128 原子，r_max=6.0 Å 读自基座）。
+- 三代数据累计：gen-0 25 帧 → gen-1 21 → gen-2 21 → gen-3 49（VOL_FACTORS 3→7 点），
+  最终 116 帧（train 102 / test 14）。
+- 基座从 MP-0（未微调 B0=76.5，偏软 20%）换成 matpes/OMat24（105），微调后 96.2。
+- CPU/GPU DFT 帧一致性：挑老帧 cfg-0-rattle-004 GPU 重算，能量差 8e-8 eV、
+  最大力差 1e-5 eV/Å——数值上同一结果，混用无系统偏差。
+- 训练：naive 单头（MULTIHEAD=false），sw=100、huber_delta=0.10、EPOCHS=1200（早停单卡
+  不生效，见 §9.2 ⑥）、PATIENCE=200。
+
+**这一路修掉的坑（都已写回代码/README）：**
+
+- `--loss` 传两次/硬编码 weighted 覆盖用户配置 → 应力项从未进损失（已去掉硬编码）。
+- #8b 绝对阈值是空闸（改相对判据）；G3 补丁 static 帧列表错位（改 statics_ok 对齐+断言）。
+- committee 假 0%（单 seed 时指标失效）；#8a 单 seed 假阳性（改 4 seed 通过率）。
+- recipe 指纹漏 force_mh_ft_lr/patience/num_samples_pt/multiheads（已补全）。
+- replay 采样无种子 → 同 seed 两次 B0 差 20 GPa（改 set_seeds 加 cuda seed + README §9.2）。
+- PATIENCE 单卡早停不生效（mace-torch 0.3.16 上游 bug，mace_finetune 加版本警告）。
+- 其他：EARLY_EXIT 跳过变胞段、VASP 6.4 TOTAL-FORCE 六列、in-kB 应力符号、phonopy 2.47 API。

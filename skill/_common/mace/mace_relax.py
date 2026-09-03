@@ -160,7 +160,11 @@ def main():
         # fix-optmace：优化目标是 target（relax_cell=true 时是 CellFilter，
         # 力+应力一起收敛），收敛就必须按同一个量判。原来只看
         # atoms.get_forces()（纯原子力），晶胞应力没收敛也会写 converged=true。
-        converged = bool(np.max(np.linalg.norm(target.get_forces(), axis=1)) < a.fmax)
+        # fix-klmace：target 是 FrechetCellFilter，get_forces() 会把应力也拼进
+        # 来（最后一行），而 fmax 是纯原子力的阈值（eV/Å）。应力分量经 cell 归一后
+        # 与力混在同一向量里，会把「力已收敛、只是应力略大」的结构误判成不收敛。
+        # 这里只看纯原子力（target.atoms），应力单独走下面的 stress_tol 闸。
+        converged = bool(np.max(np.linalg.norm(target.atoms.get_forces(), axis=1)) < a.fmax)
         if not converged:
             print("[FAIL] %d 步内没收敛到 fmax=%g。加大 STEPS，或先用松一点的 FMAX "
                   "看结构是不是在往合理方向走。" % (a.steps, a.fmax))

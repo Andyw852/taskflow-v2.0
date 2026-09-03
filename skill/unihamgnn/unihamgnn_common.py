@@ -43,6 +43,7 @@ COMMON_SPEC = {
     "NAO_MAX": (26, "int"),             # OpenMX 最大轨道数：14 / 19 / 26
     "NPROC": (24, "int"),               # openmx_postprocess 的 mpirun -np
     "MPIRUN": ("mpirun", "str"),         # mpirun 可执行；3090 上写 openmx_build 的完整路径
+    "MKL_LIB": ("", "str"),            # openmx_postprocess 的 MKL .so.2 库目录（加进 LD_LIBRARY_PATH）；空 = 不额外设置
     "NTHREADS": (16, "int"),            # predict 的 OMP 线程数
     "DEVICE": ("cpu", "str"),           # predict 设备 cpu | cuda
     "NK": (120, "int"),                 # band_cal 能带路径 k 点数

@@ -48,8 +48,15 @@ DPT_DIR    = "step8.2_dpt"
 #            NORM_2D 因子 —— 全流程只有一个 t，σ/κ_e/κ_L 的口径不可能错开。
 #   None   = 不自动读，只用下面手填的值。
 KAPPA_L_SOURCE = "auto"
-KL_KAPPA_DIRS  = ("step6_kappa", "step6_kappa_shengbte")
-KL_ROOT        = None     # kl-dft-cpu 与 ke-dft-cpu 不在同一材料目录时，填 kl-dft-cpu 的材料目录
+# 多链探测：kl-dft-cpu → kl-mace-cpu → kl-mace-gpu（sibling 子目录，取第一个有结果的）。
+KL_CHAIN_DIRS  = {
+    "kl-dft-cpu":  ("step6_kappa", "step6_kappa_shengbte"),
+    "kl-mace-cpu": ("step4_kappa",),
+    "kl-mace-gpu": ("step4_kappa",),
+}
+KL_CHAIN_ORDER = ("kl-dft-cpu", "kl-mace-cpu", "kl-mace-gpu")
+KL_ROOT        = None   # None=按 KL_CHAIN_ORDER 探测 sibling；填路径=只找该目录（配 KL_KAPPA_DIRS）
+KL_KAPPA_DIRS  = ("step6_kappa", "step6_kappa_shengbte")   # 仅 KL_ROOT 手填时用
 # 手填值（W/mK，元胞口径，即 phono3py 原样）。非 None 时**优先于** auto。
 KAPPA_L_XX_W_MK = None
 KAPPA_L_YY_W_MK = None
@@ -118,8 +125,8 @@ def _read_ct_factor(cwd):
 
 
 # === patch_bt2_scissor：剪刀算符（把导带整体上移到目标带隙）===
-_BANDGAP_PLOT_CANDS = ["step2_bandgap/step2.2_pbe_plot",
-                       "step2_bandgap/step2.3_hse_plot",
+_BANDGAP_PLOT_CANDS = ["step2_bandgap/step2.3_hse_plot",
+                       "step2_bandgap/step2.2_pbe_plot",
                        "step4_band_plot"]
 
 
@@ -367,7 +374,7 @@ def _norm_2d(cwd):
         except (OSError, ValueError):
             rec = {}
     c = rec.get("cell_c_A")
-    t = THICKNESS_A if THICKNESS_A else rec.get("thickness_used_A")
+    t = THICKNESS_A if THICKNESS_A else (rec.get("layer_thickness") or {}).get("thickness_used_A")
     f = rec.get("elastic_rescale_factor_c_over_t")
     if THICKNESS_A and c:
         f = c / float(THICKNESS_A)
@@ -404,8 +411,27 @@ def _interp_T(temps, vals, T):
     return ys[-1]
 
 
+def _find_kl_kappa(cwd):
+    """多链探测 kl 的 kappa_summary.json。返回 (src, root) 或 (None, root)。"""
+    if KL_ROOT:
+        root = Path(KL_ROOT)
+        for d in KL_KAPPA_DIRS:
+            p = root / d / "kappa_summary.json"
+            if p.is_file():
+                return p, root
+        return None, root
+    base = Path(cwd).parent
+    for chain in KL_CHAIN_ORDER:
+        root = base / chain
+        for d in KL_CHAIN_DIRS.get(chain, ()):
+            p = root / d / "kappa_summary.json"
+            if p.is_file():
+                return p, root
+    return None, base
+
+
 def _resolve_kappa_L(cwd, T, ninfo):
-    """返回 (kxx, kyy, lines)。手填优先；否则读 kl-dft-cpu 的 kappa_summary.json。
+    """返回 (kxx, kyy, lines)。手填优先；否则读 kl 链的 kappa_summary.json。
 
     ★ 只取原始 kappa_xx_yy_zz（元胞口径），再乘 ninfo['factor_applied']，
       保证与 σ、κ_e 用同一个 t。绝不使用 kl-dft-cpu 自己的 kappa_2d_normalized ——
@@ -420,17 +446,10 @@ def _resolve_kappa_L(cwd, T, ninfo):
     if not KAPPA_L_SOURCE or str(KAPPA_L_SOURCE).lower() != "auto":
         return None, None, ["# kappa_L 未提供（KAPPA_L_SOURCE 非 auto 且未手填）——不出 ZT"]
 
-    root = Path(KL_ROOT) if KL_ROOT else Path(cwd)
-    src = None
-    for d in KL_KAPPA_DIRS:
-        p = root / d / "kappa_summary.json"
-        if p.is_file():
-            src = p
-            break
+    src, root = _find_kl_kappa(cwd)
     if src is None:
-        return None, None, ["# kappa_L 未找到：%s 下没有 %s/kappa_summary.json"
-                            % (root, "|".join(KL_KAPPA_DIRS)),
-                            "#   kl-dft-cpu 跑完了吗？或用 KL_ROOT 指定 kl-dft-cpu 的材料目录"]
+        return None, None, ["# kappa_L 未找到：sibling kl-dft-cpu/kl-mace-cpu/kl-mace-gpu 下都没有 kappa_summary.json",
+                            "#   kl 链跑完了吗？或用 KL_ROOT 显式指定 kl 的材料目录"]
     try:
         j = json.loads(src.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:

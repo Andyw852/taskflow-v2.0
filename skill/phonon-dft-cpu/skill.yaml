@@ -1,0 +1,49 @@
+# =============================================================================
+# skill/phonon-dft-cpu/skill.yaml —— 声子谱（DFT/phonopy，仅 2 阶力常数）
+#
+# 物理链：
+#   S1_opt     结构优化（复用 kl-dft-cpu 同一 gen_step1_std_opt.py）
+#   S2_disp    phonopy 2 阶对称有限位移 + 超胞单点取力（扇出 disp-*）
+#   S3_phonon  phonopy 收力 → fc2 拟合 → 声子谱（band-dft-cpu.yaml + phonon_summary.json）
+# =============================================================================
+schema: 1
+name: phonon-dft-cpu
+desc: 声子谱(DFT/CPU)
+version: "0.1"
+checks: ../_common/checks_relax.py   # 公共池私有判据 relax_injob
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, POTCAR, submit.sh, OUTCAR,
+              vasprun.xml, workflow_method.txt, kl_params.txt,
+              phonopy_disp.yaml, band-dft-cpu.yaml, phonon_summary.json,
+              queue.out, queue.err]
+
+steps:
+  - {seq: 1, name: step1_std_opt, label: S1_opt, check: relax_injob,
+     gen: gen_step1_std_opt.py, contcar_to_poscar: true,
+     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf,
+                check_common.py, step1_check_and_resubmit.py,
+                incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 2, name: step2_disp, label: S2_disp, check: outcar, fanout: "disp-*",
+     gen: gen_step2_disp.py,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py,
+                check_common.py, step2_check_and_resubmit.py,
+                incar_force_2d.tpl, incar_force_3d.tpl,
+                submit_std_2d.tpl, submit_std_3d.tpl]}
+
+  - {seq: 3, name: step3_phonon, label: S3_phonon, check: phonon,
+     gen: gen_step3_phonon.py, fetch_all: true,
+     gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py,
+                phonon_fit_driver.py, submit_fit.tpl]}
+
+requires:
+  python: [phonopy, numpy, spglib]
+  conda: atomate2_p_a
+  exe: [vasp_std, vaspkit, phonopy]

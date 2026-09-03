@@ -133,8 +133,15 @@ def plan_alm(out, ph3, conf):
         nfree = lk.alm_nfree_via_api(atoms, orders, cuts)
     except Exception as _e:
         print("[..] ALM Python API 不可用（%s），回落到命令行 alm" % _e)
-        lk.run_alm(out)
-        nfree = lk.parse_alm_nfree(out / "alm.log", orders)
+        try:
+            lk.run_alm(out)
+            nfree = lk.parse_alm_nfree(out / "alm.log", orders)
+        except Exception as _e2:
+            sys.exit("[ERROR] ALM 不可用（Python API: %s；命令行: %s）。\n"
+                     "        ALM 是确定随机位移帧数的必需依赖（算各阶自由参数 nfree），\n"
+                     "        未安装就禁止推进 step4。请先安装 ALM（cmake 编译 + Python 绑定\n"
+                     "        from alm import ALM），再重跑 S4_disp。"
+                     % (_e, _e2))
     n = int(lk.estimate_n_struct(nfree, n_sc, int(conf["OVERSAMPLE"])))
     detail = "  [自由参数 %s / DOF=3×%d=%d × OVERSAMPLE=%d]" % (
         nfree, n_sc, 3 * n_sc, int(conf["OVERSAMPLE"]))
@@ -229,13 +236,20 @@ def main():
     if method not in ("findiff", "alm"):
         sys.exit("[ERROR] METHOD 只允许 findiff / alm")
 
+    # 三阶截断半径（alm 的 ALM_CUT3 / findiff 的 FC3_CUTOFF_PAIR）用于超胞内切球判据：
+    # 截断半径必须 ≤ 超胞安全截断（0.5×内切球直径 − margin），否则周期镜像污染力常数。
+    cut3 = conf["ALM_CUT3"] if method == "alm" else conf["FC3_CUTOFF_PAIR"]
+    cut3_label = "ALM_CUT3" if method == "alm" else "FC3_CUTOFF_PAIR"
     if conf["SUPERCELL"]:
         reps = [int(x) for x in conf["SUPERCELL"]]
         if dim == "2d":
             reps[vac_axis if vac_axis is not None else 2] = 1
+        # 显式超胞不自动扩胞，只事后 WARN（对齐 validate_user_supercell 只 warning 语义）
+        kc.warn_cutoff_vs_supercell(out / "POSCAR", reps, cut3, label=cut3_label)
     else:
         reps = kc.supercell_matrix(out / "POSCAR", dim, conf["MIN_SC_LEN"],
-                                   conf["MAX_MULTIPLE"], vac_axis if vac_axis is not None else 2)
+                                   conf["MAX_MULTIPLE"], vac_axis if vac_axis is not None else 2,
+                                   cutoff=cut3)
     mesh = kc.mesh_str(conf["KAPPA_MESH"].split(), dim, vac_axis if vac_axis is not None else 2)
     print("[..] 维度=%s 方法=%s 超胞=%s mesh=%s" % (dim.upper(), method, kc.dim_str(reps), mesh))
     kc.write_kl_params(out / kc.KL_PARAMS, DIM=dim.upper(), SUPERCELL=kc.dim_str(reps),

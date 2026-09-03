@@ -42,9 +42,18 @@ def main():
     forces = np.load("forces.npy")
     ph.displacements = disps
     ph.forces = forces
-    print("[..] %d 帧 × %d 原子，symfc 拟合 fc2" % (len(disps), len(uc.numbers) * int(np.prod(dim))))
 
-    ph.produce_force_constants(fc_calculator="symfc")
+    # symfc dense 求解器的正规方程 X^T X 内存 ~ O(basis^2)，大 supercell 会爆内存
+    # （qHPC60 976 原子：无 cutoff 需 ~585 GiB）。cutoff 截断 fc2 非零范围，与
+    # MACE 势 r_max=6.0 A 一致（6 A 外力常数本就为 0），不损失物理信息。
+    fc_cutoff = params.get("FC_CUTOFF") or "6.0"
+    print("[..] %d 帧 × %d 原子，symfc 拟合 fc2 (cutoff=%s A)"
+          % (len(disps), len(uc.numbers) * int(np.prod(dim)), fc_cutoff))
+
+    ph.produce_force_constants(
+        fc_calculator="symfc",
+        fc_calculator_options="cutoff = %s" % fc_cutoff,
+    )
     print("[OK] fc2 拟合完成")
 
     ph.run_mesh(mesh=60.0, with_eigenvectors=False, is_mesh_symmetry=True)

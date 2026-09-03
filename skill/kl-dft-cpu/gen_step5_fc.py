@@ -38,6 +38,7 @@ SPEC = {
     "PHEASY_FIT_METHOD": ("RFE", "str"), # LASSO | RFE | OLS（OLS 最吃内存）
     "PHEASY_C3_CUTOFF":  ("5.2", "str"), # pheasy fc3 截断 Å；None=不截断
     "PHEASY_ENABLE_FC":  (3,     "int"), # 2|3|4（热导率需 ≥3）
+    "PHEASY_BIN":        ("pheasy", "str"), # pheasy 可执行名：pheasy | pheasy-gpu（GPU 版）
     "NULL_SPACE_EPS":    (0.001, "float"),
     # —— 导出 & 虚频闸 ——
     # —— 缺帧容错（仅随机位移 METHOD=alm 生效；findiff 必须帧帧齐全）——
@@ -75,6 +76,9 @@ def main():
     if engine == "pheasy" and method != "alm":
         sys.exit("[ERROR] FIT_ENGINE=pheasy 需要随机位移（step4 METHOD=alm）。\n"
                  "        findiff 请用 FIT_ENGINE=phono3py，或把 step4 改成 alm 重跑。")
+    p_bin = str(conf["PHEASY_BIN"] or "pheasy").lower()
+    if p_bin not in ("pheasy", "pheasy-gpu"):
+        sys.exit("[ERROR] PHEASY_BIN 只允许 pheasy / pheasy-gpu")
     if str(conf["FC_CALC"]).lower() not in ("symfc", "alm"):
         sys.exit("[ERROR] FC_CALC 只允许 symfc / alm")
 
@@ -95,6 +99,7 @@ def main():
         "PHEASY_FIT_METHOD": str(conf["PHEASY_FIT_METHOD"]).upper(),
         "PHEASY_C3_CUTOFF": str(conf["PHEASY_C3_CUTOFF"]),
         "PHEASY_ENABLE_FC": int(conf["PHEASY_ENABLE_FC"]),
+        "PHEASY_BIN": p_bin,
         "NULL_SPACE_EPS": float(conf["NULL_SPACE_EPS"]),
         "MIN_SUCCESS_RATIO": float(conf["MIN_SUCCESS_RATIO"]),
         "MIN_SUCCESS_FRAMES": int(conf["MIN_SUCCESS_FRAMES"]),
@@ -112,11 +117,25 @@ def main():
     #   必须显式拷过去（否则计算节点报 No such file）。
     shutil.copyfile(here / "kl_fc_backends.py", out / "kl_fc_backends.py")
     if engine == "pheasy":
-        tpl = kc.resolve_submit(here, dim or "3d", "submit_fit_pheasy")
+        # GPU 拟合（PHEASY_BIN=pheasy-gpu）走独立模板 submit_fit_pheasy_gpu（--gres + 降核）。
+        # 纯 CPU 集群（jzzn/hanhai25）没有该模板 → gen 期即报错，不排进队才失败（G2）。
+        _kind = ("submit_fit_pheasy_gpu" if p_bin == "pheasy-gpu"
+                 else "submit_fit_pheasy")
+        try:
+            tpl = kc.resolve_submit(here, dim or "3d", _kind)
+        except SystemExit:
+            if _kind == "submit_fit_pheasy_gpu":
+                sys.exit("[ERROR] PHEASY_BIN=pheasy-gpu 需要 GPU 拟合模板 "
+                         "submit_fit_pheasy_gpu.tpl（a800/3090 已配）。\n"
+                         "        当前集群只有 CPU 模板——pheasy-gpu 在无 GPU 节点跑不了。\n"
+                         "        改用 PHEASY_BIN=pheasy（CPU 拟合），或把材料 hpc 切到 "
+                         "a800/3090。")
+            raise
         subs = {"JOBNAME": kc.new_jobname(cwd, "S5fit"),
                 "DIM": supercell or "1 1 1",
                 "FIT_METHOD": cfg["PHEASY_FIT_METHOD"],
                 "ENABLE_FC": str(cfg["PHEASY_ENABLE_FC"]),
+                "PHEASY_BIN": p_bin,
                 "C3_CUTOFF": cfg["PHEASY_C3_CUTOFF"],
                 "NULL_SPACE_EPS": str(cfg["NULL_SPACE_EPS"])}
     else:

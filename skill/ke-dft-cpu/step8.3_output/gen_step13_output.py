@@ -26,6 +26,11 @@ import os
 import sys
 from pathlib import Path
 
+# [SKILL_REV] 版本戳：写进 comparison_summary.txt。每次改本脚本逻辑后更新。
+#   陈旧副本已咬人三次（step12/step9b 盖戳后，step13 是最后一个没盖的），
+#   这里盖戳便于从产物反查到底跑的是哪份 skill 副本。
+_SKILL_REV = "2026-08-31-dpt-md-klroot"
+
 OUTDIR_NAME = "step8.3_output"
 AMSET_DIR = "step8_amset"
 BT2_DIR   = "step8.1_boltztrap"
@@ -42,8 +47,15 @@ SOMMERFELD_L = 2.44e-8   # WΩ/K²
 #            （要文献口径的绝对值请看 step8.1 的 NORM_2D。）
 #   None   = 只用下面手填的值。
 KAPPA_L_SOURCE = "auto"
-KL_KAPPA_DIRS  = ("step6_kappa", "step6_kappa_shengbte")
-KL_ROOT        = None    # kl-dft-cpu 与 ke-dft-cpu 不在同一材料目录时填 kl-dft-cpu 的材料目录
+# 多链探测：kl-dft-cpu → kl-mace-cpu → kl-mace-gpu（sibling 子目录，取第一个有结果的）。
+KL_CHAIN_DIRS  = {
+    "kl-dft-cpu":  ("step6_kappa", "step6_kappa_shengbte"),
+    "kl-mace-cpu": ("step4_kappa",),
+    "kl-mace-gpu": ("step4_kappa",),
+}
+KL_CHAIN_ORDER = ("kl-dft-cpu", "kl-mace-cpu", "kl-mace-gpu")
+KL_ROOT        = None   # None=按 KL_CHAIN_ORDER 探测 sibling；填路径=只找该目录（配 KL_KAPPA_DIRS）
+KL_KAPPA_DIRS  = ("step6_kappa", "step6_kappa_shengbte")   # 仅 KL_ROOT 手填时用
 # 手填值（W/mK，元胞口径）。非 None 时优先于 auto。
 KAPPA_L_XX_W_MK = None
 KAPPA_L_YY_W_MK = None
@@ -222,15 +234,41 @@ def load_bt2(cwd):
         return None
 
 
+def _dpt_inplane_mu(bd, r):
+    """by_direction 的面内平均 μ (cm²/Vs)；缺/非 2D 回退 header mobility_cm2_Vs。
+
+    by_direction 用 full-BZ 二次型拟合的 m_d（m_d=√(m_x·m_y)），header 的
+    mobility_cm2_Vs 是 3 点抛物 m* 的旧口径，两者 μ 能差近一倍（CrS2 45.6 vs 87.5）。
+    主口径一律取 by_direction。3D 时 by_direction.status 非 "ok"，自然回退。"""
+    if isinstance(bd, dict) and bd.get("status") == "ok":
+        vals = [bd[d]["mobility_cm2_Vs"] for d in ("x", "y")
+                if isinstance(bd.get(d), dict)
+                and isinstance(bd[d].get("mobility_cm2_Vs"), (int, float))]
+        if vals:
+            return sum(vals) / len(vals)
+    return r.get("mobility_cm2_Vs")
+
+
+def _dpt_m_d(bd, r):
+    """by_direction 的态密度质量 m_d（full-BZ 二次型）；缺/非 2D 回退 header m_eff。"""
+    if isinstance(bd, dict) and isinstance(bd.get("m_d_m0"), (int, float)):
+        return bd["m_d_m0"]
+    return r.get("inputs", {}).get("m_eff_m0")
+
+
 def load_dpt(cwd):
     j = _load_json(Path(cwd) / DPT_DIR / "dpt_result.json")
     if not j:
         return None
     out = {"T_used": j.get("temperature_K", 300.0)}
     for r in j.get("results", []):
-        out[r["carrier"]] = r.get("mobility_cm2_Vs")
-        out["m_" + r["carrier"]] = r.get("inputs", {}).get("m_eff_m0")
-        out["dir_" + r["carrier"]] = r.get("by_direction")   # patch_bt2_dir
+        carrier = r["carrier"]
+        bd = r.get("by_direction")
+        # [fix m*口径] 主 μ/m* 取 by_direction 的 m_d + 面内平均 μ，
+        #   不再用 inputs 的 3 点抛物 m*（后者 μ 系统性偏高一倍）。
+        out[carrier] = _dpt_inplane_mu(bd, r)
+        out["m_" + carrier] = _dpt_m_d(bd, r)
+        out["dir_" + carrier] = bd   # patch_bt2_dir
         # [C6/C7] 真空对齐的 edge_flip / vac_align / provenance
         out["E1_prov_" + r["carrier"]] = r.get("inputs", {}).get("E1_provenance", "")
     # step7b_deform_read/band_edges.json 的 edge_flip / vac_align / window_scan
@@ -293,8 +331,27 @@ def _interp_T(temps, vals, T):
     return ys[-1]
 
 
+def _find_kl_kappa(cwd):
+    """多链探测 kl 的 kappa_summary.json。返回 (src, root) 或 (None, root)。"""
+    if KL_ROOT:
+        root = Path(KL_ROOT)
+        for d in KL_KAPPA_DIRS:
+            p = root / d / "kappa_summary.json"
+            if p.is_file():
+                return p, root
+        return None, root
+    base = Path(cwd).parent
+    for chain in KL_CHAIN_ORDER:
+        root = base / chain
+        for d in KL_CHAIN_DIRS.get(chain, ()):
+            p = root / d / "kappa_summary.json"
+            if p.is_file():
+                return p, root
+    return None, base
+
+
 def resolve_kappa_L(cwd):
-    """返回 (kxx, kyy, lines)。手填优先；否则读 kl-dft-cpu 的 kappa_summary.json。
+    """返回 (kxx, kyy, lines)。手填优先；否则读 kl 链的 kappa_summary.json。
     只取原始 kappa_xx_yy_zz（元胞口径），与 amset 的 σ/κ_e 同口径。"""
     if "v" in _KL_CACHE:
         return _KL_CACHE["v"]
@@ -307,17 +364,10 @@ def resolve_kappa_L(cwd):
         r = (None, None, ["kappa_L 未提供 —— 不出 ZT 列"])
         _KL_CACHE["v"] = r
         return r
-    root = Path(KL_ROOT) if KL_ROOT else Path(cwd)
-    src = None
-    for d in KL_KAPPA_DIRS:
-        p = root / d / "kappa_summary.json"
-        if p.is_file():
-            src = p
-            break
+    src, root = _find_kl_kappa(cwd)
     if src is None:
-        r = (None, None, ["kappa_L 未找到：%s 下没有 %s/kappa_summary.json"
-                          % (root, "|".join(KL_KAPPA_DIRS)),
-                          "  kl-dft-cpu 跑完了吗？或用 KL_ROOT 指定 kl-dft-cpu 的材料目录"])
+        r = (None, None, ["kappa_L 未找到：sibling kl-dft-cpu/kl-mace-cpu/kl-mace-gpu 下都没有 kappa_summary.json",
+                          "  kl 链跑完了吗？或用 KL_ROOT 显式指定 kl 的材料目录"])
         _KL_CACHE["v"] = r
         return r
     j = _load_json(src) or {}
@@ -366,11 +416,11 @@ def _add_zt_columns(row):
         row["amset_ZT_%s" % d] = _zt(row.get("amset_S_%s_uV/K" % d),
                                      row.get("amset_sigma_%s_S/m" % d),
                                      row.get("amset_kappa_e_%s_W/mK" % d),
-                                     kl-dft-cpu, TARGET_T)
+                                     kl, TARGET_T)
         row["bt2_ZT_%s" % d] = _zt(row.get("bt2_S_%s_uV/K" % d),      # patch_bt2_dir
                                    row.get("bt2_sigma_%s_S/m" % d),
                                    row.get("bt2_kappa_e_WF_%s_W/mK" % d),
-                                   kl-dft-cpu, TARGET_T)
+                                   kl, TARGET_T)
     kl_avg = ([k for k in (kxx, kyy) if k is not None])
     kl_avg = sum(kl_avg) / len(kl_avg)
     row["amset_ZT"] = _zt(row.get("amset_S_uV/K"), row.get("amset_sigma_S/m"),
@@ -488,9 +538,11 @@ def write_table(out, rows, am, bt, dpt):
         return (f % v) if isinstance(v, (int, float)) and v == v else "—"
     _red = "面内(xx+yy)/2 [2D]" if (am and am.get("is_2d")) else "对角(xx+yy+zz)/3 [3D]"
     lines = ["# 300 K 三方电子输运对比（详见 comparison_300K.csv）",
+             "# skill_rev: %s" % _SKILL_REV,
              "# 有 amset=%s  BoltzTraP2=%s  DPT=%s" % (bool(am), bool(bt), bool(dpt)),
              "# 张量约化：%s" % _red,
-             "# S/Lorenz 可直接比；σ/κ_e amset是绝对值、BT2是per-τ只比趋势；DPT迁移率仅ADP"]
+             "# S/Lorenz 可直接比；σ/κ_e amset是绝对值、BT2是per-τ只比趋势；DPT迁移率仅ADP",
+             "# [DPT μ] m* 取 full-BZ 二次型 m_d（面内平均），非 3 点抛物拟合"]
     # [C6/C7] DPT 真空对齐结局 / edge_flip / 来源
     if dpt:
         va = dpt.get("vac_align") or {}

@@ -7,9 +7,9 @@
 ## 能干什么
 
 - **多材料**：一个项目根下几千个结构（如 `C20/qHPC20`、`Ag/qHPC20_Ag1C20_s0`）统一管理，逐材料多步流水线（弛豫 → 静态 → 后处理）自动推进。
-- **多技能**：11 个技能（`-tt`）覆盖 VASP 能带/弹性/电热导/晶格热导/结构优化，以及 MACE 同类 + 声子 + MLFF 训练。
+- **多技能**：16 个技能（`-tt`）覆盖 VASP 能带/弹性/电热导/晶格热导/结构优化，以及 MACE 同类 + 声子 + MLFF 训练 + 替代模型。
 - **多超算**：jzzn（CPU 真 SLURM）、a800（A800 GPU 真 SLURM）、3090（无 SLURM 的 fakeslurm 垫片服务器），换超算只改一个 `hpc` 名。
-- **全自动**：`auto_advance` + `tf watch` 后台监控，作业算完自动拉结果、自动提交下一步；挂死作业自动 `scancel`+续跑（`hang_check`）。
+- **全自动**：`auto_advance` + `tf monitor` 后台监控，作业算完自动拉结果、自动提交下一步；挂死作业自动 `scancel`+续跑（`hang_check`）。
 - **省心巡检**：`tf summary --diff` 无变化输出 0 字节，有变化才吐几行——适合 AI / cron 定时巡检。
 
 ## 快速开始
@@ -28,7 +28,7 @@ cd 你的材料根目录 && tf -tt opt-mace-cpu init
 
 # 4. 开跑 + 后台监控
 tf auto on                      # 开全局自动推进
-tf -tt opt-mace-cpu watch -d    # 后台监控：自动拉结果 + 自动提交下一步
+tf -tt opt-mace-cpu monitor -d    # 后台监控：自动拉结果 + 自动提交下一步
 
 # 5. 巡检
 tf summary --diff               # 首选巡检：无变化 0 字节

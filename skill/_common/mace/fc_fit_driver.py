@@ -29,11 +29,14 @@ def main():
     if software == "pheasy":
         p_method = str(cfg.get("pheasy_method", "OLS")).upper()
         c3 = str(cfg.get("c3_cutoff", "6.0"))
+        p_bin = str(cfg.get("pheasy_bin", "pheasy"))
+        _env = dict(os.environ)
+        _env["PHEASY_BIN"] = p_bin
         rc = subprocess.run("python _pheasy_fit.py %s '%s'" % (p_method, c3),
-                            shell=True).returncode
+                            shell=True, env=_env).returncode
         if rc != 0:
             sys.exit("[ERROR] pheasy 拟合失败(rc=%d)，看 fc_build.log" % rc)
-        fit = "pheasy-" + p_method.lower()
+        fit = ("pheasy-gpu" if p_bin == "pheasy-gpu" else "pheasy") + " (" + p_method + ")"
     else:
         fit = cfg.get("fit", "symfc")
         flag = {"sym-fc": "", "symfc": "--fc-calc symfc",

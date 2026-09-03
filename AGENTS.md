@@ -18,7 +18,7 @@
 | a800 | `A800` | A800 GPU 集群，真 SLURM（分区 a800，GRES gpu:a800） |
 | 3090 | `wangchao_3090` | 8×RTX3090 服务器，**无 SLURM**（sbatch/squeue/scancel 是 `~/fakeslurm` 垫片，tf 经 `remote_path_prefix` 注入 PATH） |
 
-16 个技能（`-tt`）：DFT/VASP 类 `band-dft-cpu`（能带）/ `defect-dft-cpu`（缺陷形成能）/ `elastic-dft-cpu`（弹性常数）/ `ke-dft-cpu`（电子热导率）/ `kl-dft-cpu`（晶格热导率）/ `opt-dft-cpu`（结构优化）/ `phonon-dft-cpu`（声子谱）；MACE 类 `kl-mace-cpu`/`kl-mace-gpu`（晶格热导率）/ `opt-mace-cpu`/`opt-mace-gpu`（结构优化）/ `phonon-mace-cpu`/`phonon-mace-gpu`（声子谱）；`mlff-mace`（随机位移法 MLFF 训练，产出 MACE 势）；替代模型类 `te-screen`（热电快速筛选）/ `unihamgnn`（能带）。状态表 `hpc` 列显示每个项目实际跑的机器。
+16 个技能（`-tt`，见 `tf skills`）：VASP 类 `band-dft-cpu`（能带）/ `defect-dft-cpu`（本征缺陷+形成能）/ `elastic-dft-cpu`（弹性常数）/ `ke-dft-cpu`（电子热导率）/ `kl-dft-cpu`（晶格热导率）/ `opt-dft-cpu`（结构优化+能量）/ `phonon-dft-cpu`（声子谱）；MACE 类 `kl-mace-cpu`/`kl-mace-gpu`（晶格热导率）/ `opt-mace-cpu`/`opt-mace-gpu`（结构优化+形成能）/ `phonon-mace-cpu`/`phonon-mace-gpu`（声子谱）；`mlff-mace`（随机位移法 MLFF 训练，产出 MACE 势）；辅助 `te-screen`（热电筛选）/ `unihamgnn`（机器学习势）。状态表 `hpc` 列显示每个项目实际跑的机器。
 
 你的职责：**监控状态、诊断失败、提出建议、经授权后执行操作、主动汇报**。你不是执行器，`tf` 才是。
 
@@ -28,17 +28,24 @@
 
 ## 二、铁律（优先级最高，不可违反）
 
-> **铁律 0（开工先读本文件）**：每次开始新任务、新会话、或被重新唤起时，先用 read 工具读一遍本 `AGENTS.md` 核对最新版本，再动手。若系统已自动注入最新版，则以「刚读到/刚注入的内容」为准，**不得沿用旧记忆**——本文件是唯一事实来源，可能在本会话中途被更新。
+> **铁律 0（先读文档再动手）**：每次开始新任务、新会话、或被重新唤起时，先用 read 工具读一遍本 `AGENTS.md` 核对最新版本，再动手。若系统已自动注入最新版，则以「刚读到/刚注入的内容」为准，**不得沿用旧记忆**——本文件是唯一事实来源，可能在本会话中途被更新。**执行任何 `tf -tt <技能> ...` 操作（`retry`/`rerun`/`start`/`stop`/`conf`/`hpc` 等）前，同样先读 `skill/<技能>/README.md`（无 README 读 `skill/<技能>/METHODOLOGY.md`，都无读 `TASKFLOW.md` 该技能章节），核对步骤数/判据/模板和专属坑位后再动手——各技能不同，不得凭记忆跨技能套用。**
 
 1. **只通过 `tf` 操作**。禁止自己拼接 `ssh`/`sbatch`/`scancel`/`rm` 来改状态。唯一例外：第 4 条的只读诊断。
 2. **破坏性操作必须先请示**：`stop`、`rerun`、`clean`、以及任何带 `-f` 或 `-y` 的命令，执行前必须向用户说明对象和后果，得到明确同意后才执行。**特别地：`mlff-mace` 的 `step5_label`（及一切昂贵的扇出步骤）只用 `retry`/`start -f`，绝不 `rerun`/`clean`**——后两者会 `rm -rf` 步骤目录，毁掉已算完的 DFT 帧。用户说"以后这类都不用问了"才算预先授权。
-3. **监控循环里自动执行的命令只有**：`tf summary --diff`、`tf summary`、`tf list`、`tf -status <状态> summary`、`tf -tt <类型> summary`、`tf -p X status`、`tf skills`、`tf start`、`tf -p X start`。其余一律先请示（包括 `tf conf --set`——它会改项目配置）。**巡检严禁每轮拉 `tf json`**——它是全量结构化数据，token 巨大，只在写工具/做批量分析时才用。
+3. **监控循环里自动执行的命令只有**：`tf summary --diff`、`tf summary`、`tf list`、`tf -status <状态> summary`、`tf -tt <类型> summary`、`tf -p X status`、`tf skills`、`tf auto on`、`tf -tt <技能> auto on`、`tf start`、`tf -p X start`。其余一律先请示（包括 `tf conf --set`——它会改项目配置）。**巡检严禁每轮拉 `tf json`**——它是全量结构化数据，token 巨大，只在写工具/做批量分析时才用。
 4. **只读诊断允许直接 ssh**：`tail`/`grep` 日志文件（如 `ssh jzzn 'tail -50 <步骤目录>/slurm-*.out'`、`grep -i error OUTCAR`）。只读，绝不改文件。材料目录下的 `stepN_check_and_resubmit.py`（tf 已随生成推送到超算）也只允许加 `--check-only` 运行——它的重投功能**严禁使用**（重投一律走 `tf retry`/`tf rerun`，两套重投机制并用会打架）。其 stdout 是一行 JSON，退出码 0=converged / 10=not_converged / 20=running / 30=重启超限 / 40=error，可作为深度诊断依据。**注意 3090 服务器无 SLURM**：ssh 过去看到的 squeue 是 fakeslurm 垫片，作业状态一律以 `tf` 采集为准，别用真 SLURM 语义判读。
 5. **用退出码判成败**：`tf` 命令退出码 0 = 成功；非 0 = 失败或被拒绝。失败时把输出原文呈给用户，不要粉饰、不要假装成功。
 6. **不确定就报告并等待**。宁可少做，不要猜。
 7. **本地计算文件与项目统一放 `/mnt/d/tf_data/work_taskflow`**：今后新建的项目目录、VASP 计算文件（WAVECAR/CHGCAR/CHG/ELFCAR/OUTCAR/POSCAR/INCAR 等）和归档备份，一律放在 `/mnt/d/tf_data/work_taskflow/` 下，不再散放在 `/mnt/d/tf_data/` 根目录或其它位置。涉及新建项目时，确认 `tf.yaml` 的 `project_roots` 已包含该路径。
+8. **流水线巡检/推进一律用 `tf auto on` + `monitor.sh`（或 `auto_watch`），禁止自己另写监控脚本**。`tf auto on` 是 DAG 推进（按依赖找就绪步骤，S0 FAIL 不阻塞 S3/S4），`monitor.sh` 每 30 分钟自动跑 `tf auto on` + `tf summary --diff`。agent 的巡检 cron 保持只读（`tf summary --diff`），发现就绪步骤时主动 `tf -tt <技能> auto on` 推进即可；**不要自己写 ssh 循环 / bash 循环 / 定时脚本来代替 tf 的自动监控**。唯一例外：不在 tf 16 个技能管辖内的**独立诊断任务**（如手动跑 Pheasy 拟合、声子交叉验证、拟合参数扫描），才允许 ssh 只读诊断 + 手动跟踪该独立计算的进度。
+9. **禁止未经批准降低核数重交，必须询问**。为缓解排队而降核重交（如 24 核→8 核）会改变并行设置（NCORE/KPAR 影响 VASP 数值路径与收敛），且降核只是缓解手段之一（还有提 qos、分批提交、等队列）。**执行前必须向用户说明**：① 排队瓶颈证据；② 降核的影响（数值一致性、耗时变化）；③ 替代方案（换 qos / 分批 / 等）。得到明确同意后才做。**改核数必须走 taskflow 正式机制**：改 `setting/<hpc>/templates/submit_*.tpl` 的 `--ntasks-per-node` 与 `defects_common.build_job` 的 NCORE/KPAR（或项目级 `project_setting/templates/` 覆盖）→ `tf -p MAT -j STEP retry`（重新生成输入，保留 OUTCAR/CONTCAR）→ `tf -p MAT -j STEP start`（提交）。**严禁**手动 `sed` 远程 INCAR/submit.sh + 手动 `sbatch` 绕过 `tf`——那会违反铁律 1，且让 taskflow 状态表与超算实际作业脱节，后续 `stop`/`retry`/`auto` 会误判。
+
+10. **禁止擅自新建技能/步骤/脚本，必须用户同意**。① 动手前先 `tf skills` / `ls skill/` 查现成能力；已有技能或技能内现成步骤（band/defect/elastic/ke/kl/opt/phonon/mace 等 16 个）直接使用，禁止另起炉灶。② 在 `skill/` 下新建技能目录、往已有技能加新步骤目录或新 gen 脚本、写与现成技能功能重叠的一次性脚本（如自写 transport/defect/band 分析器），都是**受控操作**：先向用户说明「要做什么 / 为什么现成技能做不到 / 放哪影响谁」，得到明确同意后才执行。③ 用户说"用现成技能/不要加步骤"时立即停止，改用既有技能，不辩解不绕道。（本铁律与 `~/.dsh/AGENTS.md` 第 1 节一致，用户级规则自动注入所有 DSH 会话。）
+11. **换服务器装软件与环境：一律装到该服务器 `~/software/taskflow/`**。新超算/新账号部署 taskflow 依赖（VASP、conda/venv、MACE 模型、POTCAR 赝势库、工具链）时，目录不存在先 `mkdir -p ~/software/taskflow`，**每个软件/环境一个子目录**，不散装到 home 根或 `~/software/` 直下；装完把实际路径写进 `setting/<hpc>.yaml`（conda_sh/mace_model_dir/potcar_dir/…）。布局与命名约定见 `setting/README.md`；既有存量不强制迁移，确需搬迁先请示。
 
 ## 三、tf 命令参考
+
+> ⚠️ **先读技能文档**：执行任何 `tf -tt <技能> ...` 命令前，先读 `skill/<技能>/README.md`（无 README 读 `METHODOLOGY.md`，都无读 `TASKFLOW.md` 对应章节），核对步骤与判据后再动手（铁律 0）。
 
 ```bash
 tf summary --diff                  # ★ 巡检首选：与上次快照对比，无变化输出 0 字节（静默）。
@@ -66,6 +73,11 @@ tf [-tt TT] -p MAT -j STEP conf    # 查看该步骤 step.conf 合并后的最�
 tf -p A,B hpc <集群>               # 换项目跑哪台超算（jzzn/a800/3090；改配置，先请示）
 tf auto [on|off]                   # 一键开关全局 auto_advance（改全局配置，先请示）
 ```
+> **改核数（含为缓解排队降核）的正确流程**（铁律 9，必须先请示）：
+> 1. 改提交模板 `setting/<hpc>/templates/submit_*.tpl` 的 `--ntasks-per-node`，及 `defects_common.build_job` 的 NCORE/KPAR（或项目级 `project_setting/templates/` 覆盖，优先级最高）；
+> 2. `tf -p MAT -j STEP retry` —— 重新生成输入（保留 OUTCAR/CONTCAR，不删除产物）；
+> 3. `tf -p MAT -j STEP start` —— 正式提交。
+> 严禁手动 `sed` 远程 INCAR/submit.sh + 手动 `sbatch` 绕过 `tf`（违反铁律 1/9）。`tf stop` 需交互确认，EOFError 即未成功，勿当成已停止。
 
 - `-p`：材料名，可写完整名（`C20/qHPC20`）或唯一 basename；跨类型重名时必须加 `-tt`。
 - `-j`：步骤 label（`S1_opt`）或序号（`1`~`4`，画图步 3.1 等），必须配 `-p`。
@@ -153,7 +165,7 @@ tf auto [on|off]                   # 一键开关全局 auto_advance（改全局
      - 有 `FAIL 材料 步骤` 行 → 单点诊断（`tf -p X status` 或 ssh tail 该步日志），按第五节决策。
      - 有 `变更:` 段 → 这是唯一的"谁变了"来源，直接据此汇报进展。`todo→PD(Priority)`、`PD(Priority)→R`、`R→done` 都是正常推进，一句话带过即可；**不要**为它们再跑 list/squeue。
      - `队列(全部作业): R=X PD=Y` 里 `PD` 远大于 `R` → 集群排队积压，正常等待，提一次即可，别每轮重复。
-2. 需要推进：`tf start`（或 `tf -p X start`）。只有这一步会提交作业，其余巡检步骤全只读。
+2. 需要推进：`tf auto on`（DAG 自动推进，按依赖找就绪步骤，S0 FAIL 不会阻塞 S3/S4；用 `-tt <技能> auto on` 限定技能）。`tf start` 是顺序推进（只推 active 步骤，遇 FAIL 会卡住），仅用于显式推某材料/某步：`tf -p X start`。只有这两类命令会提交作业，其余巡检步骤全只读。
 3. 需要请示的操作 → 发汇报模板并等待回复；用户回"执行/同意/好"才执行。
 
 **深查纪律**：只有 ① 出现新 `FAIL`、② 某材料从 `run` 掉回 `wait`、③ 排队原因从 `Priority` 变成 `QOS*`/`Dependency` 之类，才深挖单点。其余"有变化"用 `变更:` 段现成的信息直接汇报，不深查、不复读。
@@ -161,6 +173,8 @@ tf auto [on|off]                   # 一键开关全局 auto_advance（改全局
 ### 7.4 自建 cron 任务的指令（贴给 Claw / 其他 agent 调度器）
 
 > 每 30 分钟：运行 `tf summary --diff`；**无输出就静默**（tf 已自动 diff，不用自己记上轮，也禁止再跑 list/squeue 去确认）；有输出才看——有 `FAIL` 行按第六节模板汇报并请示；有 `变更:` 段直接一句进展（用变更行里现成的"谁→什么"）；`队列:` 行只在 PD 异常偏高或排队原因变 `QOS*` 时提一句。**巡检里禁止运行 `tf json`、`tf list`、`squeue`、`tf conf --set`。** 若用户开了 `auto_watch` 后台监控，巡检与它不冲突（巡检全只读）；agent 自己建的定时任务照常。
+
+> **推进谁来做**：提交作业（auto-advance）由用户自建的 `monitor.sh`（每 30 分钟 `tf auto on` DAG 推进 + `tf summary --diff`）或 `auto_watch` 后台监控完成，**agent 的巡检 cron 保持只读**。若两者都没开，agent 巡检发现就绪步骤（S2 完 → S3/S4 就绪）时应主动 `tf -tt <技能> auto on` 推进，别让就绪步骤空等。
 
 ## 八、对话示例
 
@@ -170,3 +184,95 @@ tf auto [on|off]                   # 一键开关全局 auto_advance（改全局
 用户："qHPC20 弹性常数想跑 A800" → `tf -tt elastic-dft-cpu -p qHPC20 hpc a800`（改配置，说明只影响之后提交的作业）。
 用户："mlff-mace 的 Si 继续下一代" → 说明三步：`conf --set params.GENERATION=K`（请示后执行）→ `-j 4 retry`（保留 gen-* 历史清单，勿用 rerun）→ `start`；若 S5 有帧失败只 `retry`。
 用户："现在整体什么情况" → `tf summary` 先给一句话总览，别一上来就 `tf json`。
+
+## 九、作业探测（tf probe）—— 判「弛豫 / 崩溃 / 卡死」
+
+> 触发：用户问「这作业到底什么状态」「是弛豫还是崩溃还是卡死」「好长时间了怎么还没完」，或需要判断单个作业是否在正常往下算时，用 `tf probe` 探测（只读）。别靠 `tf summary` 的步骤级计数去猜单个作业死活。
+
+```bash
+tf -tt defect-dft-cpu -p <材料> [-j S2_def] probe   # 缺省 -j 即探 S2_def
+```
+
+输出结构化 JSON（每作业 `status`/`status_cn`/`evidence`/`conclusion`），并落一份到
+`scripts/probe_out/probe_<时间戳>.json`。参数细节以脚本 `scripts/probe_jobs.py --help` 为准（唯一事实来源，本文不复述）。
+
+**七态 → 动作**（探测只读、不提交；后续动作仍走 tf）：
+
+| status | 含义 | evidence 判据 | 动作 |
+|---|---|---|---|
+| `relaxing` | 正常弛豫 | 能量单调下降 | 继续监控，无需处理 |
+| `done` | 已收敛 | OUTCAR 含 reached required accuracy | 无需处理 |
+| `scf_stuck` | SCF 发散/电荷晃动 | 能量大幅振荡 | 报用户；建议 ALGO=All+AMIX=0.1+BMIX=0.0001 |
+| `nsw` | 步数用尽/超时 | 到 NSW 仍在下降 | `tf retry`（opt 步自动 cp CONTCAR 续算） |
+| `crashed` | 崩溃/节点故障 | queue.err 签名 | 报用户；节点类 `tf retry`，结构类先诊断 |
+| `dead` | 掉队 | 不在队列且无进度 | `tf retry` |
+| `queued` | 排队 | PD 无 OSZICAR | 等节点，无需处理 |
+
+探测是只读诊断（铁律 4 允许的范围）：它不 scancel、不改 INCAR、不重交——后续一切改动动作仍走 tf（retry/rerun/start）。
+
+## 九点五、核数利用经验（申请核数要匹配实际并行度）
+
+> 背景（2026-09-01 c60_full 教训）：pheasy OLS 拟合提交 `--cpus-per-task=64`，超算中心
+> 监控发现 6 小时平均只用 3.4 核（5.3%），发低利用率警告。探测结论：作业**正常推进**（非卡死），
+> 瓶颈是 **scipy.sparse.linalg.lsqr 串行求解** + 45GB 稀疏矩阵 matvec 受内存带宽限制；
+> `OPENBLAS_NUM_THREADS=8` 的 BLAS 线程和 `PHEASY_N_JOBS=8` 的 joblib 并行只覆盖局部，
+> 主拟合迭代是单线程。
+
+- **判"卡死还是低效"先看主算法**：scipy lsqr / 迭代求解器是**串行**的，64 核也只用 1 核 +
+  BLAS 线程（最多 ~8 核）；numpy 矩阵运算受 `OPENBLAS_NUM_THREADS` 控制；VASP 才看 NCORE/KPAR。
+  收到低利用率提醒时先 `squeue`/`sacct` 确认作业状态 + tail 日志看进度指纹（在推进=正常），
+  别急着判死。
+- **申请核数匹配实际并行度**：pheasy OLS 拟合（lsqr 串行 + BLAS 8 线程 + joblib 8 job）
+  申请 **16~32 核**足够，别申请满节点 64/256 核——白占资源还触发低利用率警告。
+  多材料/多帧并行（多提交几个 16 核作业）比单作业抢 64 核吞吐更高。
+- **pheasy 拟合提效的正路**：`PHEASY_SM_DTYPE=float32`（45.4GB→22.7GB，缓解内存带宽瓶颈）
+  已用；更大的矩阵/更多 IFC 考虑减小 C3_CUTOFF 或换更快的求解路径（OLS→Ridge/子集），
+  而不是加核数。
+
+## 十、超算切换（hpc）—— work_dir 坑 + 完整流程
+
+> 触发：用户说「改投 jzzn / 换到 A800 / 3090 太挤换集群」等，需要把一个材料（或某技能）从一个集群切到另一个。
+
+### 10.1 命令
+
+```bash
+tf -tt <技能> -p <材料> hpc <集群> -y     # 技能级：写 材料/<技能>/hpc.yaml（优先级最高）
+tf -p <材料> hpc <集群> -y               # 材料级：写 project_setting/hpc.yaml
+```
+
+- 集群名 = `setting/<集群>.yaml` 的 name（jzzn / 3090 / a800）。`tf hpc` 把该 yaml 的字段**全量覆盖**进 hpc.yaml（含 work_dir/conda_sh/amset_env 等）。
+- 切换**只影响之后提交的作业**，已跑的作业不受影响（它们还挂在旧集群的 SLURM 上）。
+
+### 10.2 ★ work_dir 的坑（切 hpc 后必须手动改 setting.yaml）
+
+work_dir 的回退链优先级：
+
+```
+project_setting/setting.yaml 的 work_dir   ← 最高，tf hpc 不会改它
+  > hpc.yaml 的 work_dir                   ← tf hpc 会覆盖这个
+  > setting/<集群>.yaml 的 work_dir
+  > 技能默认
+```
+
+**`tf hpc` 只改 hpc.yaml，不改 project_setting/setting.yaml。** 材料第一次在某集群创建时，setting.yaml 里会写死那个集群的 work_dir；之后切 hpc，work_dir 仍取 setting.yaml 的旧值 → 远端路径错 → `mkdir /home/xxx: Permission denied` 或 `gen 脚本找不到`。
+
+**切 hpc 后必须同步改 `project_setting/setting.yaml` 的 work_dir**（三个集群各不同，从 `setting/<集群>.yaml` 读 work_dir，再补上本地 jzz/jap 子结构）：
+
+```yaml
+# jzzn：/public/home/wangchao/Fullerene_Network/work/jzz/jap
+# 3090：/home/wangchaoyue852/taskflow/work/jzz/jap
+# 通用：work_dir 取 setting/<集群>.yaml 的 work_dir，再拼本地树相对路径（jzz/jap）
+```
+
+验证：切完后 `tf -tt <技能> -p <材料> status`，看 `HPC` 列和 `Dir`（远端路径）是否都指向新集群。
+
+### 10.3 材料级 vs 步骤级
+
+- **材料级（`tf -p X hpc Y`）**：整个材料的**所有步骤**都切过去。若新集群没跑过该材料，前序步骤（S1_opt 的 CONTCAR 等）在新集群缺失 → `start` 会从头重跑整条链（或报前序 PREP）。**想只把某一步（如 S7_deform）切集群，别用材料级**。
+- **步骤级**：skill.yaml 该步骤加 `hpc: <集群>` 字段（但这是**全局**改动，影响所有材料的该步骤，不是单材料覆盖）。单材料单步骤切集群目前没有干净的 tf 命令，需要权衡：要么接受整材料重跑，要么改 skill.yaml 全局生效。
+
+### 10.4 切换后常见坑
+
+1. **前序产物跨集群不回传**：材料级切 hpc 后，旧集群已算完的 S1_opt~S6 结果不会自动搬到新集群，新集群要重跑（或手动 scp，但不推荐——改状态走 tf）。切之前想清楚：是「接受重跑」还是「留在原集群排队」。
+2. **旧集群有同名材料旧数据**：切过去后若新集群已有该材料的旧目录（之前跑过），`start` 会推进到「下一步」而非重跑——先 `tf -p X status` 看新集群上各步骤是什么状态，判断是旧数据还是需要 rerun。
+3. **fanout 步骤切集群后 rerun**：`tf -p X -j S7_deform rerun` 会删新集群上的 10 个子目录重算（破坏性，先请示）；只想补帧用 retry。

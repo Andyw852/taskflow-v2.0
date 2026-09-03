@@ -68,8 +68,9 @@ def convex_hull_window(target, elements, phases):
         beta = fb - fc*nB/nC
         gamma = dH - fc*dH_target/nC
         cons.append((ph.get("name", "phase"), alpha, beta, gamma))
-    # 顶点枚举：两两约束边界求交，检查可行性
+    # 顶点枚举：两两约束边界求交，检查可行性（去重：三条约束交于一点时避免重复计入）
     verts = []
+    seen = set()
     for i in range(len(cons)):
         for j in range(i+1, len(cons)):
             _, a1, b1, c1 = cons[i]
@@ -79,9 +80,13 @@ def convex_hull_window(target, elements, phases):
                 continue
             x, y = sol
             if all(a*x + b*y <= c + TOL for _, a, b, c in cons):
-                verts.append((x, y))
-    if len(verts) < 3:
-        raise SystemExit("[错误] 凸包窗口为空/退化（%d 个顶点）—— 检查相总能是否有误" % len(verts))
+                key = (round(x, 6), round(y, 6))
+                if key not in seen:
+                    seen.add(key)
+                    verts.append((x, y))
+    if len(verts) < 2:
+        raise SystemExit("[错误] 凸包窗口为空（%d 个顶点）—— 检查相总能是否有误" % len(verts))
+    degenerate_line = (len(verts) == 2)  # 同系化合物 ΔH_f≈0，稳定区退化成线段是物理正确情形
     # 按重心角排序成凸多边形
     cx = sum(v[0] for v in verts)/len(verts)
     cy = sum(v[1] for v in verts)/len(verts)
@@ -142,9 +147,10 @@ def build_phases_from_references(ref_json="references_energy.json",
                                  bulk_outcar="step1_bulk/OUTCAR"):
     """由 step0 的 references_energy.json + step1_bulk 组装凸包输入。
 
-    目标化合物式量 = 超胞成分 / gcd（如 Sn18 Sb18 Te45 -> Sn2 Sb2 Te5），
-    每式量总能 = 超胞总能 × (式量原子数 / 超胞原子数)。
-    只取与本材料相关的元素/二元相。"""
+    目标化合物式量 = 超胞成分 / gcd（如 Sn18 Sb18 Te45 -> Sn2 Sb2 Te5）。
+    目标相每式量总能优先取 references_energy.json 的 target_prim（独立 ISIF=3 密网格
+    原胞，与参考相同口径）；没有时退回 step1_bulk 超胞/9 —— 那是 ISIF=2 + 粗 k 网格
+    的口径，与参考相 ISIF=3 不一致，ΔH_f 不可信，只能作占位。"""
     ref = json.load(open(ref_json, encoding="utf-8"))
     import defects_common as D2
     st = D2.parse_poscar(bulk_poscar)
@@ -158,14 +164,26 @@ def build_phases_from_references(ref_json="references_energy.json",
     n_super = sum(counts.values())
     n_prim = sum(formula.values())
     E_super = read_energy(bulk_outcar)
-    if E_super is None:
-        raise SystemExit("[错误] step1_bulk/OUTCAR 无能量（先跑完 step1）")
-    E_per_fu = E_super * (n_prim / n_super)
+    tp = ref.get("target_prim")
+    if tp and tp.get("E_per_fu") is not None:
+        E_per_fu = float(tp["E_per_fu"])
+        src = "target_prim（独立 ISIF=3 密网格原胞，与参考相同口径）"
+    else:
+        if E_super is None:
+            raise SystemExit("[错误] step1_bulk/OUTCAR 无能量（先跑完 step1）")
+        E_per_fu = E_super * (n_prim / n_super)
+        src = "step1_bulk 超胞/9（⚠ ISIF=2+粗网格，与参考相 ISIF=3 不同口径，ΔH_f 不可信）"
+    # δ = E_super/9 - E_target_prim：口径残差。修完 target_prim 后若 δ 不小，
+    # 它会通过 μ 直接进每个 E_f（系数 Δn_i），必须量出来并设闸门（阈值 10 meV/fu）。
+    delta = None
+    if E_super is not None and tp and tp.get("E_per_fu") is not None:
+        delta = E_super * (n_prim / n_super) - E_per_fu
     els = set(formula)
     elements = {el: v for el, v in ref["elements"].items() if el in els}
     phases = [{"name": n, "formula": i["formula"], "E": i["E_per_fu"]}
               for n, i in ref["binaries"].items() if set(i["formula"]).issubset(els)]
-    return {"target": {"formula": formula, "E": E_per_fu},
+    return {"target": {"formula": formula, "E": E_per_fu, "energy_source": src,
+                       "delta_eV_fu": delta},
             "elements": elements, "phases": phases}
 
 
@@ -180,10 +198,16 @@ def run_from_references():
         raise SystemExit("[错误] 找不到 references_energy.json（step0 参考相未完成）")
     ph = build_phases_from_references(ref_json=ref_json)
     verts, dH_target = convex_hull_window(ph["target"], ph["elements"], ph["phases"])
+    degenerate_line = (len(verts) == 2)
     els = list(ph["elements"].keys())
     print("[OK] %s ΔH_f = %.4f eV/式量，化学势窗口 %d 个顶点"
           % ("".join("%s%d" % (e, ph["target"]["formula"].get(e, 0)) for e in els),
              dH_target, len(verts)))
+    print("     目标相能量来源: %s" % ph["target"].get("energy_source", "(未知)"))
+    delta = ph["target"].get("delta_eV_fu")
+    if delta is not None:
+        flag = "⚠ 超 10 meV 阈值，E_f 会被 μ 端污染" if abs(delta) > 0.010 else "OK"
+        print("     δ = E_super/9 - E_target_prim = %+.4f eV/fu   [%s]" % (delta, flag))
     for k, v in enumerate(verts):
         print("   顶点%d: %s" % (k, "  ".join("%s=%.4f" % (el, v["mu"][el]) for el in els)))
     json.dump({"target": ph["target"]["formula"], "dH_f": round(dH_target, 6),
@@ -193,8 +217,11 @@ def run_from_references():
     # 实际形成能应在多个极端化学势下算（Te 富/Te 贫），这里默认取第一个顶点，用户可改
     ref = json.load(open("energies.json", encoding="utf-8")) if os.path.exists("energies.json") else {}
     ref["mu"] = verts[0]["mu"]
+    ref["mu_vertices"] = verts   # 全部顶点，供形成能脚本遍历（沿 Te-rich → Te-poor 报告 p/n 变化）
+    ref["degenerate_line"] = degenerate_line
     json.dump(ref, open("energies.json", "w"), indent=2, ensure_ascii=False)
-    print("     已写 energies.json（mu 取顶点0；E_gap/epsilon/mstar 若缺请补）")
+    print("     已写 energies.json（mu 取顶点0 + 全部 %d 个顶点 mu_vertices%s）"
+          % (len(verts), "，窗口退化为线段" if degenerate_line else ""))
 
 
 if __name__ == "__main__":

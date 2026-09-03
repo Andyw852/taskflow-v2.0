@@ -103,19 +103,19 @@ def main():
         cmd = (gpu_export + "python ../../mace_finetune.py "
                "--name %s_gen%d_seed%d --seed %d --gen %d "
                "--foundation '%s' --train-file '%s' --test-file '%s' "
-               "--valid-fraction %g --e0s '%s' --e0s-mode %s --replay '%s' --num-samples-pt 30000 "
+               "--valid-fraction %g --e0s '%s' --e0s-mode %s --replay '%s' --num-samples-pt %d "
                "--energy-weight %g --forces-weight %g --stress-weight %g "
                "--lr %g --epochs %d --batch-size %d --patience %d --start-swa %d --loss %s "
                # [FIX-H4] HUBER_DELTA / USE_SWA 必须透传，否则 step.conf 里这两个键是死的
                "--huber-delta %g --use-swa %s "
-               "--force-mh-ft-lr %s --device %s --dtype %s"
+               "--force-mh-ft-lr %s --multiheads-finetuning %s --device %s --dtype %s"
                % (mat, gen, s, s, gen, model, train, test,
                   cv["VALID_FRACTION"], e0s if e0s.is_file() else "", cv["E0S_MODE"] or "estimated",
-                  replay, e_w, cv["FORCES_WEIGHT"], s_w,
+                  replay, int(cv["NUM_SAMPLES_PT"] or 30000), e_w, cv["FORCES_WEIGHT"], s_w,
                   cv["LR"], cv["EPOCHS"], cv["BATCH_SIZE"],
                   cv["PATIENCE"], cv["START_SWA"], cv["LOSS"] or "huber",
                   cv["HUBER_DELTA"], str(cv["USE_SWA"]).lower(),
-                  str(cv["FORCE_MH_FT_LR"]).lower(),
+                  str(cv["FORCE_MH_FT_LR"]).lower(), str(cv["MULTIHEAD"]).lower(),
                   cv["DEVICE"] or "auto", cv["DTYPE"]))
         tpl = mc.resolve_submit(here, "submit_mace")
         mc.write_submit(tpl, sdir / "submit.sh",

@@ -109,7 +109,7 @@ def main():
         print("  tf list      只读总表（不拉取、不提交）")
         print("  tf summary   只读极简汇总（巡检省 token，见 AGENTS.md）")
         print("  tf status    刷新状态 + auto-fetch + auto-advance")
-        print("  tf watch     后台监控（-i 秒，-d 放后台）")
+        print("  tf monitor   后台监控（-i 秒，-d 后台，restart 重做；watch 为旧名）")
         print("  tf -h        全部命令")
         return
     p = argparse.ArgumentParser(prog="tf")
@@ -126,15 +126,17 @@ def main():
                         "waiting/scancel（逗号分隔），对任意命令生效；"
                         "如 -status scancel start 重跑全部被 stop 取消的")
     p.add_argument("-i", "--interval", type=int, default=300,
-                   help="watch 刷新间隔秒数（默认 300）")
+                   help="monitor 刷新间隔秒数（默认 300）")
     p.add_argument("-d", "--daemon", action="store_true",
-                   help="watch 放后台运行（日志 .tf_watch.log）")
+                   help="monitor 放后台运行（日志 .tf_watch.log）")
     p.add_argument("--stop", action="store_true",
-                   help="停止后台运行的 tf watch")
+                   help="停止后台运行的 tf monitor")
     p.add_argument("--install", action="store_true",
-                   help="写入 crontab 保活（tf watch 重启后自动恢复）")
+                   help="写入 crontab 保活（tf monitor 重启后自动恢复）")
     p.add_argument("--uninstall", action="store_true",
                    help="移除 crontab 保活")
+    p.add_argument("--restart", action="store_true",
+                   help="重启后台监控（先停旧的再起新的）")
     p.add_argument("-f", "--force", action="store_true")
     p.add_argument("--all", dest="all_files", action="store_true",
                    help="fetch 时拉回每个步骤的全部文件（不只 fetch_files 清单）")
@@ -178,8 +180,8 @@ def main():
 
     commands = {"status", "list", "summary", "start", "stop", "retry", "rerun",
                 "json", "config", "dir", "fetch", "init", "clean", "watch",
-                "help", "auto", "adopt", "migrate-subdir", "hpc", "skills",
-                "conf", "level", "diagnose"}   # patch_level
+                "monitor", "restart", "help", "auto", "adopt", "migrate-subdir",
+                "hpc", "skills", "conf", "level", "diagnose", "probe", "push"}
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -202,6 +204,23 @@ def main():
     if cmd == "config":
         print(EXAMPLE_CONFIG)
         return
+    if cmd == "probe":   # 只读探测：delegate 到 scripts/probe_jobs.py（不采集/不提交/不改文件）
+        import subprocess as _sp
+        _probe = os.path.join(_PKG_ROOT, "scripts", "probe_jobs.py")
+        _mats = [m.strip() for m in (a.proj or "").split(",") if m.strip()] + mat_toks
+        if not _mats:
+            sys.exit("错误：probe 需要 -p 材料名（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）。")
+        _argv = [sys.executable, _probe, "-p", ",".join(_mats)]
+        if a.job:
+            _argv += ["-j", a.job]
+        if a.host:
+            _argv += ["--host", a.host]
+        sys.exit(_sp.call(_argv))
+    if cmd == "push":   # git 提交：delegate 到 scripts/tf-git-push.sh（本地真实版 + 远端脱敏版）
+        import subprocess as _sp
+        _push = os.path.join(_PKG_ROOT, "scripts", "tf-git-push.sh")
+        _msg = " ".join(mat_toks) if mat_toks else "update"
+        sys.exit(_sp.call(["bash", _push, _msg]))
     if a.job and not a.proj and not mat_toks and cmd not in (
             "start", "stop", "retry", "rerun", "clean", "status"):
         sys.exit("错误：-j 必须和 -p 一起用（start/stop/retry/rerun/clean "
@@ -211,6 +230,20 @@ def main():
     cfg["_config_dir"] = (os.path.dirname(os.path.abspath(cfg_path))
                           if cfg_path else os.getcwd())
     cfg["_config_path"] = cfg_path
+    if cmd in ("watch", "monitor", "restart"):   # 控制类操作不采集状态，提前短路
+        if a.install:
+            sys.exit(_watch_cron(True))
+        if a.uninstall:
+            sys.exit(_watch_cron(False))
+        if a.stop:
+            sys.exit(_watch_stop(cfg))
+        if a.restart or cmd == "restart":
+            _watch_stop(cfg)
+            _watch_daemon(a, mat_toks, root, cfg)
+            return
+        if a.daemon:
+            _watch_daemon(a, mat_toks, root, cfg)
+            return
     cfg = apply_skills(cfg, verbose=True)   # v1.2：先装配 skill/*/skill.yaml
     if cmd == "skills":
         return cmd_skills(cfg, tt=a.tt)
@@ -222,7 +255,7 @@ def main():
     types = get_types(cfg, tt=a.tt,
                       root_override=None if cmd == "init" else root,
                       quiet=(cmd == "init"))
-    if cmd != "watch":
+    if cmd not in ("watch", "monitor"):
         _watch_ensure(cfg)   # v1.10：auto_watch 时顺带确保后台监控在跑
     if cmd in ("status", "json") and not types and not a.tt:
         sys.exit("错误：没有任何任务类型"
@@ -368,16 +401,7 @@ def main():
         _dry_run_report(cfg, data, _eff_cmd, projs, jobs)
         return
 
-    if cmd == "watch":   # v3.15：监控模式（循环 采集→fetch→advance）
-        if a.install:                    # v1.10：crontab 保活（重启自动恢复）
-            sys.exit(_watch_cron(True))
-        if a.uninstall:
-            sys.exit(_watch_cron(False))
-        if a.stop:
-            sys.exit(_watch_stop(cfg))
-        if a.daemon:                     # v3.16：后台监控，不占终端
-            _watch_daemon(a, mat_toks, root, cfg)
-            return
+    if cmd in ("watch", "monitor", "restart"):   # 前台监控（控制标志已在前面短路）
         _ov = {}                        # v1.8：自动重载时命令行覆盖照旧生效
         if a.host is not None:
             _ov["host"] = a.host or None

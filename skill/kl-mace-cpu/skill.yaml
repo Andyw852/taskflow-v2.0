@@ -61,7 +61,7 @@ steps:
      check: marker, marker: 'kappa_summary.json:"KAPPA_DONE": true',
      gen: gen_step4_kappa.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
-                kappa_validation.py, submit_p3py.tpl]}
+                kappa_validation.py, submit_p3py.tpl, vdw_radii.py]}
 
 requires:
   python: [mace-torch, torch, ase, phonopy, phono3py, symfc, pheasy, spglib, numpy, h5py]

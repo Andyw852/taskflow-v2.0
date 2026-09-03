@@ -15,7 +15,7 @@ VASP/DFT 与 MACE/MLFF 多材料·多步骤·**多任务类型**流水线管理�
 |---|---|---|
 | 0 | 适用范围与能力边界 | 所有人 |
 | 1–5 | 安装、核心概念、命令、状态、配置 | 所有用户 |
-| 6 | 11 个技能逐一说明（含 mlff-mace） | 用户 / agent |
+| 6 | 16 个技能逐一说明（含 mlff-mace）；**6.10 各技能提交规范**（★ 提交前先读） | 用户 / agent |
 | 7 | 技能开发规范（原 SKILL_DEV.md 内容） | 技能作者 / AI |
 | 8–11 | 工作原理、agent 接入、目录结构、文档清单 | 所有人 |
 
@@ -25,8 +25,9 @@ VASP/DFT 与 MACE/MLFF 多材料·多步骤·**多任务类型**流水线管理�
 
 **覆盖范围（能做什么）**
 
-- 11 个技能、两类引擎：**VASP/DFT**（能带、弹性常数、电子热导率、晶格热导率、结构优化+能量）＋ **MACE/MLFF**（晶格热导率、结构优化+形成能、声子谱、随机位移法 MLFF 训练）。
+- 16 个技能、多类引擎：**VASP/DFT**（能带、弹性常数、电子热导率、晶格热导率、结构优化+能量、缺陷形成能）＋ **MACE/MLFF**（晶格热导率、结构优化+形成能、声子谱、随机位移法 MLFF 训练）＋ **替代模型**（热电快速筛选、Uni-HamGNN 能带）。
 - 多材料 × 多步骤 × 多任务类型编排：`needs` 显式 DAG 依赖、扇出步骤（fanout，一步下 N 个并行作业）、可选步骤组、断点续跑、跨技能共用结果（如 kl-mace 接 kl-dft-cpu 的 BORN）。
+- 跨技能结构复用：tf 的 gen 一律从**材料根 POSCAR** 取初始结构（技能子目录里的 POSCAR 不被使用），所以复用 = 把其它链已优化的 CONTCAR 复制成材料根 POSCAR（覆盖前备份 POSCAR_raw）。kl-dft-cpu 的 `reuse_structure.py` 自动做（ke → opt → band → elastic 顺序找候选）；手动等价于 `cp <材料>/ke-dft-cpu/result/step1_opt/CONTCAR <材料>/POSCAR`。复用只给各技能 S1 更好的起始点（省离子步、更稳），**不跳过 S1 的重新优化**；材料根 POSCAR 是所有技能共用的初始结构，覆盖影响所有未跑 S1 的技能。详见 `skill/kl-dft-cpu/README.md`、`skill/kl-mace-cpu/README.md`。
 - 三种运行环境：真 SLURM（jzzn cpu192 / a800 GPU 分区）、无 SLURM 服务器（3090，fakeslurm 垫片），一台项目用 `tf hpc` 切换。
 - 自动化：auto_fetch / auto_advance / auto_watch（零输入全自动）、retry / rerun / stop / clean、内置判据自动判成败、0D/2D/3D 维度自动判定。
 - 技能开发：`skill/<名>/skill.yaml` 自描述，放进 `skill/` 即被自动发现，不改 tf 主程序（见第 7 章）。
@@ -165,23 +166,25 @@ tf auto [on|off]                 一键开关全局 auto_advance（动目录/恢
 tf init                          批量初始化：当前目录下所有项目生成 project_setting/
 tf -p MAT init                   只初始化该项目（如 -p C20/qHPC20 → C20/project_setting）
 tf -p MAT -j STEP init           只生成该步骤输入文件（gen），不提交——提交前可先检查
-tf watch [-i 秒]                 监控模式（前台）：每 interval 秒（默认 300）自动
+tf monitor [-i 秒]                监控模式（前台）：每 interval 秒（默认 300）自动
                                   重新采集 → auto-fetch → auto-advance；
                                   状态有变化才打印总表，否则一行心跳；Ctrl+C 退出。
                                   每轮自动检测配置文件改动并重载（tf.yaml、project_setting/*.yaml、
                                   材料/技能的 hpc.yaml）——改配置或换 tf 版本后不用重启监控
-tf watch -d                      后台监控（推荐）：不占终端，日志/pid 固定在
+tf monitor -d                    后台监控（推荐）：不占终端，日志/pid 固定在
                                   tf.yaml 所在目录（.tf_watch.log，tail -f 查看）；
-                                  tf watch --stop 任意目录可停止
-tf watch --install / --uninstall crontab 保活：每 10 分钟检查，监控死了自动
+                                  tf monitor --stop 任意目录可停止
+tf monitor restart               重做后台监控：先停旧的再起新的（改配置/换 tf 版本后建议用它）
+tf monitor --install / --uninstall crontab 保活：每 10 分钟检查，监控死了自动
                                   拉起（重启/WSL 关闭后自动恢复），不会重复启动
+                                  （watch 是 monitor 的旧名，仍可用）
 tf -tt TT migrate-subdir [--dry-run | -y]  迁移材料到 技能子目录 布局（band-dft-cpu 已迁移完，
                                   新技能默认 skill_subdir: true，一般用不到）
 tf -tt TT adopt [--dry-run | -y]  接管"人手工搬进 材料/<技能>/"的目录（先 tf auto off）
 tf json / tf config              JSON 输出（全量，token 大）/ 打印示例配置
 ```
 
-**零输入全自动（推荐配置）**：tf.yaml 里写 `auto_advance: true` + `auto_watch: true`，再执行一次 `tf watch --install`——之后**不需要敲任何命令、不需要手动挂监控**：监控死了任何 tf 命令顺带拉起（auto_watch），重启/WSL 关闭后 crontab 保活拉起（--install）。想彻底关掉后台监控：`auto_watch: false` + `tf watch --stop` + `tf watch --uninstall`。WSL 注意：保活依赖 WSL 里的 cron 服务在跑（`sudo service cron start`；wsl.conf 开 systemd 则自动）。Windows 侧更稳的替代：任务计划程序加"登录时运行" `wsl -e bash -lc "tf watch -d"`。
+**零输入全自动（推荐配置）**：tf.yaml 里写 `auto_advance: true` + `auto_watch: true`，再执行一次 `tf monitor --install`——之后**不需要敲任何命令、不需要手动挂监控**：监控死了任何 tf 命令顺带拉起（auto_watch），重启/WSL 关闭后 crontab 保活拉起（--install）。想彻底关掉后台监控：`auto_watch: false` + `tf monitor --stop` + `tf monitor --uninstall`。WSL 注意：保活依赖 WSL 里的 cron 服务在跑（`sudo service cron start`；wsl.conf 开 systemd 则自动）。Windows 侧更稳的替代：任务计划程序加"登录时运行" `wsl -e bash -lc "tf monitor -d"`。
 
 状态总表每个项目**两行**：第一行是各步骤状态词，第二行是 job 实况（已去掉总体 Status 列）。
 
@@ -233,7 +236,7 @@ project_roots:                        # 项目根列表：扫描其下 project_s
   - /mnt/d/tf_data
   - /home/wangchao/software/taskflow/tf_test
   - /mnt/d/tf_data/Fullerene_Network/gen_metalfullence/doped/intercalation
-auto_advance: true                    # status/watch 时自动提交可开始的步骤
+auto_advance: true                    # status/monitor 时自动提交可开始的步骤
 auto_watch: false                     # 设为 true = 任何 tf 命令顺带拉起后台监控
 task_types:                           # 只写与 skill.yaml 不同的站点字段（work_dir 必须配）
   band-dft-cpu:
@@ -381,15 +384,15 @@ _AMSET_ENV_SRC = "source %s && conda activate %s" % (CONDA_SH, AMSET_ENV)
 
 ### 5.5 自动化开关
 
-- `auto_advance: true`（全局 tf.yaml 顶层）：status/watch 时自动提交可开始的步骤（gen+提交一条龙，流水线算完自动接下一步；error 不自动重试，留给人/agent 判断；项目 setting.yaml 里 `auto_advance: false` 可单独关闭；可用 `tf auto on/off` 一键切换）。
-- `auto_watch: true` + `tf watch --install`：零输入全自动（见第 3 节）。
+- `auto_advance: true`（全局 tf.yaml 顶层）：status/monitor 时自动提交可开始的步骤（gen+提交一条龙，流水线算完自动接下一步；error 不自动重试，留给人/agent 判断；项目 setting.yaml 里 `auto_advance: false` 可单独关闭；可用 `tf auto on/off` 一键切换）。
+- `auto_watch: true` + `tf monitor --install`：零输入全自动（见第 3 节）。
 - 动目录、恢复备份、大批量调整前先 `tf auto off`，完事 `on`。
 
 ### 5.6 其它配置项
 
 - **run_steps 步骤子集**（全局或项目级均可）：`run_steps: [1]` 只跑 seq=1 的步骤；元素匹配 `seq`、`name` 或 `label`，不写 = 全部步骤。
-- **max_jobs 按技能限制并发提交**：每个 `task_types.<key>` 写 `max_jobs: N`；也可写全局默认；环境变量 `TF_MAX_JOBS` 兜底。只卡「提交超算（sbatch）」：达到上限后尚未提交的任务先本地生成输入（`PREP` → `TODO`）待命，watch 每轮（默认 300 秒）发现有作业算完就自动补交。kl 类扇出步骤按实际子作业数计。
-- **挂死作业自动恢复（v1.11，`hang_check`）**：watch 每轮检查 RUNNING 作业，**用进度指纹判定挂死**——记录每个作业的（`OUTCAR` 字节数, `OSZICAR` 行数），指纹连续 `hang_min_stale_rounds`（默认 2）轮不变 **且** 输出年龄 ≥ `hang_stale_secs`（默认 1.5h）才算挂死（指纹在涨 = 活着，放它继续算；OSZICAR 尾的 SCF 迭代 rms 还在降 = 慢但活着，也不判）。判定后**先诊断原因再处理**：
+- **max_jobs 按技能限制并发提交**：每个 `task_types.<key>` 写 `max_jobs: N`；也可写全局默认；环境变量 `TF_MAX_JOBS` 兜底。只卡「提交超算（sbatch）」：达到上限后尚未提交的任务先本地生成输入（`PREP` → `TODO`）待命，monitor 每轮（默认 300 秒）发现有作业算完就自动补交。kl 类扇出步骤按实际子作业数计。
+- **挂死作业自动恢复（v1.11，`hang_check`）**：monitor 每轮检查 RUNNING 作业，**用进度指纹判定挂死**——记录每个作业的（`OUTCAR` 字节数, `OSZICAR` 行数），指纹连续 `hang_min_stale_rounds`（默认 2）轮不变 **且** 输出年龄 ≥ `hang_stale_secs`（默认 1.5h）才算挂死（指纹在涨 = 活着，放它继续算；OSZICAR 尾的 SCF 迭代 rms 还在降 = 慢但活着，也不判）。判定后**先诊断原因再处理**：
   - `scf`（OSZICAR 尾是 SCF 迭代行且 rms 不再降）：SCF 空转/尾部卡死——只重跑会再次挂死，`hang_fix_scf` 时自动升级 INCAR（补 `AMIX=0.1`/`BMIX=0.0001` → 改 `ALGO=All` → `NELM≥200`，**原子写 + 备份 `INCAR.bak.*`**），再从 CONTCAR 续跑重交，并给 `hang_grace_rounds` 轮宽限期（AMIX 降低使 SCF 变慢，防被再次误判）。
   - `node`（queue.err 或 `sacct` 查到的 NODE_FAIL）：节点故障，直接重跑（换节点即可）。
   - `disk`（No space）：磁盘满，**只告警不重跑**（满盘上写文件会写坏 INCAR/POSCAR）。
@@ -471,6 +474,14 @@ _AMSET_ENV_SRC = "source %s && conda activate %s" % (CONDA_SH, AMSET_ENV)
 | 5.1 | `step5_phonon_plot` | S5.1_plot | 声子谱画图 | plot |
 | 6 | `step6_kappa` | S6_kappa | phono3py BTE → κ（`needs: [step5_fc]`） | `kappa.dat:END` |
 
+S5_fc 拟合器由 `FIT_ENGINE` 选：`phono3py`（symfc/alm，默认）| `pheasy`（随机位移压缩感知，需 step4 `METHOD=alm`）。选 `pheasy` 时再配：
+`PHEASY_BIN=pheasy`（CPU 版，默认）| `pheasy-gpu`（GPU 版，走 `pheasy_gpu` 模块 + CUDA 后端，`PHEASY_USE_GPU` 缺省 auto）、
+`PHEASY_FIT_METHOD`（LASSO / RFE / OLS）、`PHEASY_C3_CUTOFF`、`PHEASY_ENABLE_FC`。两个软件都在 `~/software/` 下，CLI 参数一致：
+
+```bash
+tf -tt kl-dft-cpu -p <材料> -j 5 conf --set params.FIT_ENGINE=pheasy params.PHEASY_BIN=pheasy-gpu
+```
+
 ### 6.5 opt-dft-cpu 结构优化 + 能量（v0.1）
 
 | 步骤 | label | 内容 | 判据 |
@@ -512,6 +523,11 @@ tf -tt opt-dft-cpu -p <材料> -j 3 conf --set GUEST_ELEMENT=Li
 3. **`DTYPE` 必须 float64**——float32 的力误差（~1e-3 eV/Å）足以在声学支上造出假虚频。
 
 关键参数（step.conf）：`MACE_MODEL` / `MACE_MODEL_DIR` / `DEVICE` / `CONDA_ENV`（jzzn 上是 venv，写路径即按 venv 激活）、`METHOD=random`（默认 MC-rattle 随机位移）/ `findiff`（有限位移）、`N_RANDOM=auto`（按 ALM 数出的自由力常数反推帧数）、`FC2_SUPERCELL`、`MIN_SC_LEN`、`KAPPA_MESH`、`CKPT`（断点续算）、`ALM_CUT3`、`FIT_SOFTWARE=phono3py`/`pheasy`。GPU 版跑 `opt-mace-gpu` 同款 GPU 机器（`tf hpc` 切）。
+
+**pheasy 拟合软件选择**（S3_fc 当 `FIT_SOFTWARE=pheasy` 时）：`PHEASY_BIN=pheasy`（CPU 版，默认）| `pheasy-gpu`（GPU 版，走 `pheasy_gpu` 模块 + CUDA 后端），配合 `PHEASY_METHOD`（OLS / LASSO / RFE / RFE_TSQR）。两者都在 `~/software/` 下（`pheasy` / `pheasy-gpu`），CLI 参数一致、GPU 版只是把重活稠密线性代数搬到 GPU（`PHEASY_USE_GPU` 控制，缺省 auto）。示例：
+```bash
+tf -tt kl-mace-gpu -p <材料> -j 3 conf --set params.FIT_SOFTWARE=pheasy params.PHEASY_BIN=pheasy-gpu
+```
 
 ### 6.7 opt-mace-cpu / opt-mace-gpu 结构优化 + 形成能（MACE，3 步）
 
@@ -583,6 +599,68 @@ tf -tt mlff-mace -p <材料> start         # 判据检测到「代数不一致�
 **与 autoplex 默认值的重要差异**（全表见 README §1）：① 基准超胞 = 训练超胞（不烧 min_length=20 大胞，代价是 commensurate q 分辨率较粗）；② `REF_DISP=0.1 Å`（= autoplex 默认；实测 0.01 Å 的位移力被 rattle 帧淹没约 1000 倍，微调后光学支软 27%、声子 RMSE 2.8 THz——CALIB_FC2 标定仍用 0.01 Å）；③ 微调超参取 autoplex `_mace_hypers.py` 默认（lr=1e-3、EPOCHS=1500+patience 早停+SWA、loss=huber、batch=10、stress_weight=1.0，multihead 需 `--force_mh_ft_lr`）；④ `FORCE_LIMIT=40.0 eV/Å`（= autoplex force_max，0.1 会把大幅度 rattle 帧全滤掉）；⑤ 默认 `E0S_MODE=estimated`（基座 E0 与目标泛函零点差 ~8 eV/atom，直接塞 DFT 孤立原子能量会训不动）。
 
 **环境与现状**：jzzn 登录节点无外网、无 GPU 分区（DEVICE=auto 恒落 CPU，EPOCHS=1500 上限 + PATIENCE=100 早停在 CPU 上单 seed 约 1~3 小时）；GPU 路径（a800/3090 的 `submit_mace.tpl` + CONDA_ENV）已预留、未实测。实测记录：Si 金刚石原胞 → 超胞 4×4×4（128 原子，r_max=6.0 Å 读自基座），第 0 代 25 帧（18 rattle + 3 displ + 3 static + 1 iso）×12 核，S1~S6 通过，S7 4-seed 微调进行中（截至本文更新）。
+
+### 6.10 各技能提交规范（★ 提交前先读这一节）
+
+> 每个技能一小节，写「拿到一个新材料，从零开始怎么把它跑起来」：前置条件、
+> 命令序列、每步资源规格、预计耗时、必须遵守的定则。**换材料/换机器重跑时照这里执行，
+> 别凭记忆**。下列技能按实操深度排序；未写到的技能先照 6.x 总览 + `skill/<技能>/README.md`。
+
+#### 6.10.1 mlff-mace 随机位移法 MLFF 训练（Si 全流程实操验证）
+
+**目标**：产出一个通过全部验收闸的 MACE 势权重（`<MACE_MODEL_DIR>/<材料>_ft.model`）。
+
+**前置**（缺一不可）：
+
+| 项 | 说明 | 检查 |
+|---|---|---|
+| POSCAR | 原胞（3D 体相 / 2D 真空沿 c 轴） | `ase info` 可读 |
+| 基座模型 | `MACE_MODEL_DIR` 下的 `.model`（`MACE_MODEL`） | 覆盖全部元素 |
+| REPLAY_XYZ | 集群本地 replay 数据（无外网，必需） | 文件存在 |
+| CONDA_ENV | mace 环境（GPU 用 mace-gpu） | `conda activate` 可进 |
+| 赝势 | `POTCAR_DIR`（集群级注入，step5 用） | 目录存在 |
+
+**提交命令序列**（从零到第 0 代验收）：
+
+```bash
+# 0. 建材料 + 检查
+mkdir -p <材料> && cd <材料> && cp <POSCAR> POSCAR
+tf -tt mlff-mace -p <材料> init                # 生成 project_setting/
+# 1. 三步启动（每步 start 推进，看 status）
+tf -tt mlff-mace -p <材料> start               # S1 弛豫（VASP 12 核）
+tf -tt mlff-mace -p <材料> start               # S2 超胞 + S3 标定（登录节点）
+tf -tt mlff-mace -p <材料> start               # S4 生成本代构型清单
+# 2. DFT 标注（S5，最贵，fanout）
+tf -tt mlff-mace -p <材料> -j 5 start -f       # 提交所有 cfg-* 帧
+# 3. 数据集 + 训练（S6/S7）
+tf -tt mlff-mace -p <材料> -j 6 start          # 建数据集
+printf 'step7_finetune\ny\n' | tf -tt mlff-mace -p <材料> -j 7 rerun   # 生成 N_COMMITTEE 个 seed
+# 4. 验收（S8）
+tf -tt mlff-mace -p <材料> -j 8 retry && tf -tt mlff-mace -p <材料> -j 8 start
+# 5. 通过后发布（S9）
+tf -tt mlff-mace -p <材料> start               # 仅 status=pass 才发布
+```
+
+**每步资源规格（3090 实测）**：
+
+| 步骤 | 资源 | 预计耗时（Si，128 原子超胞） | 备注 |
+|---|---|---|---|
+| S1 弛豫 | 12 核 CPU | ~0.5h | 三段式 in_job |
+| S5 DFT 单点 | 12 核或 1 GPU/帧，fanout | 49 帧 × ~10min（GPU）/帧 | **串行队列，帧数 × 单帧时间**；GPU 模式 `submit.ntasks_per_node=1` + `NCORE=1` |
+| S7 训练 | 1 GPU/seed，N_COMMITTEE 并行 | 1200 epochs × ~16s ≈ 4-6h | 4 seed 各占 1 卡；`force_mh_ft_lr=false` 时慢一个数量级 |
+| S8 验收 | 1 GPU | ~2-5min | 含 4 seed B0 一致性检查 |
+
+**必须遵守的定则**：
+
+1. **step5_label 只用 `retry` / `start -f`，绝不 `rerun` / `clean`**（会 `rm -rf` 毁掉已算完的 DFT 帧）。
+2. **换代用 `conf --set params.GENERATION=K` → `-j 4 retry` → `start`**（retry 保留 gen-* 历史，rerun 会丢 S6 累计帧）。
+3. **改训练超参后必须确认 recipe 指纹生效**（`mace_finetune.py` 的 `recipe` 含 lr/epochs/loss/权重/batch/huber_delta/force_mh_ft_lr/patience；改了配置看 `finetune_summary.json` 的 recipe 是否变了，变了才会重训）。
+4. **重训后先确认是早停停下的**（train.log 末段有 Early stopping），不是撞 epoch 上限——否则指标无意义。
+5. **GPU 分卡**：`N_GPU=0`（auto）= N_COMMITTEE 张卡，seed s → `(s-1) % N_GPU`；多 seed 并行前提是各卡空闲，看 `nvidia-smi`。
+6. **验收看三处**：声子谱 RMSE（主闸）、4 seed B0 一致性（#8a，通过率 <100% 判 FAIL）、pt_head 末段 std（应 <30，说明训练稳定）。
+
+**换材料必改的参数**（step.conf）：`FUNC / DIMENSION / VOL_FACTORS / RATTLE_STD / MIN_ATOMS / MAX_ATOMS / MACE_MODEL / ENCUT_OVERRIDE`。
+
 
 ---
 
@@ -1082,6 +1160,21 @@ ln -sf ~/software/taskflow/versions/<旧版本>/tf ~/.local/bin/tf
 - **skill_dir**：gen 需要的脚本/模板在材料目录缺失时，tf 从本地 skill 目录**经 ssh 推送**到超算（base64 编码，只补不覆盖），超算上无需再集中存放。`gen_dir` 保留为远端兜底。
 - **setting/<hpc>.yaml**：包内默认超算配置；项目 `project_setting/hpc.yaml` 缺省时回退到它。新增一台超算 = 加一份 `<名>.yaml` + `<名>/templates/`（见 5.4）。
 - 版本目录名随意（`v1.0`、`2026-07` 都行），软链接指谁谁是当前版。
+
+### 10.1 改脚本就提交 GitHub（★ 每次改完代码就做）
+
+> **规则**：每次修改了脚本/代码（`skill/`、`scripts/`、`tfpkg/`、`versions/v1.0/tf` 主程序、`AGENTS.md`/`TASKFLOW.md` 文档等），改完**立即提交到 GitHub**，不要攒一批再交。用 `tf push`（或在任意目录用独立脚本 `tfpush`）：
+
+```bash
+cd ~/software/taskflow            # 或任何 git 仓库目录
+tf push "改了什么的简述"           # 等价：tfpush "..." 或 bash scripts/tf-git-push.sh "..."
+```
+
+脚本做三件事：① 本地 `git add -A` + 提交「真实版」（保留真实超算/用户名，**不 push**）；② 基于远端建 `push-sanitized` 快照分支，按敏感词映射（`setting/git-sanitize.conf`）脱敏后提交「脱敏版」；③ 推送脱敏版到 `origin/main`（GitHub 走 SSH 443，自动重试 8 次），最后切回原分支、删临时分支。
+
+- **本地 main = 真实版**（含真实信息，只 commit 不 push）；**远端 GitHub = 脱敏版**。两套历史天然分叉，属正常现象。
+- 提交信息写「改了什么的简述」，脚本会自动补「（本地真实版）」「（脱敏版）」后缀。
+
 
 ---
 

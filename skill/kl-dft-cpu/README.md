@@ -30,6 +30,14 @@
 S3_nac 是可选步组：默认开；关掉在项目配置写 `nac: false`，tf 直接不注入 S3，S5/S6 因无
 BORN 自然不加 NAC。
 
+S1 的起始结构建议复用其它链已优化好的 CONTCAR：`python3 reuse_structure.py <材料名>`
+（脚本在 `skill/kl-dft-cpu/`），按 ke → opt → band → elastic 顺序找候选 CONTCAR
+（候选目录见 `_STEP1_CANDS`），命中就复制成**材料根 POSCAR**（tf 的 gen 一律从材料根取
+初始结构，技能子目录里的 POSCAR 不被使用），覆盖前把原始 POSCAR 备份成 `POSCAR_raw`。
+复用只是给 S1 更好的起始点（省离子步、更稳），**不跳过 S1**——S1 仍会以更严的收敛判据
+（EDIFF=1E-7 + EDIFFG=-0.001）完整优化。材料根 POSCAR 是所有技能共用的初始结构，
+覆盖影响所有未跑 S1 的技能（已跑完的不受影响）。
+
 ## 安装
 把整个 `kl-dft-cpu/` 放到 `~/software/taskflow/skill/kl-dft-cpu/`，然后：
 ```

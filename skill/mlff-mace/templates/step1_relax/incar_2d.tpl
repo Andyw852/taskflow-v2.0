@@ -1,8 +1,8 @@
 # =====================================================================
 # incar_2d.tpl —— mlff-mace step1：2D 材料紧弛豫模板（三段式 a/b/c）
 #
-# 与 3D 版的差别：变胞约束（IOPTCELL）由 relax_common 按 CELL_CONSTRAINT_2D
-# 注入（真空方向胞长与含真空方向的剪切锁死），本模板不写 IOPTCELL。
+# 与 3D 版的差别：变胞约束（IOPTCELL）锁死真空方向（c 轴）及含 c 的剪切。
+# relax_common 按 CELL_CONSTRAINT_2D='ioptcell_tag' 原样保留下面这行 IOPTCELL。
 # =====================================================================
 
 SYSTEM = {{SYSTEM}}
@@ -36,6 +36,9 @@ ISYM   = 2
 POTIM  = 0.2
 NSW    = 200
 EDIFFG = -0.001
+# ---- 2D 变胞约束（IOPTCELL 3x3 展平）：面内 a/b 的 xx/yy/xy 放开，含 c 的分量锁死 ----
+# 缺这行的话 ISIF=3 会连真空一起弛豫，c 轴漂移、能量发散（qHPC36 实测）。
+IOPTCELL = 1 1 0 1 1 0 0 0 0
 
 # ---- 输出 ----
 LWAVE  = .FALSE.

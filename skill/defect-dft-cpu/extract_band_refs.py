@@ -71,6 +71,40 @@ def fit_mstar(band_dat, is_valence):
         return None
     return HBAR2_2ME / A
 
+def vbm_cbm_from_eigenval(path):
+    """从 EIGENVAL 提取 VBM/CBM 本征值（绝对值，VASP 内部参考系）。SOC 单自旋通道。
+
+    这是缺陷超胞同一套 PBE+SOC 设置下 bulk 超胞的 VBM，用于形成能的电子库对齐；
+    band_summary 里的 VBM 是 HSE/原胞/能带图的，不能直接复用。"""
+    if not os.path.exists(path):
+        return None, None
+    lines = open(path, errors="ignore").read().splitlines()
+    if len(lines) < 7:
+        return None, None
+    p = lines[5].split()
+    nkpts, nbands = int(p[1]), int(p[2])
+    idx = 6
+    vbm, cbm = None, None
+    for _ in range(nkpts):
+        while idx < len(lines) and lines[idx].strip() == "":
+            idx += 1
+        if idx >= len(lines):
+            break
+        idx += 1  # 跳过 k 点坐标行
+        for _b in range(nbands):
+            if idx >= len(lines):
+                break
+            tok = lines[idx].split()
+            idx += 1
+            if len(tok) < 3:
+                continue
+            e, occ = float(tok[1]), float(tok[2])
+            if occ > 0.5:
+                vbm = e if vbm is None or e > vbm else vbm
+            else:
+                cbm = e if cbm is None or e < cbm else cbm
+    return vbm, cbm
+
 def _auto_detect_band_summary():
     """按材料名自动探测 band_summary.json（band 技能在 joint_research_project 下）。"""
     material = os.path.basename(os.path.dirname(os.path.abspath(os.getcwd())))
@@ -102,12 +136,17 @@ def main(path=None):
     mstar_e = mstar_e if mstar_e and 0.005 < mstar_e < 10 else float(conf.get("MSTAR_E", 0.2))
     mstar_h = mstar_h if mstar_h and 0.005 < mstar_h < 10 else float(conf.get("MSTAR_H", 0.2))
     eps = float(conf.get("EPSILON", 100.0))
+    # bulk 超胞 VBM 本征值（PBE+SOC，与缺陷超胞同设置；band_summary 的 VBM 是 HSE/原胞，仅作参考）
+    vbm_bulk, cbm_bulk = vbm_cbm_from_eigenval("step1_bulk/EIGENVAL")
     # 写入 energies.json（合并已有的 mu）
     ref = {}
     if os.path.exists("energies.json"):
         ref = json.load(open("energies.json", encoding="utf-8"))
     ref.update({"E_gap": E_gap, "VBM": VBM, "CBM": CBM,
                 "epsilon": eps, "mstar_e": round(mstar_e, 4), "mstar_h": round(mstar_h, 4)})
+    if vbm_bulk is not None:
+        ref["VBM_bulk_abs"] = vbm_bulk
+        ref["CBM_bulk_abs"] = cbm_bulk
     json.dump(ref, open("energies.json", "w"), indent=2, ensure_ascii=False)
     print("[OK] E_gap=%.4f eV  epsilon=%.1f  mstar_e=%.3f  mstar_h=%.3f -> energies.json"
           % (E_gap, eps, mstar_e, mstar_h))

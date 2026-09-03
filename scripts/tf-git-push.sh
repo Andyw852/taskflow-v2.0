@@ -37,6 +37,27 @@ EOF
   echo "已配置 github SSH 走 443"
 fi
 
+# 0. 推送前 gate：打印将提交内容 + py_compile/pyflakes + 交互确认
+#    （git add -A 会把工作树里的一切都推上去，包括别的进程写到一半的文件）
+echo "===== 将提交/推送的工作树改动 ====="
+git status --short
+echo "===================================="
+# py_compile + pyflakes（改动的 .py 全过才继续；这次的 kl-dft-cpu NameError 它两秒就能拦下）
+mapfile -t _py < <(git status --porcelain | sed 's/^...//; s/.* -> //' | grep '\.py$' || true)
+if [ ${#_py[@]} -gt 0 ]; then
+  for f in "${_py[@]}"; do python3 -m py_compile "$f" || { echo "❌ py_compile 失败: $f"; exit 1; }; done
+  echo "py_compile 通过（${#_py[@]} 个 .py）"
+  if command -v pyflakes >/dev/null 2>&1; then
+    pyflakes "${_py[@]}" || { echo "❌ pyflakes 报告问题（NameError/未定义名类）"; exit 1; }
+    echo "pyflakes 通过"
+  fi
+fi
+# 交互确认（TF_PUSH_YES=1 跳过，供脚本/CI 用）
+if [ "${TF_PUSH_YES:-0}" != "1" ]; then
+  read -r -p "确认把上面这些改动 sanitize 并推到 GitHub？[y/N] " _ans
+  case "${_ans:-}" in y|Y|yes) ;; *) echo "已取消"; exit 1;; esac
+fi
+
 # 1. 本地真实版提交（保留本地历史，不 push）
 git add -A
 git commit -m "${MSG}（本地真实版）" || echo "(无变更可提交)"

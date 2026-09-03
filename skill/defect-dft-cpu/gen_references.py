@@ -23,6 +23,7 @@ PHASES = {
     "Pb_fcc":    {"ismear": 1, "sigma": 0.10, "kmesh": (16, 16, 16), "kind": "金属"},
     "Sn_beta":   {"ismear": 1, "sigma": 0.10, "kmesh": (12, 12, 12), "kind": "金属"},
     "Sb_rhombo": {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半金属"},
+    "SnSb":       {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半金属"},
     "Bi_rhombo": {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半金属"},
     "Te_trig":   {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半导体"},
     "PbTe_rs":   {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半导体"},
@@ -94,19 +95,34 @@ def main():
     ap.add_argument("--potcar-dir", default="/public/home/wangchao/software/vasp_pseudopotentials")
     ap.add_argument("--submit", action="store_true", help="生成后立即 sbatch")
     ap.add_argument("--refdir", default="convex_hull_references")
+    ap.add_argument("--only", default="", help="只处理这些相（逗号分隔），默认全部")
+    ap.add_argument("--force", action="store_true", help="强制重写并重提交已完成（已收敛）的相")
     args = ap.parse_args()
 
+    only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
     refdir = Path(args.refdir)
     if not refdir.is_dir():
         raise SystemExit("[错误] 找不到 %s（请先把 POSCAR 放进 convex_hull_references/<相>/）" % refdir)
 
     n = 0
     for name, spec in PHASES.items():
+        if only is not None and name not in only:
+            continue
         d = refdir / name
         poscar = d / "POSCAR"
         if not poscar.exists():
             print("[跳过] %s 缺 POSCAR" % name)
             continue
+        # 幂等保护：已收敛的相不重写不重提交（--force 例外）
+        outcar = d / "OUTCAR"
+        if outcar.exists() and not args.force:
+            try:
+                txt = outcar.read_text(errors="ignore")
+                if "reached required accuracy" in txt:
+                    print("[跳过] %s 已完成且收敛（--force 重算）" % name)
+                    continue
+            except OSError:
+                pass
         st = D.parse_poscar(str(poscar))
         order = []
         for a in st["atoms"]:

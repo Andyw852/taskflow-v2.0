@@ -53,6 +53,28 @@ MACE 在 CPU 上的线程扩展性一般 16~32 核就饱和，整节点 48 核�
 `CKPT=10` 意味着每 10 帧落一次盘。作业被墙钟砍掉后 `tf -tt kl-mace-cpu -p <材料> retry`
 从断点接着跑，不用从头再来——CPU 版跑得久，这个比 GPU 版更常用到。
 
+## 起始结构：复用其它链的 CONTCAR
+
+kl 链的 S1（MACE 弛豫）从**材料根目录的 `POSCAR`** 开始（tf 的 gen 一律从材料根取初始
+结构，技能子目录里的 POSCAR 不被使用），**总是会重新弛豫**（MACE 势自己的极小点），但
+起始点越接近极小，离子步越少、越稳。
+
+**建议**：同材料在其它链（ke-dft-cpu / opt-dft-cpu / band-dft-cpu / elastic-dft-cpu）
+已有优化好的 `CONTCAR` 时，把它复制成材料根 `POSCAR` 作各技能 S1 起始：
+
+```bash
+# 例：复用 ke-dft-cpu 的优化结构（ke 链先跑完的前提下；原始 POSCAR 先备份）
+cp <材料>/POSCAR <材料>/POSCAR_raw            # 只备一次
+cp <材料>/ke-dft-cpu/result/step1_opt/CONTCAR <材料>/POSCAR
+```
+
+- **kl-dft-cpu 的 `reuse_structure.py` 自动做这件事**：`python3 reuse_structure.py <材料名>`，
+  按 ke → opt → band → elastic 顺序找候选 CONTCAR（候选目录见脚本 `_STEP1_CANDS`），
+  命中就复制成材料根 POSCAR，覆盖前备份 `POSCAR_raw`。
+- **影响面**：材料根 POSCAR 是所有技能（ke/opt/band/elastic/kl）共用的初始结构，
+  覆盖后未跑 S1 的技能都会从复用结构开始（已跑完 S1 的不受影响）。
+- **注意**：复用只是给 S1 更好的起始点，**不跳过 S1**；S1 仍会完整弛豫（MACE 势）。
+
 ## 模型
 
 看 `templates/mace/README.md`。一句话：模型在超算上放一份（`push_model.sh`），

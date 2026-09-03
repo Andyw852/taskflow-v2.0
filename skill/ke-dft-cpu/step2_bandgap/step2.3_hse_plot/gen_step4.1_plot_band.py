@@ -803,14 +803,14 @@ def main():
               "extrema_marked": marked,
               "inputs_copied": copied,
               "files": {"dat": str(dat), "klabels": str(klab), "png": str(png),
-                        "summary": str(out / f"{args.prefix}_summary.json")},
+                        "summary": str(out / "band_summary.json")},
               "labels_found": [t[1] for t in ticks],
               "kpath_source": axis_src,
               "kpath_method": kmeta.get("method"),
               "kpath_note": kmeta.get("note")}
 
     # 5) 摘要同时落盘，方便 agent/人工事后查阅
-    (out / f"{args.prefix}_summary.json").write_text(
+    (out / "band_summary.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 

@@ -495,8 +495,13 @@ def main():
         sig_test.append(np.max(np.std(fs, axis=0), axis=1).max())
     med = float(np.median(sig_train))
     extrap = float(np.mean([1.0 if s > 3 * med else 0.0 for s in sig_test]))
+    # [FIX-COMMITTEE] #9 改 informational：分母只有 len(test_atoms)≈14 帧，取值只能
+    # 是 0/7.1/14.3/21.4…%，5% 阈值等价于「必须 0 帧超阈」= 0% 闸，而 0% 外推率
+    # 本身就是「指标失效」的信号（README §9.1 ③）。分辨率与阈值不匹配，不能靠调
+    # 阈值救。复活条件（写 TODO）：① 外推率构型集扩到 ≥100（不花 DFT，committee
+    # σ_F 只要模型预测，拿未标注 rattle 构型算）；② 换连续量 σ_F 分布 P95/训练中位。
     gate("#9 committee σ_F 外推率 < 5%", "%.1f%%" % (extrap * 100), "5%",
-         extrap < 0.05, note="训练集中位 σ_F=%.3f" % med)
+         extrap < 0.05, required=False, note="informational（分母仅 %d 帧，分辨率不足）；训练集中位 σ_F=%.3f。复活条件见 benchmark.py 注释" % (len(sig_test), med))
     print("[OK] 测试集/committee：%.1f s" % (time.time() - t))
 
     # ================================================================

@@ -61,6 +61,13 @@ TWO_D_MODE = "auto"
 #   数值    手填（Å）。已知对应体相层间距时优先用这个。
 # 无论哪种，最终用的 c/t/取法/倍数都会落盘到 step8_amset/2d_correction.json。
 LAYER_THICKNESS = "vdw"
+# patch_layer_thickness_conf：LAYER_THICKNESS 可从 step.conf 覆盖（出厂默认 "vdw"）。
+#   SS/LS 超晶格在 project_setting/templates/step8_amset/step.conf 写 LAYER_THICKNESS = 6.73
+#   （照文献取 CrS2 6.53 / CrSe2 6.94 的平均，非本结构 vdW 自动值 6.97）。
+STEP = "step8_amset"
+SPEC = {
+    "LAYER_THICKNESS": (LAYER_THICKNESS, "str"),
+}
 # 2D 时给 settings.yaml 写 free_carrier_screening: true
 FREE_CARRIER_SCREENING_2D = True
 # patch_2d_dielec：2D 介电取面内 (εx+εy)/2 并扣真空 ε^m=1+(L/t)(ε_sup-1)
@@ -687,6 +694,12 @@ def _guard_not_0d(cwd, step_name, why):
 
 def main():
     cwd = Path.cwd()
+    global LAYER_THICKNESS
+    if (cwd / "step.conf").is_file():
+        try:
+            LAYER_THICKNESS = stepconf.load(SPEC, STEP, str(cwd))["LAYER_THICKNESS"]
+        except SystemExit:
+            pass  # step.conf 缺失或 STEP 串了时保持出厂默认 "vdw"
     _guard_not_0d(cwd, "step8_amset",
                   "载流子输运建立在能带色散和布里渊区积分上，孤立分子两者都没有")
     out = cwd / OUTDIR_NAME

@@ -226,8 +226,11 @@ def cmd_prep(cfg):
     # 存成自带力的 phono3py_params.yaml：后面的拟合直接读它，不再走
     #   `phono3py --cf3` + FORCES_FC3（那条路要求文件数==位移数，缺一帧就错位）。
     ph3.save(str(out / "phono3py_params.yaml"))
-    print("[OK] phono3py_params.yaml：%d 帧力已写入（已扣平衡帧；另 %d 个 cutoff 外对填 0）"
-          % (len(forces), n_total - len(forces)))
+    if is_rand:
+        print("[OK] phono3py_params.yaml：%d 帧力已写入（已扣平衡帧）" % len(forces))
+    else:
+        print("[OK] phono3py_params.yaml：%d 帧力已写入（已扣平衡帧；另 %d 个 cutoff 外对填 0）"
+              % (len(forces), n_total - len(forces)))
 
     ph3 = _load_ph3_with_forces(out / "phono3py_disp.yaml")
     write_vasp(str(out / "POSCAR"), ph3.unitcell, direct=True)     # 原胞

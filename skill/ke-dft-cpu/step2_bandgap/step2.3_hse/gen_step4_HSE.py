@@ -110,7 +110,7 @@ SUBMIT_OVERRIDE = {
 # 若想按“step3 完整路径点数”而非本目录实际点数来判定，把 --line-density 0
 # 关闭降采样、且不切片即可（此时本目录点数 = 完整路径点数）。
 KPTS_TOTAL_THRESHOLD  = 100     # 阈值：总 k 点数【严格大于】此值才放大
-NTASKS_PER_NODE_LARGE = 192    # 超阈值时写入 submit.sh 的 --ntasks-per-node
+NTASKS_PER_NODE_LARGE = 48     # 超阈值时写入 submit.sh 的 --ntasks-per-node
 
 # ---- HSE 阶段的 DFT+U 处理（三态开关）----
 # step1/2/3 若加了 U（LDAU*），会一路继承到 step3 INCAR。到 HSE 这一步怎么办，

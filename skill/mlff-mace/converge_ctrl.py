@@ -77,9 +77,15 @@ def main():
     # 就不要再写 expand 计划误导下一步。
     _at_last_gen = (a.gen >= a.max_gen)
 
-    if rmse < a.rmse_max:
+    # [FIX-REQUIRED] required 闸必须影响 status：主闸过但 required 闸有失败
+    # 判 fail（S9 不发布），不能只靠主闸就 pass——否则 required 标记是装饰。
+    if rmse < a.rmse_max and not gates_failed:
         status = "pass"
-        reason = "声子 RMSE %.3f THz < RMS_MAX=%.2f" % (rmse, a.rmse_max)
+        reason = "声子 RMSE %.3f THz < RMS_MAX=%.2f，required 闸全过" % (rmse, a.rmse_max)
+    elif rmse < a.rmse_max:
+        status = "fail"
+        reason = "声子 RMSE %.3f THz < RMS_MAX=%.2f 但 required 闸未全过：%s" % (
+            rmse, a.rmse_max, "、".join(gates_failed))
     elif plateau:
         status = "halt_not_data_limited"
         reason = ("学习曲线已平（CURVE_TOL=%.2f），加数据没用。排查清单：\n  - %s"

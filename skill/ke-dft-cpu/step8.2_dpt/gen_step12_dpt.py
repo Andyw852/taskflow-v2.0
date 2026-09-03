@@ -32,7 +32,10 @@ from pathlib import Path
 # =========================== 可改参数区 ===========================
 # [SKILL_REV] 版本戳：写进 dpt_result.json，铺开时验证跑的是哪份 skill 副本。
 # 每次改本脚本逻辑后更新（如 "2026-08-29-nstep-linear"）。
-_SKILL_REV = "2026-08-29-ionrelax-nstep"
+_SKILL_REV = "2026-08-31-rscan"
+# [R-SCAN] 强制选点壳层 NSTEP（None=自动 2/3/4/5；填 2/3/4/5=只试该值，做 R-scan 用）。
+# 用法：改 FORCE_NSTEP → tf -p <材料> -j S8.2_dpt retry + start，对比 dpt_result.json 的 m_d 与 m_provenance 里的 R。
+FORCE_NSTEP = None
 OUTDIR_NAME = "step8.2_dpt"
 UNIFORM_DIR = "step3_uniform"
 ELASTIC_DIR = "step6_elastic"
@@ -349,6 +352,13 @@ def get_E1(cwd, carrier):
         if E1_SOURCE == "vac":
             ev = be[carrier].get("E1_vac_iso_eV")
             if ev is None or abs(float(ev)) == 0:
+                # [3D 兜底] 非 2D 体系无真空对齐，vac 口径本就不适用，
+                # 自动用 amset 口径（E1_iso_eV，⟨|D|⟩），不属于静默降级。
+                if _read_dim(cwd) != "2d":
+                    _e1a = float(be[carrier].get("E1_iso_eV") or 0)
+                    if _e1a > 0:
+                        return round(abs(_e1a), 4), (
+                            "band_edges.json 带边(amset 口径,%s 无真空)" % _read_dim(cwd))
                 return None, _vac_missing_msg(be, carrier, "E1_vac_iso_eV")
             return round(abs(float(ev)), 4), (
                 "band_edges.json 真空对齐(n=%d)面内对角" % n)
@@ -682,7 +692,8 @@ def get_effective_mass_aniso(cwd, carrier, is_2d):
         need_lin = not _is_high_sym(kfrac[k0])
 
         sel = Rused = n_shell = NSTEP_used = None
-        for NSTEP in (2, 3, 4, 5):
+        _nstep_iter = (FORCE_NSTEP,) if FORCE_NSTEP else (2, 3, 4, 5)
+        for NSTEP in _nstep_iter:
             # -0.1 留余量：整数步恰好卡在下一壳层边界，浮点噪声会把下一壳层的
             # 个别点纳入。1.9 步≈0.302 落在第二/三壳层之间。
             Rmax = (NSTEP - 0.1) * float(step_cart.min())

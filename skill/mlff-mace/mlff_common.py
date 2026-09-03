@@ -287,6 +287,10 @@ SHARED_PARAM_SPEC = {
     "FORCE_MH_FT_LR": (True, "bool"),    # [FIX-LR] true=强制覆盖 MACE 多头微调 LR
                                           # （LR=1e-3 时 pt_head 发散，seed 间散布大）；
                                           # false=用 MACE 官方策略（诊断最优）
+    "MULTIHEAD": (False, "bool"),         # [FIX-MH] 单材料专用势默认 naive 单头；
+                                          # 多头 replay 有 220:1 淹没 + 采样无种子两个坑
+    "NUM_SAMPLES_PT": (30000, "int"),     # [FIX-MH] replay 采样数；多头时按 10:1 偏向
+                                          # 目标数据设（百帧级 ~1500），别用 30000
     "STRESS_WEIGHT_3D": (1.0, "float"),   # autoplex stress_weight=1.0
     "VALID_FRACTION": (0.10, "float"),
     "DEVICE": ("auto", "str"),

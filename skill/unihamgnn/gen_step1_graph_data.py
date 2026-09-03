@@ -30,7 +30,10 @@ SAVE_NON_SOC = "graph_data_non_soc"
 SAVE_SOC = "graph_data_soc"
 
 
-def render_driver(openmx_pp, mpirun, nproc, soc):
+def render_driver(openmx_pp, mpirun, nproc, soc, mkl_lib=""):
+    mkl_export = ('export LD_LIBRARY_PATH="%s:${LD_LIBRARY_PATH:-}"' % mkl_lib
+                  if mkl_lib else
+                  "# MKL_LIB 未设置：openmx_postprocess 走系统默认库搜索路径")
     soc_block = ""
     if soc:
         soc_block = """
@@ -48,6 +51,7 @@ graph_data_gen --config graph_data_gen_soc.yaml
 set -euo pipefail
 cd "$(dirname "$0")"
 export CUDA_VISIBLE_DEVICES=""
+{mkl_export}
 
 # openmx_postprocess 算完会写 overlap.scfout，但个别体系 MPI 收尾会卡住不退出；
 # 这里后台跑 + 轮询 scfout，拿到 scfout 就 SIGKILL 掉 mpirun 继续。
@@ -74,7 +78,7 @@ graph_data_gen --config graph_data_gen.yaml
 # ---------- 完成标记 ----------
 {soc_summary}
 """.format(non_soc=NON_SOC_DIR, mpirun=mpirun, nproc=nproc, pp=openmx_pp,
-           soc_block=soc_block, soc_summary=soc_summary)
+           soc_block=soc_block, soc_summary=soc_summary, mkl_export=mkl_export)
 
 
 def main():
@@ -145,7 +149,8 @@ def main():
             sys.exit("[ERROR] 缺 %s —— 本步 gen_need 里漏了它？" % f)
         shutil.copyfile(str(here / f), str(out / f))
 
-    driver = render_driver(openmx_pp, conf["MPIRUN"] or "mpirun", conf["NPROC"], soc)
+    driver = render_driver(openmx_pp, conf["MPIRUN"] or "mpirun", conf["NPROC"], soc,
+                            conf["MKL_LIB"] or "")
     (out / "run_graph_data.sh").write_text(driver, encoding="utf-8")
     os.chmod(str(out / "run_graph_data.sh"), 0o755)
 
