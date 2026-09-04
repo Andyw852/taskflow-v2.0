@@ -943,8 +943,9 @@ def cmd_clean(cfg, data, proj, job, yes, purge_config=False):
     if job and not proj:  # v3.11：跨材料只 clean 指定步骤
         tgts = [(m, s) for _, m, s in step_targets(data, job)
                 if s.get("exists") or s.get("job")]
+        tgts = _filter_protected(tgts, "clean")
         if not tgts:
-            print("该步骤在所有材料下都无需清理。")
+            print("该步骤在所有材料下都无需清理（受保护材料已跳过）。")
             return 0
         njob = sum(1 for _, s in tgts if s.get("job"))
         for _fm, _fs in tgts:                        # kls4
@@ -977,6 +978,9 @@ def cmd_clean(cfg, data, proj, job, yes, purge_config=False):
         return fails
     if proj and job:  # 步骤级
         t, m = find_material(data, proj)
+        if _is_protected(m):
+            _protect_refuse(m, "clean")
+            return 1
         s = find_step(m, job)
         if not s.get("exists") and not s.get("job"):
             print("%s[%s]: 目录不存在且无作业，无需清理。" % (m["name"], s["label"]))
@@ -1016,6 +1020,10 @@ def cmd_clean(cfg, data, proj, job, yes, purge_config=False):
         mats = [(t["key"], m) for t in data["types"] for m in t["materials"]]
     todo = [(k, m, [s["job"] for s in m["steps"] if s.get("job")])
             for k, m in mats]
+    todo = _filter_protected(todo, "clean")
+    if not todo:
+        print("没有可 clean 的材料（受保护材料已跳过）。")
+        return 0
     njob = sum(len(j) for _, _, j in todo)
     for _fk, _fm, _fj in todo:                       # kls4：逐个列出会被毁的扇出步骤
         for _fs in _fm.get("steps") or []:
@@ -1493,6 +1501,53 @@ def cmd_start(cfg, data, mname, jname, force, incl_scancel=False):
     return sum(r or 0 for r in results)
 
 # ===== cmd_stop (原 L3976-L4065) =====
+# ---------------------------------------------------------------------------
+# 受保护结果目录（代码层硬拦截）：材料目录存在 AGENTS-PROTECTED.md 即只读保护。
+# clean/rerun 等会删产物的命令在动手前先查这里，命中即拒绝（无论 -y/-f）。
+def _is_protected(m):
+    lp = (m or {}).get("lpath") or ""
+    if lp and os.path.isfile(os.path.join(lp, "AGENTS-PROTECTED.md")):
+        return True
+    ps = ((m or {}).get("ps") or {}).get("dir")
+    if ps and os.path.isfile(os.path.join(ps, "setting.yaml")):
+        try:
+            from tfpkg import _load_yaml_file
+            _d = _load_yaml_file(os.path.join(ps, "setting.yaml")) or {}
+        except Exception:
+            _d = {}
+        if _d.get("protected"):
+            return True
+    return False
+
+def _protect_refuse(m, verb):
+    print("%s: 拒绝 %s —— 该目录受保护（AGENTS-PROTECTED.md / protected:true）。"
+          % (m.get("name") or "?", verb))
+    print("       保护的是已完成并确认的工作流结果；确需操作请先移除标记文件"
+          "或人工确认后重试。")
+
+def _filter_protected(items, verb):
+    """剔除受保护材料，返回剩余。兼容三种元组形态：
+    (t, m[, s]) / (k, m, jobs) —— 材料在第 2 位；
+    (m, s) —— 材料在第 1 位（跨材料步骤 clean 的 tgts）。
+    材料对象必有 lpath；步骤/其它 dict 无 lpath（只有 name），靠 lpath 区分。"""
+    kept, nskip = [], 0
+    for it in items:
+        m = None
+        if len(it) >= 2:
+            a, b = it[0], it[1]
+            if isinstance(b, dict) and "lpath" in b:
+                m = b
+            elif isinstance(a, dict) and "lpath" in a:
+                m = a
+        if m is not None and _is_protected(m):
+            _protect_refuse(m, verb)
+            nskip += 1
+        else:
+            kept.append(it)
+    if nskip:
+        print("（已跳过 %d 个受保护材料）" % nskip)
+    return kept
+
 def cmd_stop(cfg, data, mname, jname, yes):
     from tfpkg import find_material, find_step, log_action
     if jname and not mname:  # v3.11：取消全部材料的指定步骤作业
@@ -1811,8 +1866,9 @@ def _cmd_rerun(cfg, data, mname, jname, yes, force=False):
             todo.append((t, m, s))
         for msg in skip:
             print("跳过 %s" % msg)
+        todo = _filter_protected(todo, "rerun")
         if not todo:
-            print("没有可 rerun 的目标。")
+            print("没有可 rerun 的目标（受保护材料已跳过）。")
             return 0
         if not yes:
             ans = input("rerun 全部材料的步骤 %s（%d 个目标：删除并重新生成提交）？ [y/N] "
@@ -1826,6 +1882,10 @@ def _cmd_rerun(cfg, data, mname, jname, yes, force=False):
         return fails
     if not mname:
         mats = [(t, m) for t in data["types"] for m in t["materials"]]
+        mats = _filter_protected(mats, "rerun")
+        if not mats:
+            print("没有可 rerun 的材料（受保护材料已跳过）。")
+            return 0
         if not yes:
             ans = input("rerun 全部 %d 个材料（各自清空整个工作目录，保留 POSCAR，"
                         "含本地 result，从头重新生成）？ [y/N] "
@@ -1838,6 +1898,9 @@ def _cmd_rerun(cfg, data, mname, jname, yes, force=False):
             mats, desc="rerun")
         return sum(0 if r else 1 for r in results)
     t, m = find_material(data, mname)
+    if _is_protected(m):
+        _protect_refuse(m, "rerun")
+        return 1
     if jname:
         s = find_step(m, jname)
         if not guard_predecessors(m, s, force=False):
@@ -1850,6 +1913,9 @@ def _cmd_rerun(cfg, data, mname, jname, yes, force=False):
 
 # ===== rerun_project (原 L4324-L4366) =====
 def rerun_project(cfg, t, m, yes):
+    if _is_protected(m):
+        _protect_refuse(m, "rerun")
+        return False
     from tfpkg import log_action, run_remote
     """整材料 rerun：清空整个 <材料>/<技能> 远程工作目录（只保留 POSCAR）
     + 删本地 log/result，再从第一步从头生成提交。彻底从零，不留任何旧步骤

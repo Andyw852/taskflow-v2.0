@@ -31,7 +31,8 @@ defaults:
 
 fetch_files: [POSCAR, CONTCAR, SPOSCAR, workflow_method.txt, relax_summary.json,
               forces_summary.json, phonon_summary.json, band-dft-cpu.yaml, submit.sh,
-              mace_relax.log, mace_forces.log, phonon.log, queue.out, queue.err]
+              mace_relax.log, mace_forces.log, phonon.log, queue.out, queue.err,
+              phonon_band_full.png, phonon_band_lowfreq.png, phonon_band_summary.json]
 
 steps:
   - {seq: 1, name: step1_mace_relax, label: S1_relax,
@@ -52,6 +53,16 @@ steps:
      gen: gen_step3_phonon.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
                 phonon_fit_driver.py, submit_mace_relax.tpl]}
+
+# S4 声子谱绘图（登录节点 run: gen，不提交作业）：读 step3_phonon/band-dft-cpu.yaml 画
+#   全范围 + 0~10 THz 低频放大两张（共享脚本 _common/mace/plot_phonon_band.py）。
+optional_steps:
+  phonon_plot:
+    default: true
+    steps:
+      - {seq: 4, name: phonon_band_plot, label: S4_plot, after: step3_phonon,
+         gen: "plot_phonon_band.py", check: plot, run: gen, gen_need: [],
+         done_marker: phonon_band_summary.json, fetch_all: true}
 
 requires:
   python: [mace-torch, torch, ase, phonopy, symfc, spglib, numpy, alm]

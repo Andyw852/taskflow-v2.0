@@ -36,7 +36,8 @@ fetch_files: [POSCAR, CONTCAR, workflow_method.txt, klmace_params.txt,
               kappa_summary.json, band-dft-cpu.yaml, BORN, phono3py_disp.yaml,
               phono3py_params.yaml, FORCES_FC3, FORCES_FC2,
               submit.sh, mace_relax.log, mace_forces.log, fc_build.log,
-              phono3py_kappa.log, queue.out, queue.err]
+              phono3py_kappa.log, queue.out, queue.err,
+              phonon_band_full.png, phonon_band_lowfreq.png, phonon_band_summary.json]
 
 steps:
   - {seq: 1, name: step1_mace_relax, label: S1_relax,
@@ -57,18 +58,30 @@ steps:
      hpc: jzzn,
      gen: gen_step3_fc.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
-                fc_fit_driver.py, submit_fc.tpl]}
+                fc_fit_driver.py, submit_fc.tpl, submit_fc_gpu.tpl]}
 
   - {seq: 4, name: step4_kappa, label: S4_kappa,
      check: marker, marker: 'kappa_summary.json:"KAPPA_DONE": true',
      hpc: jzzn,
      gen: gen_step4_kappa.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
-                submit_p3py.tpl, vdw_radii.py]}
+                kappa_validation.py, submit_p3py.tpl, submit_shengbte_klm.tpl,
+                vdw_radii.py]}
+
+# S5 声子谱绘图（登录节点 run: gen，不提交作业）：读 step3_fc/band-dft-cpu.yaml 画
+#   全范围 + 0~10 THz 低频放大两张（共享脚本 _common/mace/plot_phonon_band.py）。
+optional_steps:
+  phonon_plot:
+    default: true
+    steps:
+      - {seq: 5, name: phonon_band_plot, label: S5_plot, after: step3_fc,
+         hpc: jzzn,   # band-dft-cpu.yaml 在 S3_fc(jzzn) 的 step3_fc/，画图须在同一集群执行
+         gen: "plot_phonon_band.py", check: plot, run: gen, gen_need: [],
+         done_marker: phonon_band_summary.json, fetch_all: true}
 
 requires:
   python: [mace-torch, torch, ase, phonopy, phono3py, symfc, pheasy, spglib, numpy, h5py]
   # 实际 conda 环境按集群默认注入（setting/<hpc>.yaml 的 conda_env：jzzn=mace_cpu venv、
   # 3090=mace-gpu、a800=mace）。此处 conda 字段仅作展示。
   conda: mace
-  exe: [phono3py]
+  exe: [phono3py, ShengBTE]  # phono3py(默认) / ShengBTE(SOLVER=shengbte，见 README)
