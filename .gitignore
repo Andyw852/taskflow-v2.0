@@ -73,3 +73,6 @@ rewrite*.py
 fix_*.sh
 dl_*.sh
 processes_local.f90
+
+# 3090 集成测试残留 step.conf（不进仓库）
+step.conf.sb3090

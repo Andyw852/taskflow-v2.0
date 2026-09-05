@@ -68,6 +68,12 @@ def write_incar(out, vals, comment_lines=()):
     for k in order:
         if k in vals and vals[k] not in (None, ""):
             lines.append("%-8s = %s" % (k, vals[k]))
+    # [FIX-Ba1C20] order 白名单之外的自定义键（如 [incar.final] 里的 AMIX/BMIX）
+    # 追加写出——否则会被白名单静默丢弃（"改了像没改"，无法靠 [incar.final]
+    # 注入 SCF 参数）。
+    for k, v in vals.items():
+        if k not in order and v not in (None, ""):
+            lines.append("%-8s = %s" % (k, v))
     Path(out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 

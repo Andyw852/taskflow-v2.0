@@ -1368,7 +1368,11 @@ _run_stage () {
         return 1
     fi
     : > ".${tag}.done"
-    if [ "${pass}" = "1" ] && ! _converged; then
+    # [FIX-hf] 段收敛也接力 CONTCAR：原 `&& ! _converged` 在 EARLY_EXIT=0（mlff
+    # 必须 0，防 a 固定胞提前停跳过 b 变胞）时收敛段不接力 → 下段用旧 POSCAR 倒退
+    # 重跑（GaAs: b 变胞到 5.749 后 c 从 5.653 重新开始 → 负压 FAIL）。
+    # EARLY_EXIT=1 时收敛段会被下段开头跳过，接力与否无影响——统一接力安全。
+    if [ "${pass}" = "1" ]; then
         if ! _contcar_ok; then
             echo "[run_relax] ${desc} 的 CONTCAR 缺失/残缺，无法接力下一段" >&2
             return 1

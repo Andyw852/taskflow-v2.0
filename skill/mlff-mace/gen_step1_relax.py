@@ -28,8 +28,8 @@ TIGHT_STAGE_SPEC = {
     "b": {"_desc": "放开胞弛豫（CG），力判据 -0.001",
           "ISIF": "3", "IBRION": "2", "POTIM": "0.2",
           "EDIFFG": "-0.001", "NSW": "300"},
-    "c": {"_desc": "准牛顿收尾（RIBION=1），力判据 -0.001",
-          "ISIF": "3", "IBRION": "1", "POTIM": "0.2",
+    "c": {"_desc": "固定胞收尾（原 ISIF=3 变胞在 hf VASP 6.4.3 上从 primitive 晶格拉成惯用胞体积跑飞触发 FEXCP；b 段已变胞到平衡，c 只精收原子），力判据 -0.001",
+          "ISIF": "2", "IBRION": "1", "POTIM": "0.2",
           "EDIFFG": "-0.001", "NSW": "200"},
 }
 
