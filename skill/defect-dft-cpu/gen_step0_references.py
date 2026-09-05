@@ -18,7 +18,7 @@ STEP = "step0_references"
 
 # 元素相 -> 元素符号（能量归一化到每原子）
 ELEMENT_EL = {"Pb_fcc": "Pb", "Sn_beta": "Sn", "Sb_rhombo": "Sb",
-              "Bi_rhombo": "Bi", "Te_trig": "Te"}
+              "Bi_rhombo": "Bi", "Te_trig": "Te", "Si_diamond": "Si"}
 # 二元相 -> 式量信息（能量归一化到每式量）
 BINARY = {
     "PbTe_rs": {"name": "PbTe",   "formula": {"Pb": 1, "Te": 1}, "fu": 1},
@@ -77,17 +77,21 @@ def main():
                 subprocess.run(["sbatch", "submit.sh"], cwd=str(d))
 
     # 2) 检查收敛 + 收集能量
+    #    只要求「进 references_energy.json 的相」（ELEMENT_EL/BINARY）收敛；
+    #    竞争相（如 SnSb）能量不进输出，不阻塞 all_done。
     energies = {}
     all_done = True
     for name in PHASES:
         d = posdir / name
         e = ref_energy(str(d / "OUTCAR"))
+        required = (name in ELEMENT_EL or name in BINARY)
         if e is None:
-            print("  %-11s 尚未出结果" % name)
-            all_done = False
+            print("  %-11s 尚未出结果%s" % (name, "" if required else "（竞争相，不阻塞）"))
+            if required:
+                all_done = False
             continue
         conv = "reached required accuracy" in open(str(d / "OUTCAR"), errors="ignore").read()
-        if not conv:
+        if not conv and required:
             all_done = False
         energies[name] = e
         print("  %-11s E0=%.6f eV  收敛=%s" % (name, e, conv))

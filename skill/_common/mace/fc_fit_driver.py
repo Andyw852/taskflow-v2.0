@@ -15,6 +15,41 @@ from pathlib import Path
 import numpy as np
 
 
+
+def export_shengbte(yaml, prim_src=None):
+    """拟合完成后把力常数导成 ShengBTE 格式，放 step3_fc/shengbte/。
+
+    两条拟合路径统一出口：
+      - pheasy（--full_ifc）已直接写 FORCE_CONSTANTS/FORCE_CONSTANTS_3RD（ShengBTE 文本，
+        3RD 就是块格式、2ND 即 phonopy full 格式）→ 搬进 shengbte/ 并改名 2ND。
+      - phono3py（symfc/alm）只写 fc2/fc3.hdf5 → 用 hiphive 读 hdf5 转 ShengBTE 格式。
+    ShengBTE 格式定义见 hiphive input_output/shengBTE.py；数值正确性已用 Si 实测
+    （ShengBTE RTA κ 与 phono3py 一致）。"""
+    import shutil
+    from pathlib import Path
+    sb = Path("shengbte"); sb.mkdir(exist_ok=True)
+    # 情形 A：pheasy 已产出文本（同目录 FORCE_CONSTANTS + FORCE_CONSTANTS_3RD）
+    if Path("FORCE_CONSTANTS").is_file() and Path("FORCE_CONSTANTS_3RD").is_file():
+        shutil.copyfile("FORCE_CONSTANTS", str(sb / "FORCE_CONSTANTS_2ND"))
+        shutil.copyfile("FORCE_CONSTANTS_3RD", str(sb / "FORCE_CONSTANTS_3RD"))
+        print("[OK] shengbte/ <- pheasy 文本导出（FORCE_CONSTANTS/3RD）")
+        return
+    # 情形 B：phono3py 路径，从 hdf5 用 hiphive 转换
+    import ase, h5py
+    import phono3py
+    from hiphive import ForceConstants
+    ph3 = phono3py.load(yaml, produce_fc=False, log_level=0)
+    prim, sc = ph3.phonon_primitive, ph3.supercell
+    fc2 = np.asarray(h5py.File("fc2.hdf5", "r")["fc2"][()])
+    fc3 = np.asarray(h5py.File("fc3.hdf5", "r")["fc3"][()])
+    prim_ase = ase.Atoms(symbols=prim.symbols, cell=prim.cell,
+                         scaled_positions=prim.scaled_positions, pbc=True)
+    sc_ase = ase.Atoms(symbols=sc.symbols, cell=sc.cell,
+                       scaled_positions=sc.scaled_positions, pbc=True)
+    fcs = ForceConstants.from_arrays(sc_ase, fc2_array=fc2, fc3_array=fc3)
+    fcs.write_to_phonopy(str(sb / "FORCE_CONSTANTS_2ND"), format="text")
+    fcs.write_to_shengBTE(str(sb / "FORCE_CONSTANTS_3RD"), prim_ase)
+    print("[OK] shengbte/ <- fc2/fc3.hdf5（hiphive 转换导出）")
 def main():
     cfg = json.loads(Path("fit_config.json").read_text(encoding="utf-8"))
     yaml = cfg["yaml"]
@@ -56,6 +91,7 @@ def main():
         if not os.path.isfile(f):
             sys.exit("[ERROR] 没生成 %s" % f)
     print("[OK] fc2.hdf5 / fc3.hdf5")
+    export_shengbte(yaml)
 
     # ---- 2. 虚频闸（phonopy API）----
     rc = subprocess.run("python _phonon_gate.py", shell=True,

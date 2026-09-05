@@ -79,3 +79,22 @@ cp <材料>/ke-dft-cpu/result/step1_opt/CONTCAR <材料>/POSCAR
 
 看 `templates/mace/README.md`。一句话：模型在超算上放一份（`push_model.sh`），
 `MACE_MODEL_DIR` 指过去，所有材料共用。
+
+## ShengBTE 求解器（可选，替代默认 phono3py）
+
+step4_kappa 的 `SOLVER` 支持 `phono3py`（默认）与 `shengbte`（三声子 BTE）：
+
+- **shengbte 力常数来源**：step3_fc 拟合完成后统一导出到 `step3_fc/shengbte/`
+  （`FORCE_CONSTANTS_2ND/3RD`，ShengBTE 格式）。两条拟合路径都覆盖：
+  - `FIT_SOFTWARE=pheasy`：pheasy 的 `--full_ifc` 直接写 ShengBTE 文本 → 搬运改名。
+  - `FIT_SOFTWARE=phono3py`（symfc/alm）：只出 hdf5 → fc_fit_driver 用 hiphive
+    从 fc2/fc3.hdf5 转 ShengBTE 格式（格式已验证：Si RTA κ 与 phono3py 一致）。
+- **运行**：`SOLVER=shengbte` + step4 step.conf 填 `SHENGBTE_EXE`（按集群绝对路径）：
+  - jzzn = `/public/home/wangchao/software/sousaw-shengbte-aocl/ShengBTE`（CPU/AOCL）
+  - 3090 = `/home/wangchaoyue852/software/taskflow/shengbte-gpu/ShengBTE`（GPU fork，~4.6x）
+- **3090 GPU 注意**：ShengBTE GPU 用 2020 CUDA fork（phonopy fc2 输入已验证正确）。
+  FourPhonon v1.3 官方 OpenACC GPU 版对 phonopy fc2 有 bug（κ 错 67-71x）勿用；
+  但它的 CPU 版（`fourphonon-v13/bin_cpu`）是完整超集（含四声子）。
+- **限制**：shengbte 只支持单套网格（`MESH_SCAN` 留空）；NAC 用 step3 的 BORN（MACE 势
+  给不出 Born 电荷，需外部 DFPT 结果，极性材料加 `NAC_BORN`）。默认 RTA
+  （`convergence=F`），迭代 CONV 内存/耗时更大，kl-mace 链先走 RTA。

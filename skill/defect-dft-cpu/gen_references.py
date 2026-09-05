@@ -30,6 +30,7 @@ PHASES = {
     "SnTe_rs":   {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半导体"},
     "Sb2Te3":    {"ismear": 0, "sigma": 0.05, "kmesh": (8, 8, 2),  "kind": "半导体"},
     "Bi2Te3":    {"ismear": 0, "sigma": 0.05, "kmesh": (8, 8, 2),  "kind": "半导体"},
+    "Si_diamond": {"ismear": 0, "sigma": 0.05, "kmesh": (12, 12, 12), "kind": "半导体"},
 }
 
 INCAR = """SYSTEM = ref {{name}}

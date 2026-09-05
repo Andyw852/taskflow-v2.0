@@ -2,8 +2,18 @@
 # -*- coding: utf-8 -*-
 """gen_step4_kappa.py —— BTE 晶格热导率（step4_kappa），提交计算节点。
 
-从 step3_fc 取 fc2/fc3（+BORN），按 klmace_params 的 MESH 组 phono3py-load --br 命令，
-渲染提交模板。作业跑完就地抽 κ 张量写 kappa_summary.json（marker: KAPPA_DONE）。
+求解器（step.conf 的 SOLVER）：
+  phono3py（默认）：从 step3_fc 取 fc2/fc3.hdf5（+BORN），按 klmace_params 的 MESH 组
+      phono3py-load --br/--lbte 命令，渲染提交模板。
+  shengbte       ：从 step3_fc/shengbte/ 取 FORCE_CONSTANTS_2ND/3RD（step3 拟合后统一导出，
+      见 fc_fit_driver.py），写 ShengBTE CONTROL，渲染提交模板跑 ShengBTE 三声子 BTE。
+
+作业跑完就地抽 κ 张量写 kappa_summary.json（marker: KAPPA_DONE）。
+
+MESH_SCAN：分号分隔的多套 q 网格，例如 "16 16 16; 20 20 20; 24 24 24"。
+DFT 路线不敢做的收敛测试，在这条链上几乎白送——**κ 对 q 网格的收敛性是这类结果最
+常被审稿人问的一条**，顺手扫出来比事后补便宜得多。扫描时每套网格的 κ 都进 summary。
+（MESH_SCAN 仅 phono3py 支持；shengbte 单套网格。）
 
 MESH_SCAN：分号分隔的多套 q 网格，例如 "16 16 16; 20 20 20; 24 24 24"。
 DFT 路线不敢做的收敛测试，在这条链上几乎白送——**κ 对 q 网格的收敛性是这类结果最
@@ -38,6 +48,11 @@ SPEC = {
     "ISOTOPE": (True, "bool"),
     "BTE": ("rta", "str"),              # rta（--br）| lbte（--lbte，直接解，贵得多）
     "EXTRA_ARGS": ("", "str"),          # 原样附加，如 "--boundary-mfp 1e6" / "--write-gamma"
+    # ---- 求解器（phono3py 默认 | shengbte）----
+    "SOLVER": ("phono3py", "str"),      # phono3py（--br/--lbte，默认）| shengbte（三声子 BTE）
+    # shengbte 专属（phono3py 忽略）
+    "SCALEBROAD": (0.1, "float"),       # shengbte 高斯展宽系数（更小更快但可能漏过程）
+    "SHENGBTE_EXE": ("ShengBTE", "str"),# shengbte 可执行（按集群填绝对路径，见 kl-dft README）
     # phono3py 网格点并行（--gp/--write-gamma/--read-gamma）：>=2 时把 q 网格均分 N 份，
     #   N 个 --write-gamma 作业并行算散射率，再 --read-gamma 收拢出 κ。单机多核白拿的加速，
     #   BTE 网格加密后尤其值得（DFT 路线同样适用）。=0/1 关闭，走单作业。
@@ -220,6 +235,122 @@ def meshes(conf, params):
     return [conf["MESH_OVERRIDE"] or params.get("MESH") or "24 24 24"]
 
 
+
+
+def _shengbte_control_from_poscar(poscar, SUPERCELL, ngrid, tmin, tmax, tstep,
+                                  scalebroad, isotope, use_nac, out_path):
+    """从 POSCAR(原胞) 写 ShengBTE CONTROL。格式对齐 kl-dft lattice_kappa._write_shengbte_control。"""
+    from ase.io import read as ase_read
+    from ase.data import chemical_symbols as _cs
+    atoms = ase_read(str(poscar), format="vasp")
+    cell = atoms.cell
+    numbers = atoms.numbers; unique = sorted(set(numbers))
+    syms = [_cs[z] for z in unique]; kd = {z: i + 1 for i, z in enumerate(unique)}
+    types = [kd[z] for z in numbers]; spos = atoms.get_scaled_positions(wrap=True)
+    scell = [int(x) for x in SUPERCELL]; ng = [int(x) for x in ngrid.split()]
+    L = ["&allocations", "  nelements=%d," % len(unique), "  natoms=%d," % len(atoms),
+         "  ngrid(:)=%d %d %d" % (ng[0], ng[1], ng[2]), "&end", "&crystal", "  lfactor=0.1,"]
+    for r in range(3):
+        L.append("  lattvec(:,%d)=" % (r+1) + " ".join("%.10f" % cell[r, i] for i in range(3)) + ",")
+    L.append("  elements=" + " ".join('"%s"' % s for s in syms))
+    L.append("  types=" + " ".join(str(t) for t in types) + ",")
+    for idx, p in enumerate(spos):
+        L.append("  positions(:,%d)=" % (idx+1) + " ".join("%.10f" % x for x in p) + ",")
+    L.append("  scell(:)=%d %d %d" % (scell[0], scell[1], scell[2]))
+    L += ["&end", "&parameters", "  T_min=%.1f" % float(tmin),
+          "  T_max=%.1f" % float(tmax), "  T_step=%.1f" % float(tstep),
+          "  scalebroad=%s" % scalebroad, "&end", "&flags",
+          "  autoisotopes=%s," % ("T" if isotope else "F"),
+          "  convergence=F,",          # kl-mace 链先走 RTA（迭代 CONV 内存/耗时更大）
+          "  nonanalytic=%s," % ("T" if use_nac else "F"),
+          "  nanowires=F,", "&end"]
+    Path(out_path).write_text("\n".join(L) + "\n", encoding="utf-8")
+
+
+    print("[OK] CONTROL <- %s" % out_path.name)
+
+
+def _ensure_shengbte_fc(src, sb_dir):
+    """从 step3_fc 取 ShengBTE 力常数到 sb_dir。
+    优先 step3_fc/shengbte/（fc_fit_driver 统一导出）；缺则现场从 fc2/3.hdf5 用 hiphive 转换。"""
+    sb_dir = Path(sb_dir)
+    sb_dir.mkdir(exist_ok=True)
+    need = ("FORCE_CONSTANTS_2ND", "FORCE_CONSTANTS_3RD")
+    ready = [sb_dir / f for f in need]
+    if all(p.is_file() for p in ready):
+        return ready
+    # 现场转换：读 fc2.hdf5/fc3.hdf5 → hiphive ForceConstants → 导出
+    print("[..] %s/shengbte/ 缺 ShengBTE 力常数，从 fc2/fc3.hdf5 现场转换（hiphive）" % src)
+    import ase, h5py, numpy as np
+    import phono3py
+    from hiphive import ForceConstants
+    yaml = ("phono3py_params.yaml" if (src / "phono3py_params.yaml").is_file()
+            else "phono3py_disp.yaml")
+    ph3 = phono3py.load(str(src / yaml), produce_fc=False, log_level=0)
+    prim, sc = ph3.phonon_primitive, ph3.supercell
+    fc2 = np.asarray(h5py.File(str(src / "fc2.hdf5"), "r")["fc2"][()])
+    fc3 = np.asarray(h5py.File(str(src / "fc3.hdf5"), "r")["fc3"][()])
+    prim_ase = ase.Atoms(symbols=prim.symbols, cell=prim.cell,
+                         scaled_positions=prim.scaled_positions, pbc=True)
+    sc_ase = ase.Atoms(symbols=sc.symbols, cell=sc.cell,
+                       scaled_positions=sc.scaled_positions, pbc=True)
+    fcs = ForceConstants.from_arrays(sc_ase, fc2_array=fc2, fc3_array=fc3)
+    fcs.write_to_phonopy(str(sb_dir / "FORCE_CONSTANTS_2ND"), format="text")
+    fcs.write_to_shengBTE(str(sb_dir / "FORCE_CONSTANTS_3RD"), prim_ase)
+    print("[OK] FORCE_CONSTANTS_2ND/3RD <- fc2/fc3.hdf5（hiphive 导出，格式已验证）")
+    return [sb_dir / f for f in need]
+
+
+def build_shengbte_submit(cwd, out, src, conf, params):
+    """SOLVER=shengbte：备好 ShengBTE 输入（力常数+CONTROL），渲染 submit_shengbte 提交。"""
+    if len(meshes(conf, params)) != 1:
+        sys.exit("[ERROR] shengbte 求解器暂只支持单套网格（MESH_SCAN 留空）")
+    sb_dir = src / "shengbte"
+    sb_dir.mkdir(exist_ok=True)
+    _ensure_shengbte_fc(src, sb_dir)
+    for f in ("POSCAR", kc.KL_PARAMS, kc.METHOD_FILE):
+        if (src / f).is_file() and not (out / f).exists():
+            shutil.copyfile(str(src / f), str(out / f))
+    # CONTROL（依赖本步运行参数 → 在 step4 生成）
+    fc2, fc3 = _ensure_shengbte_fc(src, sb_dir)
+    shutil.copyfile(str(fc2), str(out / "FORCE_CONSTANTS_2ND"))
+    shutil.copyfile(str(fc3), str(out / "FORCE_CONSTANTS_3RD"))
+    poscar = out / "POSCAR" if (out / "POSCAR").is_file() else src / "POSCAR"
+    supercell = (params.get("SUPERCELL") or "4 4 4").split()
+    _shengbte_control_from_poscar(
+        poscar, supercell, conf["MESH_OVERRIDE"] or params.get("MESH") or "24 24 24",
+        conf["T_MIN"], conf["T_MAX"], conf["T_STEP"],
+        conf["SCALEBROAD"], conf["ISOTOPE"], (out / "BORN").is_file(),
+        out / "CONTROL")
+    # 抽 κ 小脚本：ShengBTE 输出 BTE.KappaTensorVsT_RTA（CONV 预留）
+    extract = ("python - <<'PY'" + chr(10)
+        + "import glob, json" + chr(10)
+        + "cand = ['BTE.KappaTensorVsT_CONV', 'BTE.KappaTensorVsT_RTA']" + chr(10)
+        + "f = next((c for c in cand if glob.glob(c)), None)" + chr(10)
+        + "d = {'KAPPA_DONE': bool(f), 'solver': 'shengbte'}" + chr(10)
+        + "if f:" + chr(10)
+        + "    rows = [l.split() for l in open(f) if l.strip() and not l.startswith('#')]" + chr(10)
+        + "    if rows:" + chr(10)
+        + "        d['source'] = f" + chr(10)
+        + "        d['temperatures'] = [float(r[0]) for r in rows]" + chr(10)
+        + "        d['kappa_xx_yy_zz'] = [[float(r[1]), float(r[5]), float(r[9])] for r in rows]" + chr(10)
+        + "    else:" + chr(10)
+        + "        d['KAPPA_DONE'] = False" + chr(10)
+        + "json.dump(d, open('kappa_summary.json', 'w'), ensure_ascii=False, indent=2)" + chr(10)
+        + "print('KAPPA_DONE' if d['KAPPA_DONE'] else 'NO_KAPPA')" + chr(10)
+        + "PY")
+    exe = str(conf["SHENGBTE_EXE"] or "ShengBTE").strip()
+    here = Path(__file__).resolve().parent
+    tpl = kc.resolve_submit(here, "submit_shengbte_klm")
+    kc.write_submit(tpl, out / "submit.sh",
+                    {"JOBNAME": kc.new_jobname(cwd, "S4sheng"),
+                     "CONDA_SH": conf["CONDA_SH"] or kc.DEFAULT_CONDA_SH,
+                     "CONDA_ENV": conf["CONDA_ENV"] or kc.DEFAULT_CONDA_ENV,
+                     "SHENGBTE_EXE": exe,
+                     "SB_EXTRACT": extract})
+    stepconf.apply_submit(out / "submit.sh", conf.submit)
+    print("[DONE] %s：submit.sh 就绪（ShengBTE RTA），跑完写 kappa_summary.json" % OUTDIR)
+
 def main():
     cwd = Path.cwd()
     out = cwd / OUTDIR
@@ -270,14 +401,20 @@ def main():
         print("       （LO-TO 在 2D 应趋零，3D 方案是随真空变化的伪劈裂）。")
         print("       要强制用设 KAPPA_NAC=on；正确的 2D-NAC 需用 QE 的 2D-DFPT。")
 
+    solver = str(conf["SOLVER"] or "phono3py").strip().lower()
+    if solver not in ("phono3py", "shengbte"):
+        sys.exit("[ERROR] SOLVER 只允许 phono3py / shengbte")
     ms = meshes(conf, params)
     ts = " ".join(str(t) for t in range(conf["T_MIN"], conf["T_MAX"] + 1, conf["T_STEP"]))
     bte = str(conf["BTE"] or "rta").lower()
     if bte not in ("rta", "lbte"):
         sys.exit("[ERROR] BTE 只允许 rta / lbte")
-    solver = "--br" if bte == "rta" else "--lbte"
-    print("[..] 求解=%s  网格=%s  温度=%d~%dK  NAC=%s  DIM=%s"
-          % (bte, " | ".join(ms), conf["T_MIN"], conf["T_MAX"], use_nac, dim or "?"))
+    print("[..] SOLVER=%s  网格=%s  温度=%d~%dK  NAC=%s  DIM=%s"
+          % (solver, " | ".join(ms), conf["T_MIN"], conf["T_MAX"], use_nac, dim or "?"))
+    if solver == "shengbte":
+        build_shengbte_submit(cwd, out, src, conf, params)
+        return
+    ph3_solver = "--br" if bte == "rta" else "--lbte"
 
     # 2D κ 厚度归一化因子（3D 时 factor=1、不归一）
     factor, meta = 1.0, {"dim": dim or "?"}
@@ -304,7 +441,7 @@ def main():
     def _base(m):
         """一条 phono3py-load 的公共前缀（网格/温度/同位素/NAC/MFP）。"""
         return '%s %s --mesh %s --ts="%s"%s%s%s' % (
-            yaml, solver, m, ts,
+            yaml, ph3_solver, m, ts,
             " --isotope" if conf["ISOTOPE"] else "",
             " --nac" if use_nac else "",
             " --mfp" if mfp_on else "")
