@@ -704,6 +704,10 @@ def main():
         # 幂等：学习曲线已存在（改了超参要重跑时删掉 learning_curve.json 即可）
         print("[..] 学习曲线已存在，跳过（%s）" % lc_json)
     else:
+        # [FIX] 小数据集曲线点验证集太小（n<40 时 10% 只有 2-3 帧，mace 训不动——
+        # GaAs n=25 实测失败）。按 n_train 给更大 valid-fraction。
+        _lc_n_train = len(ase_read(a.train_xyz, index=":"))
+        _lc_vf = 0.20 if _lc_n_train < 40 else 0.10
         rc = subprocess.run(
             [sys.executable, str(Path(__file__).resolve().parent / "learning_curve.py"),
              "--gen", str(a.gen), "--mat", a.mat, "--outdir", str(out / "curve"),
@@ -712,6 +716,7 @@ def main():
              "--e0s", a.e0s or "", "--device", a.device,
              "--points", a.curve_points, "--tol", str(a.curve_tol),
              "--ref-disp", str(a.ref_disp),
+             "--valid-fraction", str(_lc_vf),
              "--patience", str(a.patience), "--start-swa", str(a.start_swa), "--loss", a.loss,
              "--epochs", str(a.epochs), "--batch-size", str(a.batch_size),
              "--lr", str(a.lr),

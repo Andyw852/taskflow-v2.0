@@ -31,24 +31,34 @@ METHOD_FILE = "workflow_method.txt"
 MLFF_PARAMS = "mlff_params.txt"
 CONV_HISTORY = "convergence_history.json"
 
-# conda 环境缺省值（可被 step.conf 的 CONDA_SH / CONDA_ENV 覆盖）
-DEFAULT_CONDA_SH = "/public/home/wangchao/miniconda3/etc/profile.d/conda.sh"
-DEFAULT_CONDA_ENV = "/public/home/wangchao/venvs/mace_cpu"
+# conda 环境缺省值：留空。站点路径（如 conda_sh/venv 位置）一律由
+# setting/<集群>.yaml 的 conda_sh/conda_env 注入 step.conf，禁止在这里写死
+# （此前硬编码 /public/home/wangchao 导致换集群静默用错路径，报错只说文件不存在
+# 不说"没配 CONDA_ENV"）。
+DEFAULT_CONDA_SH = ""
+DEFAULT_CONDA_ENV = ""
 
 
 # ==========================================================================
 # 环境
 # ==========================================================================
 def env_src(conf=None):
-    """拼出环境激活命令。CONDA_ENV 含 '/' 时按 venv 激活，否则 conda activate。"""
+    """拼出环境激活命令。CONDA_ENV 含 '/' 时按 venv 激活，否则 conda activate。
+
+    CONDA_SH/CONDA_ENV 缺失（既不在 step.conf 也没注入）→ 直接报错，不静默回落。
+    """
     sh = env = None
     if conf is not None:
         try:
             sh, env = conf["CONDA_SH"], conf["CONDA_ENV"]
         except (KeyError, TypeError):
             pass
-    sh = sh or DEFAULT_CONDA_SH
-    env = env or DEFAULT_CONDA_ENV
+    if not str(sh or "").strip() or not str(env or "").strip():
+        sys.exit("[ERROR] CONDA_SH/CONDA_ENV 未配置：在 setting/<集群>.yaml 的 "
+                 "conda_sh/conda_env（或项目 step.conf 的 CONDA_SH/CONDA_ENV）里设。"
+                 "不再静默回落站点默认路径（此前硬编码 jzzn 路径会拿到别的集群的 venv）。")
+    sh = str(sh).strip()
+    env = str(env).strip()
     if env and "/" in str(env):
         venv = Path(os.path.expanduser(str(env))) / "bin" / "activate"
         if venv.is_file():
@@ -266,7 +276,7 @@ SHARED_PARAM_SPEC = {
     "KSPACING_TOL": (0.20, "float"),
     # --- 微调 ---
     "MACE_MODEL": (None, "str"),             # 基座 .model 文件名/路径/基座名
-    "MACE_MODEL_DIR": ("/public/home/wangchao/software/mace/mace_models", "str"),
+    "MACE_MODEL_DIR": ("", "str"),   # 站点路径：由 setting/<集群>.yaml mace_model_dir 注入，勿写死
     "REPLAY_XYZ": (None, "str"),
     "E0S_MODE": ("estimated", "str"),        # estimated | json（见 mace_finetune 注释）
     "N_COMMITTEE": (4, "int"),
@@ -276,14 +286,14 @@ SHARED_PARAM_SPEC = {
     "BATCH_SIZE": (10, "int"),           # autoplex MACE 默认 batch=10
     "DTYPE": ("float64", "str"),             # 不许改
     "LR": (1e-3, "float"),                # autoplex MACE 默认 1e-3（multihead 需 --force_mh_ft_lr）
-    "EPOCHS": (1500, "int"),              # autoplex 上限 1500；PATIENCE 早停实际截断
-    "PATIENCE": (100, "int"),             # 验证损失无改善连续多少代早停
+    "EPOCHS": (1500, "int"),              # 实际轮数上限：单卡 PATIENCE 不跳出（§9.2⑥），EPOCHS=真实轮数
+    "PATIENCE": (100, "int"),             # 早停阈值（单卡仅记录不跳出，模型取最佳 checkpoint）
     "START_SWA": (1200, "int"),           # autoplex SWA 起点
     "LOSS": ("huber", "str"),             # autoplex 用 huber
     "HUBER_DELTA": (0.05, "float"),       # [FIX-H2] MACE 默认 0.01 eV/Å 对本数据
                                           # 太小：力误差全在线性段=L1，推高 RMSE
-    "USE_SWA": (False, "bool"),           # [FIX-H3] PATIENCE 早停会截断在
-                                          # START_SWA 之前，默认不开
+    "USE_SWA": (False, "bool"),           # [FIX-H3] 默认关：PATIENCE 不跳出时，
+                                          # EPOCHS<START_SWA 则 --swa 是死配置
     "FORCE_MH_FT_LR": (True, "bool"),    # [FIX-LR] true=强制覆盖 MACE 多头微调 LR
                                           # （LR=1e-3 时 pt_head 发散，seed 间散布大）；
                                           # false=用 MACE 官方策略（诊断最优）
@@ -300,9 +310,10 @@ SHARED_PARAM_SPEC = {
     "EDIFF": (1e-7, "float"),
     "ALGO": ("Normal", "str"),
     "NCORE": (4, "int"),
-    # --- 环境 ---
-    "CONDA_SH": ("/public/home/wangchao/miniconda3/etc/profile.d/conda.sh", "str"),
-    "CONDA_ENV": ("/public/home/wangchao/venvs/mace_cpu", "str"),
+    # --- 环境（站点路径：由 setting/<集群>.yaml 的 conda_sh/conda_env 注入 step.conf；
+    #    不在这里写死默认——缺省会静默用错集群的 venv，报错只说文件不存在不说没配）---
+    "CONDA_SH": ("", "str"),
+    "CONDA_ENV": ("", "str"),
 }
 
 

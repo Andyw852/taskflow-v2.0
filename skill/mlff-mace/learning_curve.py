@@ -40,6 +40,10 @@ def parse_args():
     p.add_argument("--points", default="25,50,100,200,all")
     p.add_argument("--tol", type=float, default=0.05)
     p.add_argument("--epochs", type=int, default=1500)
+    p.add_argument("--valid-fraction", type=float, default=0.10)
+    # [FIX] 小数据集曲线点要更大验证份额：帧数 < 40 时验证集太小（10% 只有 2-3 帧）
+    # 会让 mace 训不动/早停噪声大（GaAs n=25 实测失败）。调用方（benchmark）按
+    # n_train 传合理的 --valid-fraction（<40 帧用 0.2）。
     p.add_argument("--patience", type=int, default=100)
     p.add_argument("--start-swa", type=int, default=1200)
     p.add_argument("--loss", default="huber")
@@ -72,7 +76,7 @@ def finetune(name, train_prefix, a, cwd, seed):
            "--pt_train_file=%s" % a.replay,
            "--num_samples_pt=30000",
            "--train_file=%s" % (wd / "train_prefix.xyz"),
-           "--valid_fraction=0.10",
+           "--valid_fraction=%g" % a.valid_fraction,
            "--test_file=%s" % a.test,
            "--energy_key=REF_energy", "--forces_key=REF_forces",
            "--stress_key=REF_stress",
