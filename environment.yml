@@ -39,6 +39,18 @@ dependencies:
 # =====================================================================
 # 其它技能专用环境（不并入上面，避免依赖冲突）：
 #   ke-dft-cpu        -> conda amset_clean:  pymatgen numpy matplotlib amset BoltzTraP2
+#                        ★ 版本约束（2026-09-05 hanhai 踩坑）：
+#                          pymatgen 不能装 2025.x 最新版 —— amset 0.4~0.5 调用
+#                          SpacegroupAnalyzer.get_space_group_symbol() 返回 dict，
+#                          pymatgen >=2025 改成 .international 属性访问 → AttributeError
+#                          （症状：amset run 启动即崩 "dict object has no attribute
+#                          international"）。已验证可用组合：
+#                            amset 0.4.19 + pymatgen <2025（jzzn amset_clean，conda-pack
+#                            迁移到 hanhai 后 amset 0.4.19 正常）
+#                          hanhai 原装 amset_clean 的 pymatgen 2025.10.7 不可用，已替换。
+#                          部署法：conda create -n amset_clean python=3.10 pymatgen=2024.*
+#                                  numpy scipy matplotlib amset=0.4.* BoltzTraP2 或
+#                                  从 jzzn conda-pack 迁移（见 skill/ke-dft-cpu/HSE_NOTES.md）
 #   kl-dft-cpu        -> conda atomate2_p_a: phonopy phono3py numpy spglib
 #   elastic-dft-cpu   -> 超算登录节点 pip install --user pymatgen matplotlib
 #   opt-mace-cpu      -> jzzn venv ~/venvs/mace_cpu: torch(cpu)+mace-torch+ase+numpy
