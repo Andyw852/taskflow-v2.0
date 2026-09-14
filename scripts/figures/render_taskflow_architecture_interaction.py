@@ -147,7 +147,8 @@ def draw_interaction_flow(d, x, y, w, h):
     response_y = y + 3.0 * mm
     response_h = 8.2 * mm
     response_cell_w = card_w / 3
-    branch_x = card_x + card_w / 2
+    # Keep the decision/check lane on the same centre axis as the LLM card.
+    branch_x = card_x + response_cell_w * 1.5
     branch_y = y + 18.0 * mm
     monitor_bottom = card_y[-1]
     response_label_y = y + 19.2 * mm
@@ -173,7 +174,7 @@ def draw_interaction_flow(d, x, y, w, h):
     # All observed states return to the LLM as compact state and exit-code feedback.
     feedback_x = x + w - 1.2 * mm
     response_center_y = response_y + response_h / 2
-    llm_center_y = centers[0]
+    llm_center_y = card_y[0] + card_h / 2
     d.add(Line(card_x + card_w, response_center_y, feedback_x, response_center_y, strokeColor=base.color("teal"), strokeWidth=0.85))
     d.add(Line(feedback_x, response_center_y, feedback_x, llm_center_y, strokeColor=base.color("teal"), strokeWidth=0.85))
     base.arrow(d, feedback_x, llm_center_y, card_x + card_w + 0.1 * mm, llm_center_y, fill="teal", sw=0.85, head=0.8 * mm)

@@ -164,10 +164,12 @@ def build_extract(factor, meta):
         "        return None\n"
         "    voigt = [K3[0,0], K3[1,1], K3[2,2], K3[1,2], K3[0,2], K3[0,1]]\n"
         "    aud = audit_kappa_voigt(voigt, crystal_system=CRYSTAL, plane_normal=PLANE)\n"
-        "    return {k: aud[k] for k in (\"eigenvalue_ratio\", \"diagonal_relative_mismatch\",\n"
+        "    return {k: aud.get(k) for k in (\"eigenvalue_ratio\", \"diagonal_relative_mismatch\",\n"
         "                                 \"offdiag_relative_magnitude\", \"determinant_ratio\",\n"
         "                                 \"threshold\", \"gate\", \"crystal_system\")}\n"
-        "for f in sorted(glob.glob(\"kappa-m*.hdf5\")):\n"
+        "expected = [\"kappa-m\" + \"\".join(m.split()) + \".hdf5\" for m in META.get(\"meshes\", [])]\n"
+        "files = expected or sorted(glob.glob(\"kappa-m*.hdf5\"))\n"
+        "for f in files:\n"
         "    if \"kappa-mfp\" in f:\n"
         "        continue\n"
         "    try:\n"
@@ -194,7 +196,7 @@ def build_extract(factor, meta):
         "        out[\"runs\"].append(rec)\n"
         "    except Exception as e:\n"
         "        out.setdefault(\"errors\", []).append(\"%s: %s\" % (f, e))\n"
-        "out[\"KAPPA_DONE\"] = bool(out[\"runs\"])\n"
+        "out[\"KAPPA_DONE\"] = bool(out[\"runs\"]) and not out.get(\"errors\") and (not expected or len(out[\"runs\"]) == len(expected))\n"
         "if out[\"runs\"]:\n"
         "    r = out[\"runs\"][-1]\n"
         "    out[\"kappa_300K_xx_yy_zz\"] = r[\"kappa_300K_xx_yy_zz\"]\n"
@@ -222,17 +224,23 @@ def build_extract(factor, meta):
         "            \"mfp_at_50pct_ang\": _mfp_at(0.5), \"mfp_at_90pct_ang\": _mfp_at(0.9)}\n"
         "    except Exception as e:\n"
         "        out.setdefault(\"errors\", []).append(\"mfp: %s\" % e)\n"
-        "json.dump(out, open(\"kappa_summary.json\",\"w\"), ensure_ascii=False, indent=2)\n"
-        "print(\"KAPPA_DONE\" if out[\"runs\"] else \"NO_KAPPA\")\n"
+        "with open(\"kappa_summary.json\", \"w\") as stream:\n"
+        "    json.dump(out, stream, ensure_ascii=False, indent=2)\n"
+        "print(\"KAPPA_DONE\" if out[\"KAPPA_DONE\"] else \"NO_KAPPA\")\n"
         "PY")
 
 
 
-def meshes(conf, params):
+def meshes(conf, params, dim, vac_axis=2):
+    # 每套网格都过 mesh_str：3D 材料被误写成 "N N 1"（2D 残留）时自动纠正成 "N N N"，
+    # 否则 phono3py 报 "Grid symmetry is broken"；2D 材料则把真空轴压成 1。
     scan = str(conf["MESH_SCAN"] or "").strip()
     if scan:
-        return [m.strip() for m in scan.split(";") if m.strip()]
-    return [conf["MESH_OVERRIDE"] or params.get("MESH") or "24 24 24"]
+        return [kc.mesh_str(m.strip().split(), dim, vac_axis)
+                for m in scan.split(";") if m.strip()]
+    return [kc.mesh_str(
+        (conf["MESH_OVERRIDE"] or params.get("MESH") or "24 24 24").split(),
+        dim, vac_axis)]
 
 
 
@@ -256,6 +264,19 @@ def _shengbte_control_from_poscar(poscar, SUPERCELL, ngrid, tmin, tmax, tstep,
     L.append("  types=" + " ".join(str(t) for t in types) + ",")
     for idx, p in enumerate(spos):
         L.append("  positions(:,%d)=" % (idx+1) + " ".join("%.10f" % x for x in p) + ",")
+    if use_nac:
+        from phonopy.file_IO import parse_BORN
+        from phonopy.structure.atoms import PhonopyAtoms
+        primitive = PhonopyAtoms(symbols=atoms.get_chemical_symbols(), cell=atoms.cell,
+                                 scaled_positions=spos)
+        nac = parse_BORN(primitive, filename=str(Path(out_path).parent / "BORN"))
+        if not nac:
+            raise ValueError("无法读取 ShengBTE NAC 参数")
+        for j in range(3):
+            L.append("  epsilon(:,%d)=" % (j+1) + " ".join(str(x) for x in nac["dielectric"][:, j]) + ",")
+        for atom, born in enumerate(nac["born"]):
+            for j in range(3):
+                L.append("  born(:,%d,%d)=" % (j+1, atom+1) + " ".join(str(x) for x in born[:, j]) + ",")
     L.append("  scell(:)=%d %d %d" % (scell[0], scell[1], scell[2]))
     L += ["&end", "&parameters", "  T_min=%.1f" % float(tmin),
           "  T_max=%.1f" % float(tmax), "  T_step=%.1f" % float(tstep),
@@ -288,22 +309,31 @@ def _ensure_shengbte_fc(src, sb_dir):
             else "phono3py_disp.yaml")
     ph3 = phono3py.load(str(src / yaml), produce_fc=False, log_level=0)
     prim, sc = ph3.phonon_primitive, ph3.supercell
-    fc2 = np.asarray(h5py.File(str(src / "fc2.hdf5"), "r")["fc2"][()])
-    fc3 = np.asarray(h5py.File(str(src / "fc3.hdf5"), "r")["fc3"][()])
+    with h5py.File(str(src / "fc2.hdf5"), "r") as h:
+        fc2 = np.asarray(h["fc2" if "fc2" in h else "force_constants"][()])
+    with h5py.File(str(src / "fc3.hdf5"), "r") as h:
+        fc3 = np.asarray(h["fc3"][()])
     prim_ase = ase.Atoms(symbols=prim.symbols, cell=prim.cell,
                          scaled_positions=prim.scaled_positions, pbc=True)
     sc_ase = ase.Atoms(symbols=sc.symbols, cell=sc.cell,
                        scaled_positions=sc.scaled_positions, pbc=True)
-    fcs = ForceConstants.from_arrays(sc_ase, fc2_array=fc2, fc3_array=fc3)
-    fcs.write_to_phonopy(str(sb_dir / "FORCE_CONSTANTS_2ND"), format="text")
+    sc2 = ph3.phonon_supercell
+    if sc2 is None:
+        sc2 = sc
+    sc2_ase = ase.Atoms(symbols=sc2.symbols, cell=sc2.cell,
+                        scaled_positions=sc2.scaled_positions, pbc=True)
+    fcs2 = ForceConstants.from_arrays(sc2_ase, fc2_array=fc2)
+    fcs = ForceConstants.from_arrays(sc_ase, fc3_array=fc3)
+    fcs2.write_to_phonopy(str(sb_dir / "FORCE_CONSTANTS_2ND"), format="text")
     fcs.write_to_shengBTE(str(sb_dir / "FORCE_CONSTANTS_3RD"), prim_ase)
     print("[OK] FORCE_CONSTANTS_2ND/3RD <- fc2/fc3.hdf5（hiphive 导出，格式已验证）")
     return [sb_dir / f for f in need]
 
 
-def build_shengbte_submit(cwd, out, src, conf, params):
+def build_shengbte_submit(cwd, out, src, conf, params, dim, vac_axis=2,
+                          use_nac=False, factor=1.0, meta=None):
     """SOLVER=shengbte：备好 ShengBTE 输入（力常数+CONTROL），渲染 submit_shengbte 提交。"""
-    if len(meshes(conf, params)) != 1:
+    if len(meshes(conf, params, dim, vac_axis)) != 1:
         sys.exit("[ERROR] shengbte 求解器暂只支持单套网格（MESH_SCAN 留空）")
     sb_dir = src / "shengbte"
     sb_dir.mkdir(exist_ok=True)
@@ -316,29 +346,40 @@ def build_shengbte_submit(cwd, out, src, conf, params):
     shutil.copyfile(str(fc2), str(out / "FORCE_CONSTANTS_2ND"))
     shutil.copyfile(str(fc3), str(out / "FORCE_CONSTANTS_3RD"))
     poscar = out / "POSCAR" if (out / "POSCAR").is_file() else src / "POSCAR"
-    supercell = (params.get("SUPERCELL") or "4 4 4").split()
+    supercell = (params.get("FC2_SUPERCELL") or params.get("SUPERCELL") or "4 4 4").split()
     _shengbte_control_from_poscar(
-        poscar, supercell, conf["MESH_OVERRIDE"] or params.get("MESH") or "24 24 24",
+        poscar, supercell, meshes(conf, params, dim, vac_axis)[0],
         conf["T_MIN"], conf["T_MAX"], conf["T_STEP"],
-        conf["SCALEBROAD"], conf["ISOTOPE"], (out / "BORN").is_file(),
+        conf["SCALEBROAD"], conf["ISOTOPE"], use_nac,
         out / "CONTROL")
     # 抽 κ 小脚本：ShengBTE 输出 BTE.KappaTensorVsT_RTA（CONV 预留）
-    extract = ("python - <<'PY'" + chr(10)
-        + "import glob, json" + chr(10)
-        + "cand = ['BTE.KappaTensorVsT_CONV', 'BTE.KappaTensorVsT_RTA']" + chr(10)
-        + "f = next((c for c in cand if glob.glob(c)), None)" + chr(10)
-        + "d = {'KAPPA_DONE': bool(f), 'solver': 'shengbte'}" + chr(10)
-        + "if f:" + chr(10)
-        + "    rows = [l.split() for l in open(f) if l.strip() and not l.startswith('#')]" + chr(10)
-        + "    if rows:" + chr(10)
-        + "        d['source'] = f" + chr(10)
-        + "        d['temperatures'] = [float(r[0]) for r in rows]" + chr(10)
-        + "        d['kappa_xx_yy_zz'] = [[float(r[1]), float(r[5]), float(r[9])] for r in rows]" + chr(10)
-        + "    else:" + chr(10)
-        + "        d['KAPPA_DONE'] = False" + chr(10)
-        + "json.dump(d, open('kappa_summary.json', 'w'), ensure_ascii=False, indent=2)" + chr(10)
-        + "print('KAPPA_DONE' if d['KAPPA_DONE'] else 'NO_KAPPA')" + chr(10)
-        + "PY")
+    import json
+    extract = "python - <<'PY'\n"
+    extract += "import json\nMETA=json.loads(%r)\nFACTOR=%r\n" % (json.dumps(meta or {}), factor)
+    extract += (
+        "import json, math\n"
+        "from pathlib import Path\n"
+        "f = Path(\"BTE.KappaTensorVsT_RTA\")\n"
+        "d = {\"KAPPA_DONE\": False, \"solver\": \"shengbte\"}\n"
+        "d.update(META)\n"
+        "if f.is_file():\n"
+        "    rows = [l.split() for l in f.read_text().splitlines() if l.strip() and not l.lstrip().startswith(\"#\")]\n"
+        "    if rows:\n"
+        "        temperatures = [float(r[0]) for r in rows]\n"
+        "        raw = [[float(r[1]), float(r[5]), float(r[9])] for r in rows]\n"
+        "        if not all(math.isfinite(v) for r in raw for v in r):\n"
+        "            raise ValueError(\"non-finite ShengBTE kappa\")\n"
+        "        j = min(range(len(temperatures)), key=lambda i: abs(temperatures[i]-300.0))\n"
+        "        d.update(KAPPA_DONE=True, source=str(f), temperatures=temperatures, kappa_xx_yy_zz=raw, kappa_300K_xx_yy_zz=raw[j])\n"
+        "        if META.get(\"dim\") == \"2d\":\n"
+        "            normalized = [[v*FACTOR for v in r] for r in raw]\n"
+        "            d[\"kappa_2d_normalized_xx_yy_zz\"] = normalized\n"
+        "            d[\"kappa_2d_normalized_300K_xx_yy_zz\"] = normalized[j]\n"
+        "Path(\"kappa_summary.json\").write_text(json.dumps(d, ensure_ascii=False, indent=2))\n"
+        "print(\"KAPPA_DONE\" if d[\"KAPPA_DONE\"] else \"NO_KAPPA\")\n"
+        "PY"
+    )
+
     exe = str(conf["SHENGBTE_EXE"] or "ShengBTE").strip()
     here = Path(__file__).resolve().parent
     tpl = kc.resolve_submit(here, "submit_shengbte_klm")
@@ -404,20 +445,17 @@ def main():
     solver = str(conf["SOLVER"] or "phono3py").strip().lower()
     if solver not in ("phono3py", "shengbte"):
         sys.exit("[ERROR] SOLVER 只允许 phono3py / shengbte")
-    ms = meshes(conf, params)
+    ms = meshes(conf, params, dim, vac_axis)
     ts = " ".join(str(t) for t in range(conf["T_MIN"], conf["T_MAX"] + 1, conf["T_STEP"]))
     bte = str(conf["BTE"] or "rta").lower()
     if bte not in ("rta", "lbte"):
         sys.exit("[ERROR] BTE 只允许 rta / lbte")
     print("[..] SOLVER=%s  网格=%s  温度=%d~%dK  NAC=%s  DIM=%s"
           % (solver, " | ".join(ms), conf["T_MIN"], conf["T_MAX"], use_nac, dim or "?"))
-    if solver == "shengbte":
-        build_shengbte_submit(cwd, out, src, conf, params)
-        return
     ph3_solver = "--br" if bte == "rta" else "--lbte"
 
     # 2D κ 厚度归一化因子（3D 时 factor=1、不归一）
-    factor, meta = 1.0, {"dim": dim or "?"}
+    factor, meta = 1.0, {"dim": dim or "?", "meshes": ms, "nac": use_nac}
     if dim == "2d":
         try:
             factor, m2 = two_d_norm_factor(out / "POSCAR", vac_axis, conf["KAPPA_2D_THICKNESS"])
@@ -427,6 +465,10 @@ def main():
                   % (meta["Lz_ang"], meta["thickness_d_ang"], factor, meta["thickness_convention"]))
         except Exception as e:
             print("[WARN] 2D 归一化因子算失败，只出原始 κ：%s" % e)
+    if solver == "shengbte":
+        build_shengbte_submit(cwd, out, src, conf, params, dim, vac_axis,
+                              use_nac=use_nac, factor=factor, meta=meta)
+        return
     if bte == "lbte" and len(ms) > 1:
         print("[WARN] LBTE 要存整个碰撞矩阵，内存 ~O(N_mode²)。多网格扫描请用 rta。")
 
@@ -443,7 +485,7 @@ def main():
         return '%s %s --mesh %s --ts="%s"%s%s%s' % (
             yaml, ph3_solver, m, ts,
             " --isotope" if conf["ISOTOPE"] else "",
-            " --nac" if use_nac else "",
+            " --nac" if use_nac else " --nonac",
             " --mfp" if mfp_on else "")
 
     lines = []

@@ -157,7 +157,11 @@ COMMON_POOL_DIR = "_common"
 _MANIFEST_TYPE_KEYS = ("desc", "steps", "optional_steps", "gen_need", "aux_files",
                        "gen_dir", "plot_steps", "run_steps", "dir_name",
                        "skill_subdir", "hpc", "work_dir", "root",
-                       "template_dir", "template_layout", "fetch_files")
+                       "template_dir", "template_layout", "fetch_files",
+                       # v3.24：技能自报的「提交前必须存在的输入」清单。
+                       # 不跑 VASP 的技能（如 fc-fit）没有 INCAR/KPOINTS，
+                       # 声明它即可通过 _remote_submit_preflight。
+                       "submit_required")
 
 # ===== _PS_CACHE (原 L1640-L1640) =====
 _PS_CACHE = {}
@@ -228,6 +232,34 @@ _LEVEL_DESC = {
 _LEVEL_HEADER = "# step.conf —— 本材料共用参数（BANDGAP 由 tf level 维护）\n\n[params]\n"
 
 # ===== USAGE (原 L6489-L6653) =====
+QUICK_USAGE = """\
+用法：tf [-tt 技能] [-p 材料] [-j 步骤] 命令
+
+查看：
+  summary [--diff]    只读汇总；--diff 无变化静默
+  list               只读总表；--refresh 强制刷新
+  status             状态详情，同时可能拉结果、自动提交
+  probe              单材料作业诊断（需 -p）
+
+计算：
+  start              生成缺失输入并提交
+  stop               取消作业并阻止自动重跑
+  retry              保留产物重新生成输入，不提交；检查后 start
+  rerun              删除旧步骤并重新生成，不提交；检查后 start
+  clean              删除产物，不重新生成
+
+管理：
+  auto on|off        开关自动推进；-tt/-p 限定范围
+  auto resume        恢复指定项目取消步骤，必须配 -tt 和 -p
+  monitor [-d]       持续监控；--stop 停止，--restart 重启
+  conf [--set ...]   查看或修改步骤配置
+  hpc 集群           切换指定项目集群（需 -p）
+  init / skills      初始化项目 / 查看技能
+
+旧命令和别名继续兼容。高级命令、全部参数及示例：tf --help-all
+注意：status/auto/monitor 可提交作业；只看状态用 summary 或 list。
+"""
+
 USAGE = """\
 用法:
   tf [选项] [ROOT] [命令]
@@ -244,7 +276,7 @@ USAGE = """\
             输出结构化 JSON（判据+结论），不采集、不提交、不改文件。
             需 -p 材料，可配 -j 步骤（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）
   start     开始/提交：输入没生成先 gen 再 sbatch。无 -p = 一键推进全部材料。
-            ★ 唯一会向超算提交作业的命令（init/retry/rerun 都只生成不提交）
+            init/retry/rerun 只生成不提交；status/auto/monitor 开自动推进时也会提交
   stop      取消作业。无 -p = 一键停止全部作业（有确认）；-p = 该材料全部作业；-p -job = 指定步骤。
             取消的步骤打 scancel 标记：状态列显示 scancel，auto_advance
             和批量 start 都不会再动它；重跑：-p X start（保留文件直接重交）/
@@ -289,7 +321,7 @@ USAGE = """\
             材料或技能的 hpc.yaml）并重载——改配置不用重启监控。
             加 -d 放后台运行（日志 .tf_watch.log，不占用终端），
             tf monitor --stop 停止后台监控（任意目录可执行），
-            tf monitor restart 重做后台监控（先停旧的再起新的）。
+            tf monitor --restart 重做后台监控（先停旧的再起新的）。
             零输入全自动：tf.yaml 里 auto_watch: true（任何 tf 命令顺带拉起
             监控）+ tf monitor --install（crontab 保活，重启后自动恢复，
             --uninstall 移除）。watch 是 monitor 的旧名，仍可用。
@@ -327,7 +359,8 @@ USAGE = """\
   -i, --interval  monitor 刷新间隔秒数（默认 300）
   -y, --yes       stop/rerun 免确认
   -V, --version   显示版本号
-  -h, --help      显示帮助（同 tf help）
+  -h, --help      显示简明帮助（同 tf help）
+  --help-all      显示高级命令、全部参数和完整示例
 
 规则:
   同一任务类型下项目名不允许重复（启动即报错）；不同类型下允许同名。
@@ -371,7 +404,7 @@ USAGE = """\
   tf -tt elastic -p Ela1 start         只开始 elastic 的 Ela1（指定材料）
   tf -p qHPC20 status                  单材料详情（basename 即可）
   tf -p C20/qHPC20 -job 1 retry        用现有文件重交第 1 步（完整名也行）
-  tf -p qHPC60 qTP1C60 retry       同时重交多个项目（用超算上已改好的输入直接提交）
+  tf -p qHPC60 qTP1C60 retry       保留产物重生成多个项目输入（检查后 start）
   tf -tt band -p qTPC24 -job S2_static start
   tf -p qHPC20 stop                    取消该材料所有作业（有确认，打 scancel 标记）
   tf -status scancel                   只看被 stop 取消的材料
@@ -1274,4 +1307,3 @@ def log_action(m, text):
             f.write("%s  %s\n" % (ts, text))
     except OSError:
         pass
-

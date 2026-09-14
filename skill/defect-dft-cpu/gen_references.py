@@ -99,6 +99,8 @@ def main():
     ap.add_argument("--only", default="", help="只处理这些相（逗号分隔），默认全部")
     ap.add_argument("--force", action="store_true", help="强制重写并重提交已完成（已收敛）的相")
     args = ap.parse_args()
+    if args.submit:
+        ap.error("直接提交已禁用：请用 taskflow 公共提交入口，避免参考相重复作业。")
 
     only = {x.strip() for x in args.only.split(",") if x.strip()} if args.only else None
     refdir = Path(args.refdir)
@@ -142,8 +144,7 @@ def main():
         print("[OK] %-11s %2d 原子  %s  %s  k=%s" %
               (name, natoms, ",".join(order), spec["kind"], spec["kmesh"]))
         n += 1
-        if args.submit:
-            subprocess.run(["sbatch", "submit.sh"], cwd=str(d))
+        # 提交统一由 taskflow 公共守卫负责。
     print("共生成 %d 个参考相输入%s" % (n, "（已提交）" if args.submit else ""))
 
 if __name__ == "__main__":

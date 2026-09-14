@@ -171,6 +171,21 @@ def _reference_kpoints(out, dim, vac_axis, n_sub):
     return kpts
 
 
+# ===========================================================================
+#  [PATCH-IONRELAX] 参数
+# ===========================================================================
+# 弛豫段的力判据。★ 不要收紧 ★
+#   2026-09-13 实测（Mg4C60 单层形变胞，ISYM=0 → 58 个 k 点）：
+#     第 5 个离子步起能量已完全平（dE ~ 5E-4 eV/全胞 = 4E-6 eV/atom），
+#     残余力 max 0.03–0.05 eV/Å、RMS 0.016–0.027 eV/Å —— 早已优于常规判据。
+#   而旧代码写死 -1E-3，比它紧 30–50 倍，逼 VASP 跑满 NSW=60 个离子步
+#   （每步 ~48 min），11 个形变胞白烧约 5E4 core·h。
+#   力 0.03 eV/Å 对应残余位移 ~0.003 Å，对带边能量影响仅 ~1E-4 eV，
+#   而形变势信号在 0.1–1 eV —— 完全淹没。
+#   要更紧就改这一行（不要改下面那几处 re.sub）。
+IONRELAX_EDIFFG = "-0.02"
+IONRELAX_NSW = "60"
+
 # ---- [PATCH-IONRELAX] 对 xx±/yy± 4 个形变目录生成 ionrelax/ 子目录 ----
 def _build_ionrelax(d: Path, encut, subs, submit_body):
     """在 deform-NN 下建 ionrelax/：两段式（弛豫段 IBRION=2 + 静态段 LVHAR）。
@@ -178,7 +193,8 @@ def _build_ionrelax(d: Path, encut, subs, submit_body):
     E1 必须用「离子弛豫后的内坐标」取带边能量（刚性形变 S 原子不动，E1 系统性
     偏小 24%），amset h5 仍用本级刚性单点（clamped-ion 口径不变）。弛豫段
     EDIFF=1E-6 省时间，静态段读 CONTCAR+WAVECAR 取 EDIFF=1E-8 精确带边 + LOCPOT。
-    两段都保持 ISYM=0。"""
+    两段都保持 ISYM=0。
+    力判据用 IONRELAX_EDIFFG（默认 -0.02）—— 详见文件头该常量的注释。"""
     ir = d / "ionrelax"
     ir.mkdir(exist_ok=True)
     # 清理旧 SCF 产物（重跑/幂等时残留的 vasprun/LOCPOT/OUTCAR 等），避免
@@ -194,13 +210,18 @@ def _build_ionrelax(d: Path, encut, subs, submit_body):
     base = (d / "INCAR").read_text(encoding="utf-8")
     # 弛豫段
     relax = re.sub(r"IBRION\s*=.*", "IBRION = 2            # 离子弛豫（固定晶格）", base)
-    relax = re.sub(r"NSW\s*=.*", "NSW    = 60", relax)
+    relax = re.sub(r"NSW\s*=.*", "NSW    = " + IONRELAX_NSW, relax)
     relax = re.sub(r"EDIFF\s*=.*", "EDIFF  = 1E-6", relax)
     relax = re.sub(r"LVHAR\s*=.*", "LVHAR  = .FALSE.", relax)
     relax = re.sub(r"LWAVE\s*=.*", "LWAVE  = .TRUE.", relax)
     relax = re.sub(r"LCHARG\s*=.*", "LCHARG = .FALSE.", relax)
-    if "EDIFFG" not in relax:
-        relax = relax.rstrip() + "\nEDIFFG = -1E-3\n"
+    # 力判据：用 IONRELAX_EDIFFG（默认 -0.02）。两种情形都处理：
+    #   段 INCAR 里已有 EDIFFG（继承自模板）-> 覆盖；没有 -> 追加。
+    # 旧代码只在"没有"时追加 -1E-3，等于把一个过严值写死、且没有任何配置出口。
+    if re.search(r"EDIFFG\s*=", relax):
+        relax = re.sub(r"EDIFFG\s*=.*", "EDIFFG = " + IONRELAX_EDIFFG, relax)
+    else:
+        relax = relax.rstrip() + "\nEDIFFG = " + IONRELAX_EDIFFG + "\n"
     (ir / "INCAR.relax").write_text(relax, encoding="utf-8", newline="\n")
     # 静态段
     stat = re.sub(r"IBRION\s*=.*", "IBRION = -1           # 静态段（弛豫后精确带边）", base)
@@ -215,8 +236,14 @@ def _build_ionrelax(d: Path, encut, subs, submit_body):
     sub = (d / "submit.sh").read_text(encoding="utf-8")
     _mpi = None
     for _ln in sub.splitlines():
-        if "mpirun" in _ln:
-            _mpi = _ln.strip()
+        _s = _ln.strip()
+        # 只认真正的启动命令：模板注释里也含 "mpirun" 字样
+        # （"…会让 mpirun 段错误…"）。不过滤注释会把注释当命令行，
+        # 导致 ionrelax 段丢失 VASP 调用、只剩 cp CONTCAR 而必然失败。
+        if not _s or _s.startswith("#"):
+            continue
+        if _s.startswith(("mpirun", "srun", "mpiexec")):
+            _mpi = _s
             break
     if not _mpi:
         _mpi = "mpirun -np $SLURM_NTASKS vasp_std"

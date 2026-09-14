@@ -38,16 +38,30 @@ def export_shengbte(yaml, prim_src=None):
     import ase, h5py
     import phono3py
     from hiphive import ForceConstants
+    def _load_fc(name, keys):
+        # 数据集名兼容：pheasy 写 'fc2'/'fc3'；phono3py symfc 的 fc2 实际写成
+        # phonopy full 格式 'force_constants'（无 'fc2'，fc3 仍是 'fc3'）。
+        with h5py.File(name, "r") as _h:
+            for _k in keys:
+                if _k in _h:
+                    return np.asarray(_h[_k][()])
+        raise KeyError("%s: no %s dataset" % (name, "/".join(keys)))
     ph3 = phono3py.load(yaml, produce_fc=False, log_level=0)
     prim, sc = ph3.phonon_primitive, ph3.supercell
-    fc2 = np.asarray(h5py.File("fc2.hdf5", "r")["fc2"][()])
-    fc3 = np.asarray(h5py.File("fc3.hdf5", "r")["fc3"][()])
+    fc2 = _load_fc("fc2.hdf5", ("fc2", "force_constants"))
+    fc3 = _load_fc("fc3.hdf5", ("fc3", "force_constants"))
     prim_ase = ase.Atoms(symbols=prim.symbols, cell=prim.cell,
                          scaled_positions=prim.scaled_positions, pbc=True)
     sc_ase = ase.Atoms(symbols=sc.symbols, cell=sc.cell,
                        scaled_positions=sc.scaled_positions, pbc=True)
-    fcs = ForceConstants.from_arrays(sc_ase, fc2_array=fc2, fc3_array=fc3)
-    fcs.write_to_phonopy(str(sb / "FORCE_CONSTANTS_2ND"), format="text")
+    sc2 = ph3.phonon_supercell
+    if sc2 is None:
+        sc2 = sc
+    sc2_ase = ase.Atoms(symbols=sc2.symbols, cell=sc2.cell,
+                        scaled_positions=sc2.scaled_positions, pbc=True)
+    fcs2 = ForceConstants.from_arrays(sc2_ase, fc2_array=fc2)
+    fcs = ForceConstants.from_arrays(sc_ase, fc3_array=fc3)
+    fcs2.write_to_phonopy(str(sb / "FORCE_CONSTANTS_2ND"), format="text")
     fcs.write_to_shengBTE(str(sb / "FORCE_CONSTANTS_3RD"), prim_ase)
     print("[OK] shengbte/ <- fc2/fc3.hdf5（hiphive 转换导出）")
 def main():
@@ -91,7 +105,10 @@ def main():
         if not os.path.isfile(f):
             sys.exit("[ERROR] 没生成 %s" % f)
     print("[OK] fc2.hdf5 / fc3.hdf5")
-    export_shengbte(yaml)
+    try:
+        export_shengbte(yaml)
+    except Exception as exc:
+        print("[WARN] 可选 ShengBTE 导出失败（S4 选用时会重新检查）：%s" % exc)
 
     # ---- 2. 虚频闸（phonopy API）----
     rc = subprocess.run("python _phonon_gate.py", shell=True,
@@ -103,16 +120,11 @@ def main():
                 mf = float(ln.split()[1])
             except (ValueError, IndexError):
                 mf = None
-    if rc.returncode != 0 or mf is None:
-        # 兜底读 band-dft-cpu.yaml
-        try:
-            import re
-            fr = [float(m.group(1))
-                  for ln in Path("band-dft-cpu.yaml").read_text(errors="ignore").splitlines()
-                  for m in [re.match(r"\s*frequency:\s*(-?[\d.Ee+]+)", ln)] if m]
-            mf = min(fr) if fr else None
-        except Exception:
-            mf = None
+    if rc.returncode != 0:
+        mf = None
+        print(rc.stdout or "")
+        print(rc.stderr or "", file=sys.stderr)
+    # 不回退到可能属于旧拟合的 band 文件；当前闸门失败必须阻止后续计算。
     if mf is None:
         stable, note = False, "phonopy 虚频闸失败（看 fc_build.log）"
         print("[FAIL] " + note)

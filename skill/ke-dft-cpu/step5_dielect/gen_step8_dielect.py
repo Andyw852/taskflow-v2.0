@@ -13,6 +13,30 @@ import stepconf  # noqa: E402
 from dim_common import require_dim, resolve_tpl  # noqa: E402
 
 # =========================== 可改参数区 ===========================
+# ---------- 体系判别阻断（step2.15_discriminant）----------
+# False = 默认拦截 SEMIMETAL/METAL@PBE（这套半导体框架不适用）。
+# True  = 强制继续（金属体系也有人要算输运，或 PBE 误判而杂化还没来得及重判）。
+# ★ 不是硬停：读不到 discriminant.json 时一律放行，行为与加这道闸门前完全一致。
+FORCE_TRANSPORT = False
+
+
+def _disc_gate():
+    """体系判别闸门：默认拦截 SEMIMETAL/METAL@PBE，FORCE_TRANSPORT 可覆盖。"""
+    import sys as _s
+    from pathlib import Path as _P
+    try:
+        _s.path.insert(0, str(_P(__file__).resolve().parent))
+        import discriminant_common as _dc
+        if not _dc.gate(_P.cwd(), "step5_dielect", force=FORCE_TRANSPORT):
+            _s.exit("[BLOCKED] 体系判别为 SEMIMETAL/METAL@PBE —— step5_dielect 已阻断。"
+                    "完整提示见 step2_bandgap/step2.15_discriminant/discriminant.json "
+                    "的 block.hint；强制继续请把本脚本顶部 FORCE_TRANSPORT 设为 True。")
+    except SystemExit:
+        raise
+    except Exception as _e:
+        print("[WARN] 体系判别闸门异常，放行：%s" % _e, file=_s.stderr)
+
+
 OUTDIR_NAME  = "step5_dielect"
 PREV_CANDS   = ["step1_opt", "step1_std_opt"]
 DIMENSION    = "auto"
@@ -30,6 +54,7 @@ STEP_LABEL   = "S5_dielect"
 GGA_MAP = {"pbe": "PE", "pbesol": "PS", "pbe-d3": "PE"}
 
 def main():
+    _disc_gate()
     cwd = Path.cwd(); out = cwd / OUTDIR_NAME; out.mkdir(exist_ok=True)
     prev = kc.find_prev_dir(cwd, PREV_CANDS)
     if prev is None:

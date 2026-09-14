@@ -148,6 +148,12 @@ def mesh_str(mesh, dim, vac_axis=2):
     m = [mesh, mesh, mesh] if isinstance(mesh, int) else [int(x) for x in mesh]
     if dim == "2d":
         m[vac_axis if vac_axis is not None else 2] = 1
+    elif dim == "3d" and 1 in m:
+        # 3D 材料：某方向网格=1 是 2D 模板残留，phono3py 会报 "Grid symmetry is
+        # broken"。自动对齐到三个方向的最大值（各向同性），避免手写 2D 网格静默出错。
+        n = max(m)
+        if n > 1:
+            m = [n, n, n]
     return " ".join(str(int(x)) for x in m)
 
 

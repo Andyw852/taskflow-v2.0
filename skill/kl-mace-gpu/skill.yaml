@@ -55,14 +55,14 @@ steps:
 
   - {seq: 3, name: step3_fc, label: S3_fc,
      check: phonon,
-     hpc: jzzn,
      gen: gen_step3_fc.py,
+     # 默认 phono3py/symfc 拟合（CPU，只碰 submit_fc.tpl）；PHEASY_BIN=pheasy-gpu 时才
+     # 需要 submit_fc_gpu.tpl，由 gen 脚本内部按集群检测并明确报错，gen_need 不强制。
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
-                fc_fit_driver.py, submit_fc.tpl, submit_fc_gpu.tpl]}
+                fc_fit_driver.py, submit_fc.tpl]}
 
   - {seq: 4, name: step4_kappa, label: S4_kappa,
      check: marker, marker: 'kappa_summary.json:"KAPPA_DONE": true',
-     hpc: jzzn,
      gen: gen_step4_kappa.py,
      gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
                 kappa_validation.py, submit_p3py.tpl, submit_shengbte_klm.tpl,
@@ -75,7 +75,8 @@ optional_steps:
     default: true
     steps:
       - {seq: 5, name: phonon_band_plot, label: S5_plot, after: step3_fc,
-         hpc: jzzn,   # band-dft-cpu.yaml 在 S3_fc(jzzn) 的 step3_fc/，画图须在同一集群执行
+         # 画图须与 S3_fc 同集群（band-dft-cpu.yaml 在 step3_fc/ 里）；hpc 跟随材料默认，
+         # 不在此硬编码——材料切到哪个集群，S3/S4/S5 就在哪个集群用该集群模板跑。
          gen: "plot_phonon_band.py", check: plot, run: gen, gen_need: [],
          done_marker: phonon_band_summary.json, fetch_all: true}
 

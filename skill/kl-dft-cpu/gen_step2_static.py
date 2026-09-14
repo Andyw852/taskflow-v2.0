@@ -47,7 +47,7 @@ def main():
                 why="静态自洽本身对分子成立，但本脚本的 KPOINTS 仍按固体网格生成；要跑 0D 请先照 band-dft-cpu 的 gen_step2_static 补 Gamma 分支")
     func = conf["FUNC"]
     if func in (None, "", "auto"):
-        func = meth.get("FUNC", "pbesol").lower()
+        func = meth.get("FUNC", "pbe-d3").lower()
     print("[..] 维度=%s  泛函=%s（继承 step1）" % (dim.upper(), func))
 
     kc.vaspkit_kpoints(out, conf["KSCHEME"], conf["KSPACING"],

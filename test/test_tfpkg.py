@@ -19,6 +19,98 @@ os.chdir(_ROOT)
 import tfpkg
 
 
+def test_vasp_selection_uses_cluster_profiles():
+    from tfpkg.workflow import render_vasp_template
+    profiles = {
+        "standard": {"std": "/configured/standard/vasp_std", "ncl": "/configured/standard/vasp_ncl"},
+        "relax_2d": {"std": "/configured/patched/vasp_std", "cell_constraint": "ioptcell_tag"}}
+    template = '#!/bin/bash\n#SBATCH --nodes=1\nmpirun -np 16 /obsolete/vasp_std\n'
+    output = render_vasp_template(template, "submit_std_2d.tpl", "step1_opt", profiles)
+    assert "/configured/patched/vasp_std" in output and "/obsolete" not in output
+    assert output.index("#SBATCH") < output.index("export TF_CELL_CONSTRAINT")
+    assert "TF_CELL_CONSTRAINT=ioptcell_tag" in output
+    for step_name, filename in (("step2_static", "submit_std_2d.tpl"),
+                                ("step1_opt", "submit_std_3d.tpl"),
+                                ("step1_opt", "submit_std_0d.tpl")):
+        result = render_vasp_template(template, filename, step_name, profiles)
+        assert "/configured/standard/vasp_std" in result
+        assert "TF_CELL_CONSTRAINT=none" in result
+    result = render_vasp_template(template, "submit_ncl_3d.tpl", "step3_soc", profiles)
+    assert "/configured/standard/vasp_ncl" in result
+    result = render_vasp_template(template, "submit_std_2d.tpl", "step1_opt", {"standard": profiles["standard"]})
+    assert "exit 1" in result and "mpirun" not in result
+
+
+def test_vasp_selection_replaces_suffixed_executable():
+    from tfpkg.workflow import render_vasp_template
+    profiles = {
+        "standard": {"std": "/configured/standard/vasp_std"},
+        "relax_2d": {
+            "std": "/configured/patched/vasp_std_mpi",
+            "cell_constraint": "ioptcell_tag",
+        },
+    }
+    template = "#!/bin/bash\nmpirun -np 16 /obsolete/vasp_std_mpi\n"
+    output = render_vasp_template(template, "submit_std_2d.tpl", "step1_opt", profiles)
+    assert "/configured/patched/vasp_std_mpi_mpi" not in output
+    assert "/configured/patched/vasp_std_mpi" in output
+
+
+def test_remote_path_prefix_matches_ssh_alias_case():
+    from tfpkg.collect import _effective_remote_path_prefix
+    assert _effective_remote_path_prefix({}, "A800") == (
+        "/fs0/home/wangcch/software/taskflow/pybin")
+
+
+def test_monitor_alias_normalization():
+    from tfpkg.cli import normalize_monitor_command
+    for command, positional, flag in (
+            ("restart", ["Mg4C60"], False),
+            ("watch", ["restart", "Mg4C60"], False),
+            ("monitor", ["restart", "Mg4C60"], False),
+            ("monitor", ["Mg4C60"], True)):
+        assert normalize_monitor_command(command, positional, flag) == (
+            "monitor", ["Mg4C60"], True)
+    assert normalize_monitor_command("watch", [], False) == ("monitor", [], False)
+    assert normalize_monitor_command("retry", ["Mg4C60"], False) == (
+        "retry", ["Mg4C60"], False)
+
+
+def test_cli_help_levels():
+    entry = os.path.join(_ROOT, "bin", "tf")
+    def help_output(argument):
+        result = subprocess.run([sys.executable, entry, argument],
+                                capture_output=True, text=True, encoding="utf-8")
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+    brief = help_output("--help")
+    assert brief == help_output("help")
+    full = help_output("--help-all")
+    assert len(brief.splitlines()) < 35
+    assert "auto resume" in brief and "--help-all" in brief
+    assert "migrate-subdir" in full and len(full) > len(brief)
+
+
+def test_auto_resume_scopes_cancelled_steps():
+    from unittest.mock import patch
+    from pathlib import Path
+    from tfpkg import ops, workflow
+    with tempfile.TemporaryDirectory(dir=os.path.join(_ROOT, "tmp")) as folder:
+        setting = Path(folder) / "setting.yaml"
+        setting.write_text("auto_advance: false\n", encoding="utf-8")
+        material = {"lpath": folder, "tt": "ke-dft-cpu"}
+        marks = {"ke-dft-cpu/step5": {"jobid": "1"},
+                 "phonon-mace-cpu/step2": {"jobid": "2"}}
+        workflow._scancel_save(material, marks)
+        with patch.object(ops, "skill_keys", return_value=["ke-dft-cpu"]), \
+             patch.object(ops, "resolve_mat_dir", return_value=folder), \
+             patch.object(ops, "_proj_setting_path", return_value=str(setting)):
+            assert ops.cmd_auto_project({"auto_advance": True}, [], "Mg4C60", "ke-dft-cpu", "on") == 0
+            assert workflow._scancel_load(material) == marks
+            assert ops.cmd_auto_project({"auto_advance": True}, [], "Mg4C60", "ke-dft-cpu", "resume") == 0
+            assert workflow._scancel_load(material) == {"phonon-mace-cpu/step2": {"jobid": "2"}}
+
+
 # ---------- 构造合成 data ----------
 def _mk_data():
     return {
@@ -429,4 +521,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

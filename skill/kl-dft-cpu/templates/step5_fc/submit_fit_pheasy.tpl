@@ -72,7 +72,16 @@ if [ "${FIT_METHOD}" = "RFE" ]; then
     echo "RFE 启用：step=0.1 ridge=1e-11 cv=5"
 elif [ "${FIT_METHOD}" = "OLS" ]; then
     export MKL_INTERFACE_LAYER=ILP64 PHEASY_OLS_TWOLEVEL=1 PHEASY_RFE_MKL=1
-    export PHEASY_OLS_MAXITER=500 PHEASY_OLS_RIDGE=1e-4 PHEASY_OLS_ATOL=1e-6 PHEASY_OLS_BTOL=1e-6
+    # PHEASY_OLS_RIDGE 必须保持 0。pheasy 的 OLS 把它当 Tikhonov 阻尼，并且按
+    # damp = sqrt(ridge*ndata) 放大（core/optimizer.py:_ols_lsmr）：1e-4 在
+    # ndata=7500 时 damp≈0.87，直接把系数按尺度压偏，而 pheasy 仍然退 0。
+    # 同一数据集实测（BaS 250 原子 / 10 帧 / fc2+fc3 / OLS）：
+    #   ridge=0    相对误差 0.022  correlation 0.9997   (LSMR 509 次迭代)
+    #   ridge=1e-4 相对误差 0.580  correlation 0.8991   (LSMR  18 次迭代)
+    # 另外 ridge>0 会让 GPU 常驻 OLS 直接回退 CPU（optimizer.py:2643）。
+    # 对比：RFE 的 PHEASY_RFE_RIDGE_ALPHA=1e-11 走 sklearn Ridge 的归一化路径，
+    # 不放大，可以保留。
+    export PHEASY_OLS_MAXITER=500 PHEASY_OLS_RIDGE=0 PHEASY_OLS_ATOL=1e-6 PHEASY_OLS_BTOL=1e-6
     echo "OLS 启用：两级 matvec, MKL ILP64（内存较高）"
 else
     python -c "from celer import Lasso" 2>/dev/null || { echo "❌ LASSO 需 celer，禁止提交"; exit 1; }

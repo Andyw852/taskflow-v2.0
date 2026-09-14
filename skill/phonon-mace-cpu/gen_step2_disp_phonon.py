@@ -31,6 +31,7 @@ SPEC = {
     "MAX_MULTIPLE": (6, "int"),
     "N_DISP": ("auto", "str"),        # auto=按 ALM 2 阶反推；整数=固定
     "OVERSAMPLE": (3, "int"),
+    "ALM_CUT2": (7.0, "float"),         # ALM 二阶截断半径(Å)
     "DISP_DISTANCE": (0.01, "float"),  # MC-rattle 目标位移 RMS(Å)
     "MC_DMIN_SCALE": (0.85, "float"),  # d_min = 最近邻 × 此系数
     "MC_NITER": (10, "int"),           # MC 迭代数
@@ -46,16 +47,16 @@ from phonopy import Phonopy
 from ase import Atoms
 from alm import ALM
 
-poscar, reps_s, ov_s = sys.argv[1:4]
+poscar, reps_s, ov_s, cut_s = sys.argv[1:5]
 reps = [int(x) for x in reps_s.split()]
 oversample = int(ov_s)
 cell, _ = read_crystal_structure(poscar, interface_mode="vasp")
-ph = Phonopy(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)))
+ph = Phonopy(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)), primitive_matrix="P")
 sc = ph.supercell
 atoms = Atoms(numbers=sc.numbers, positions=sc.positions, cell=sc.cell, pbc=True)
 n_sc = len(atoms)
 nkd = len(set(atoms.numbers))
-cut = np.full((1, nkd, nkd), -1.0, dtype=float)   # 2 阶不截断
+cut = np.full((1, nkd, nkd), float(cut_s), dtype=float)
 with ALM(np.array(atoms.cell), atoms.get_scaled_positions(),
          atoms.get_atomic_numbers(), verbosity=0) as a:
     a.define(1, cutoff_radii=cut)                  # maxorder=1 → 只到 2 阶
@@ -64,7 +65,7 @@ with ALM(np.array(atoms.cell), atoms.get_scaled_positions(),
 dof = 3 * n_sc
 n_struct = max(10, math.ceil(nfree / dof) * oversample)
 print("N_DISP %d" % n_struct)
-print("NFREE_FC2 %d DOF %d N_SC %d OVERSAMPLE %d" % (nfree, dof, n_sc, oversample))
+print("NFREE_FC2 %d DOF %d N_SC %d OVERSAMPLE %d ALM_CUT2 %.3f" % (nfree, dof, n_sc, oversample, float(cut_s)))
 '''
 
 
@@ -76,8 +77,8 @@ def resolve_ndisp(conf, out, reps):
         except ValueError:
             sys.exit("[ERROR] N_DISP=%r 不是整数也不是 auto" % val)
     (out / "_alm_n2.py").write_text(_ALM_N2, encoding="utf-8")
-    cmd = ("python _alm_n2.py POSCAR '%s' %d"
-           % (kc.dim_str(reps), int(conf["OVERSAMPLE"])))
+    cmd = ("python _alm_n2.py POSCAR '%s' %d %g"
+           % (kc.dim_str(reps), int(conf["OVERSAMPLE"]), float(conf["ALM_CUT2"])))
     rc, so = kc.run_capture(cmd, out, conf)
     for ln in (so or "").splitlines():
         if ln.startswith("N_DISP "):

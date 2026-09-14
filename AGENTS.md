@@ -37,11 +37,22 @@
 5. **用退出码判成败**：`tf` 命令退出码 0 = 成功；非 0 = 失败或被拒绝。失败时把输出原文呈给用户，不要粉饰、不要假装成功。
 6. **不确定就报告并等待**。宁可少做，不要猜。
 7. **本地计算文件与项目统一放 `/mnt/d/tf_data/work_taskflow`**：今后新建的项目目录、VASP 计算文件（WAVECAR/CHGCAR/CHG/ELFCAR/OUTCAR/POSCAR/INCAR 等）和归档备份，一律放在 `/mnt/d/tf_data/work_taskflow/` 下，不再散放在 `/mnt/d/tf_data/` 根目录或其它位置。涉及新建项目时，确认 `tf.yaml` 的 `project_roots` 已包含该路径。
-8. **流水线巡检/推进一律用 `tf auto on` + `monitor.sh`（或 `auto_watch`），禁止自己另写监控脚本**。`tf auto on` 是 DAG 推进（按依赖找就绪步骤，S0 FAIL 不阻塞 S3/S4），`monitor.sh` 每 30 分钟自动跑 `tf auto on` + `tf summary --diff`。agent 的巡检 cron 保持只读（`tf summary --diff`），发现就绪步骤时主动 `tf -tt <技能> auto on` 推进即可；**不要自己写 ssh 循环 / bash 循环 / 定时脚本来代替 tf 的自动监控**。唯一例外：不在 tf 16 个技能管辖内的**独立诊断任务**（如手动跑 Pheasy 拟合、声子交叉验证、拟合参数扫描），才允许 ssh 只读诊断 + 手动跟踪该独立计算的进度。
+8. **流水线巡检/推进一律用 `tf auto on` + `monitor.sh`（或 `auto_watch`），禁止自己另写监控脚本**。`tf auto on` 是 DAG 推进（按依赖找就绪步骤，S0 FAIL 不阻塞 S3/S4），`monitor.sh` 每 10 分钟自动跑 `tf auto on` + `tf summary --diff`。agent 的巡检 cron 保持只读（`tf summary --diff`），发现就绪步骤时主动 `tf -tt <技能> auto on` 推进即可；**不要自己写 ssh 循环 / bash 循环 / 定时脚本来代替 tf 的自动监控**。唯一例外：不在 tf 16 个技能管辖内的**独立诊断任务**（如手动跑 Pheasy 拟合、声子交叉验证、拟合参数扫描），才允许 ssh 只读诊断 + 手动跟踪该独立计算的进度。
 9. **禁止未经批准降低核数重交，必须询问**。为缓解排队而降核重交（如 24 核→8 核）会改变并行设置（NCORE/KPAR 影响 VASP 数值路径与收敛），且降核只是缓解手段之一（还有提 qos、分批提交、等队列）。**执行前必须向用户说明**：① 排队瓶颈证据；② 降核的影响（数值一致性、耗时变化）；③ 替代方案（换 qos / 分批 / 等）。得到明确同意后才做。**改核数必须走 taskflow 正式机制**：改 `setting/<hpc>/templates/submit_*.tpl` 的 `--ntasks-per-node` 与 `defects_common.build_job` 的 NCORE/KPAR（或项目级 `project_setting/templates/` 覆盖）→ `tf -p MAT -j STEP retry`（重新生成输入，保留 OUTCAR/CONTCAR）→ `tf -p MAT -j STEP start`（提交）。**严禁**手动 `sed` 远程 INCAR/submit.sh + 手动 `sbatch` 绕过 `tf`——那会违反铁律 1，且让 taskflow 状态表与超算实际作业脱节，后续 `stop`/`retry`/`auto` 会误判。
 
 10. **禁止擅自新建技能/步骤/脚本，必须用户同意**。① 动手前先 `tf skills` / `ls skill/` 查现成能力；已有技能或技能内现成步骤（band/defect/elastic/ke/kl/opt/phonon/mace 等 16 个）直接使用，禁止另起炉灶。② 在 `skill/` 下新建技能目录、往已有技能加新步骤目录或新 gen 脚本、写与现成技能功能重叠的一次性脚本（如自写 transport/defect/band 分析器），都是**受控操作**：先向用户说明「要做什么 / 为什么现成技能做不到 / 放哪影响谁」，得到明确同意后才执行。③ 用户说"用现成技能/不要加步骤"时立即停止，改用既有技能，不辩解不绕道。（本铁律与 `~/.dsh/AGENTS.md` 第 1 节一致，用户级规则自动注入所有 DSH 会话。）
 11. **换服务器装软件与环境：一律装到该服务器 `~/software/taskflow/`**。新超算/新账号部署 taskflow 依赖（VASP、conda/venv、MACE 模型、POTCAR 赝势库、工具链）时，目录不存在先 `mkdir -p ~/software/taskflow`，**每个软件/环境一个子目录**，不散装到 home 根或 `~/software/` 直下；装完把实际路径写进 `setting/<hpc>.yaml`（conda_sh/mace_model_dir/potcar_dir/…）。布局与命名约定见 `setting/README.md`；既有存量不强制迁移，确需搬迁先请示。
+
+## 二点一、HanHai 连接强制流程
+
+凡在 `taskflow-v2.0` 中执行任何会访问 HanHai 的 `tf` 命令，必须遵守以下流程：
+
+1. 先运行 `/home/wangchao/bin/hanhai25-connect`，再执行 `tf`；不得直接凭残留 socket 判断连接可用。
+2. 连接健康必须同时满足 ControlMaster 检查和一次 `BatchMode` 实际命令检查；任一失败都删除失效 socket 并重建。
+3. `114.214.255.25` 不可达或拒绝时，自动改用 `hanhai25-02`（`114.214.255.26`），不得反复重试同一失效入口。
+4. SSH 使用本机受限权限的 askpass/TOTP 辅助程序；密码、Secret Key、验证码和紧急码不得写入仓库、日志或新的配置文件。
+5. 每次提交前必须确认本地 `result/<step>/INCAR`、`POSCAR`、`KPOINTS` 和 `submit.sh` 已保存；若远端已生成而本地缺失，先用 taskflow 的 fetch 链路回拉，再允许提交。
+6. 连接失败只允许报告并等待下一次认证窗口；不得因连接超时停止、取消或重复提交远端作业。
 
 ## 三、tf 命令参考
 
@@ -61,7 +72,7 @@ tf [-tt TT] -p MAT start           # 推进该材料：输入没生成先 gen �
 tf start                           # 推进所有材料（FAIL 的只报告不动）
 tf monitor [-i 秒] -d              # 后台监控：自动拉结果+自动提交（restart 重做；watch 为旧名，仍可用）
 tf [-tt TT] -p MAT [-j STEP] stop     # 取消作业（破坏性，先请示）
-tf [-tt TT] -p MAT [-j STEP] retry    # 用现有文件重交（用户手改文件后；fanout 步只补没完成的子目录）
+tf [-tt TT] -p MAT [-j STEP] retry    # 保留产物重生成输入，不提交；检查后 start（fanout 只补未完成子目录）
 tf [-tt TT] -p MAT [-j STEP] rerun    # 删目录重新生成（破坏性，先请示；mlff-mace step5_label 禁用）
 tf -p MAT dir                      # 该材料在超算的目录（拼只读诊断命令用）
 tf [-p MAT] [-j STEP] clean        # 删除生成物回到 PREP（破坏性，先请示）
@@ -157,7 +168,7 @@ tf auto [on|off]                   # 一键开关全局 auto_advance（改全局
 | 只读不提交 | `tf list` / `tf summary` | `tf status`（会 auto-fetch/advance） |
 | 结构化批量分析 | `tf json`（唯一该用它的时候） | — |
 
-### 7.3 定时巡检流程（每 30 分钟）
+### 7.3 定时巡检流程（每 10 分钟）
 
 1. 只跑一个命令：`tf summary --diff`（tf 自己对比快照）。
    - **无输出（0 字节）** → 无变化，静默，本轮结束。**禁止**再跑 `tf list`/`squeue`/`tf -p X status` 去"确认"——快照已经替你确认了。连续多轮无变化是常态，不是需要深查的信号。
@@ -172,14 +183,14 @@ tf auto [on|off]                   # 一键开关全局 auto_advance（改全局
 
 ### 7.4 自建 cron 任务的指令（贴给 Claw / 其他 agent 调度器）
 
-> 每 30 分钟：运行 `tf summary --diff`；**无输出就静默**（tf 已自动 diff，不用自己记上轮，也禁止再跑 list/squeue 去确认）；有输出才看——有 `FAIL` 行按第六节模板汇报并请示；有 `变更:` 段直接一句进展（用变更行里现成的"谁→什么"）；`队列:` 行只在 PD 异常偏高或排队原因变 `QOS*` 时提一句。**巡检里禁止运行 `tf json`、`tf list`、`squeue`、`tf conf --set`。** 若用户开了 `auto_watch` 后台监控，巡检与它不冲突（巡检全只读）；agent 自己建的定时任务照常。
+> 每 10 分钟：运行 `tf summary --diff`；**无输出就静默**（tf 已自动 diff，不用自己记上轮，也禁止再跑 list/squeue 去确认）；有输出才看——有 `FAIL` 行按第六节模板汇报并请示；有 `变更:` 段直接一句进展（用变更行里现成的"谁→什么"）；`队列:` 行只在 PD 异常偏高或排队原因变 `QOS*` 时提一句。**巡检里禁止运行 `tf json`、`tf list`、`squeue`、`tf conf --set`。** 若用户开了 `auto_watch` 后台监控，巡检与它不冲突（巡检全只读）；agent 自己建的定时任务照常。
 
-> **推进谁来做**：提交作业（auto-advance）由用户自建的 `monitor.sh`（每 30 分钟 `tf auto on` DAG 推进 + `tf summary --diff`）或 `auto_watch` 后台监控完成，**agent 的巡检 cron 保持只读**。若两者都没开，agent 巡检发现就绪步骤（S2 完 → S3/S4 就绪）时应主动 `tf -tt <技能> auto on` 推进，别让就绪步骤空等。
+> **推进谁来做**：提交作业（auto-advance）由用户自建的 `monitor.sh`（每 10 分钟 `tf auto on` DAG 推进 + `tf summary --diff`）或 `auto_watch` 后台监控完成，**agent 的巡检 cron 保持只读**。若两者都没开，agent 巡检发现就绪步骤（S2 完 → S3/S4 就绪）时应主动 `tf -tt <技能> auto on` 推进，别让就绪步骤空等。
 
 ## 八、对话示例
 
 用户："C60 怎么样了" → `tf -tt band-dft-cpu -p C60/qHPC60 status`（单材料详情，用人话汇报各步骤）。
-用户："把 qTPC24 的第二步重交" → `tf -tt band-dft-cpu -p C24/qTPC24 -j 2 retry`，报告退出码和 jobid。
+用户："把 qTPC24 的第二步重交" → `tf -tt band-dft-cpu -p C24/qTPC24 -j 2 retry`，核验输入后 `tf -tt band-dft-cpu -p C24/qTPC24 -j 2 start`，分别报告生成和提交结果；只有 start 成功后才报告新 jobid。
 用户："kl-dft-cpu 那个 Sn2Bi2Te 从头再来" → 属破坏性：`rerun` 前复述后果（删除全部步骤目录），确认后 `tf -tt kl-dft-cpu -p Sn2Bi2Te rerun`。
 用户："qHPC20 弹性常数想跑 A800" → `tf -tt elastic-dft-cpu -p qHPC20 hpc a800`（改配置，说明只影响之后提交的作业）。
 用户："mlff-mace 的 Si 继续下一代" → 说明三步：`conf --set params.GENERATION=K`（请示后执行）→ `-j 4 retry`（保留 gen-* 历史清单，勿用 rerun）→ `start`；若 S5 有帧失败只 `retry`。
@@ -276,3 +287,11 @@ project_setting/setting.yaml 的 work_dir   ← 最高，tf hpc 不会改它
 1. **前序产物跨集群不回传**：材料级切 hpc 后，旧集群已算完的 S1_opt~S6 结果不会自动搬到新集群，新集群要重跑（或手动 scp，但不推荐——改状态走 tf）。切之前想清楚：是「接受重跑」还是「留在原集群排队」。
 2. **旧集群有同名材料旧数据**：切过去后若新集群已有该材料的旧目录（之前跑过），`start` 会推进到「下一步」而非重跑——先 `tf -p X status` 看新集群上各步骤是什么状态，判断是旧数据还是需要 rerun。
 3. **fanout 步骤切集群后 rerun**：`tf -p X -j S7_deform rerun` 会删新集群上的 10 个子目录重算（破坏性，先请示）；只想补帧用 retry。
+
+---
+
+## 十一、临时文件纪律（2026-09-05 wangchao 定）
+
+1. **本仓库（taskflow-v2.0）会话产生的临时文件一律放 `tmp/`**（仓库根目录下，已被 .gitignore 忽略，不污染 git）：调试/一次性脚本（probe/poll/scratch/冒烟测试等）、会话内导出、下载文件、临时日志等，**禁止散落仓库根目录或其它目录**。
+2. `tmp/` 是临时区，内容可随时清空；正式产物、模型文件、需长期留存的备份不放这里。确需留底的临时物按日期归档到 `tmp/_archive_<YYYYMMDD>/`（例：2026-09-05 把根目录旧调试残留归档到了 `tmp/_archive_20260905/`）。
+3. 发现旧会话遗留的根目录调试残留（poll_*/scratch_*/CONTROL.*/一次性 probe 脚本等）时，主动归档进 `tmp/_archive_<日期>/` 或删除，不让它们堆回根目录。

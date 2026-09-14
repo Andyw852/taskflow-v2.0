@@ -344,17 +344,68 @@ def annotate(data):
                     m["action"] = "start " + a["label"] + "（曾被 stop）"
     return data
 
+# ===== _seg_proj_name / _proj_of_mat / _name_matches (v3.21) =====
+def _seg_proj_name(t):
+    """段（project_setting/tf_<项目名>.yaml）的项目名；取不到返回 None。
+    项目名 = 配置文件名去掉 tf_ 前缀和 .yaml 后缀；scan_project_configs 保证它在
+    全局唯一，所以可以当作段的稳定标识。"""
+    frm = (t or {}).get("_from")
+    if not frm:
+        return None
+    b = os.path.basename(str(frm))
+    if b.startswith("tf_") and b.endswith(".yaml"):
+        return b[3:-5]
+    return None
+
+
+def _proj_of_mat(m):
+    return _seg_proj_name((m or {}).get("_seg") or {})
+
+
+def _name_matches(m, want, seg=None):
+    """-p 的材料名匹配：完整名 / basename / <项目名>/<完整名>。
+    第三种是 v3.21 为重名材料加的限定形式（见 check_duplicates）。"""
+    name = (m or {}).get("name") or ""
+    if name == want or os.path.basename(name) == want:
+        return True
+    proj = _seg_proj_name(seg if seg is not None else ((m or {}).get("_seg") or {}))
+    return bool(proj) and want == "%s/%s" % (proj, name)
+
+
 # ===== check_duplicates (原 L2465-L2485) =====
 def check_duplicates(data):
     """同一类型内项目名不允许重复（报错退出；跨段/跨条目聚合检查）；
-    basename 重复给警告。跨类型同名允许。"""
+    basename 重复给警告。跨类型同名允许。
+
+    v3.21：同名材料若分属【不同的项目配置段】不再报错。真实布局里很常见：同一份
+    材料清单按轮次/集群各生成一棵项目树（如 pheasy_jzzn_r4/ 与
+    pheasy_3090_all_r4/），两棵树的 materials/<元素>/<材料> 结构完全相同，而 tf 的
+    材料名取自 local_root 下的相对路径、不含项目名 —— 于是所有树的材料全部同名，
+    check_duplicates 直接退出，整个技能在 tf 里不可用（实测 fc-fit：8 棵树、每棵
+    505 个材料，互相全部重名）。这种重名不是数据错误，只是 -p 无法区分；因此给这些
+    材料加【项目名前缀】（<项目名>/<元素>/<材料>）让 -p 无歧义，而不是让整个技能
+    报废。同一段内的真重复（同一棵树里被发现两次）仍然报错。"""
+    from collections import Counter
+    # 先按 (类型, 原名) 收集出现过的项目名标签，再统一改名，避免改到一半名字已变
+    projs_by = {}
+    for t in data["types"]:
+        for m in t["materials"]:
+            projs_by.setdefault((t["key"], m["name"]), set()).add(_proj_of_mat(m))
+    qualified = {}
+    for t in data["types"]:
+        for m in t["materials"]:
+            projs = projs_by.get((t["key"], m["name"])) or set()
+            if len(projs) > 1:
+                proj = _proj_of_mat(m)
+                if proj:
+                    m["name"] = "%s/%s" % (proj, m["name"])
+                    qualified.setdefault(t["key"], set()).add(proj)
     errs = []
     by_key = {}
     for t in data["types"]:
         by_key.setdefault(t["key"], []).extend(m["name"] for m in t["materials"])
     for key, names in by_key.items():
         # v-perf：用 Counter 一次统计，避免大体系下 names.count() 的 O(N²)
-        from collections import Counter
         cnt = Counter(names)
         dups = sorted(n for n, c in cnt.items() if c > 1)
         if dups:
@@ -364,6 +415,12 @@ def check_duplicates(data):
         if bdups:
             print("警告：任务类型 %s 里有重复的 basename：%s，-p 时请写完整名。"
                   % (key, ", ".join(bdups)), file=sys.stderr)
+    if qualified:
+        for key in sorted(qualified):
+            print("提示：任务类型 %s 下 %d 个项目跨项目同名，材料名已加项目名前缀"
+                  "（-p 写 <项目名>/<元素>/<材料>）：%s"
+                  % (key, len(qualified[key]), ", ".join(sorted(qualified[key]))),
+                  file=sys.stderr)
     if errs:
         sys.exit("错误：\n" + "\n".join(errs))
 
@@ -420,6 +477,44 @@ def remote_scancel(cfg, jobids, host="__default__"):
     return rc == 0, out
 
 # ===== remote_gen (原 L3282-L3366) =====
+def render_vasp_template(text, filename, step_name, profiles):
+    if not re.fullmatch(r"submit_(std|gam|ncl)_(0d|2d|3d)\.tpl", filename):
+        return text
+    variant, dimension = re.fullmatch(r"submit_(std|gam|ncl)_(0d|2d|3d)\.tpl", filename).groups()
+    role = (profiles.get("steps") or {}).get(step_name)
+    if role is not None and role not in ("standard", "relax_2d"):
+        raise ValueError("未知 VASP 步骤角色: " + str(role))
+    constrained = dimension == "2d" and (
+        role == "relax_2d" or role is None and bool(re.search(r"opt|relax|bulk", step_name)))
+    profile = profiles.get("relax_2d" if constrained else "standard") or {}
+    executable = profile.get(variant)
+    interface = profile.get("cell_constraint", "none")
+    if not executable:
+        if constrained:
+            return '#!/bin/bash\nexport TF_CELL_CONSTRAINT=none\necho "ERROR: cluster has no configured constrained VASP" >&2\nexit 1\n'
+        raise ValueError("VASP 配置缺少 standard." + variant)
+    if constrained and interface not in ("ioptcell_tag", "optcell_file"):
+        raise ValueError("二维变胞优化需要已配置的 VASP 约束接口")
+    lines = text.splitlines()
+    launches = [index for index, line in enumerate(lines)
+                if re.match(r"\s*(mpirun|mpiexec|srun)\b", line)
+                and re.search(r"vasp_(std|gam|ncl)|TF_VASP_BIN", line)]
+    if len(launches) != 1:
+        raise ValueError("提交模板必须包含唯一的 VASP 启动命令: " + filename)
+    index = launches[0]
+    lines[index] = re.sub(r'(?:\S*/)?vasp_(?:std|gam|ncl)(?:_[A-Za-z0-9.-]+)?|"?\$TF_VASP_BIN"?',
+                         lambda match: shlex.quote(str(executable)), lines[index])
+    lines = [line for line in lines if not line.startswith("export TF_CELL_CONSTRAINT=")]
+    insertion = next(index for index, line in enumerate(lines)
+                     if re.match(r"\s*(mpirun|mpiexec|srun)\b", line)
+                     and re.search(r"vasp_(std|gam|ncl)", line))
+    lines.insert(insertion, "export TF_CELL_CONSTRAINT=" + (interface if constrained else "none"))
+    setup = profile.get("setup") or ""
+    if setup:
+        lines[insertion:insertion] = str(setup).splitlines()
+    return "\n".join(lines) + "\n"
+
+
 def remote_gen(cfg, t, m, sname, host=None, wd=None):
     from tfpkg import STEP_CONF, build_step_conf, find_asset, run_remote, sh_b64, step_cfg
     """执行 gen：先建目录、补 POSCAR（v3 本地模式）和 gen_need 依赖文件、gen 脚本，
@@ -490,6 +585,19 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
         if local_src:
             with open(local_src, "rb") as fh:
                 data = fh.read()
+            if re.fullmatch(r"submit_(std|gam|ncl)_(0d|2d|3d)\.tpl", f):
+                from tfpkg import pkg_setting_path, _load_yaml_file
+                cluster = str(sc.get("hpc") or m.get("hpc_name") or host)
+                config_path = pkg_setting_path(cluster + ".yaml")
+                profiles = ((_load_yaml_file(config_path) or {}).get("vasp")
+                            if config_path else None)
+                if not profiles:
+                    return False, "集群缺少 vasp 版本配置: " + cluster
+                if profiles:
+                    try:
+                        data = render_vasp_template(data.decode(), f, sname, profiles).encode()
+                    except ValueError as error:
+                        return False, str(error)
             b64 = base64.b64encode(data).decode()
             # v1.3.1：依赖文件 md5 比对、不同才覆盖——此前"存在即不推"，
             # 本地 skill 库更新（如 dim_common 加函数）后远端旧版残留，
@@ -516,9 +624,286 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
     return rc == 0, out
 
 # ===== remote_sbatch_fanout (原 L3372-L3433) =====
-def remote_sbatch_fanout(cfg, s, jobname=None):
+# ===== 远端提交去重守卫（fix 重复提交 bug）=====
+# 问题：remote_sbatch / remote_sbatch_fanout 之前直接 sbatch，无原子锁 + 无实时队列检查，
+# kill_if_queued 只用快照。两个进程（agent + monitor.sh、或两台主机、或 _parallel_map 并发）
+# 在同一秒对同一目录各 sbatch 一次 → 同一目录出现两个作业（瀚海 Mg4C60 S6_elastic
+# 229389/229391 相差 1 秒）。修复：在远端目录上 flock 串行化，锁内实时 squeue 按工作目录
+# 匹配所有活动态，查询失败 fail closed；再写持久 job receipt + sacct 兜住 sbatch 可见性延迟。
+_SBATCH_GUARD = r'''
+import os, sys, re, json, time, base64, subprocess, fcntl, getpass
+import glob as _glob
+
+def _norm(p):
+    try:
+        return os.path.normpath(os.path.abspath(p))
+    except Exception:
+        return ""
+
+def _sh(cmd, timeout=60):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or ""), (r.stderr or "")
+    except Exception as e:
+        return -1, "", str(e)
+
+def _emit(ok, jids, reason):
+    print("__TF_RESULT__ " + json.dumps({"ok": bool(ok), "jobids": list(jids or []),
+                                         "reason": str(reason or "")}, ensure_ascii=False))
+    sys.exit(0)
+
+def _read_receipt(d):
+    p = os.path.join(d, ".tf_job_receipt")
+    try:
+        with open(p, encoding="utf-8") as f:
+            parts = f.read().strip().split()
+        if len(parts) >= 2:
+            return (parts[0], float(parts[1]))
+    except (OSError, ValueError):
+        pass
+    return None
+
+def _write_receipt(d, jid):
+    try:
+        tmp = os.path.join(d, ".tf_job_receipt.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("%s %.6f\n" % (jid, time.time()))
+        os.replace(tmp, os.path.join(d, ".tf_job_receipt"))
+    except OSError:
+        pass
+
+_TERMINAL = {"COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL",
+             "BOOT_FAIL", "OUT_OF_MEMORY", "DEADLINE", "PREEMPTED",
+             "CD", "CA", "F", "TO", "NF", "OOM"}
+
+def _sacct_state(jid):
+    rc, out, err = _sh(["sacct", "-j", jid, "-n", "-P", "-X", "-o", "JobID,State"])
+    if rc != 0:
+        return None
+    for ln in (out or "").splitlines():
+        p = ln.split("|")
+        if p and p[0].strip() == jid:
+            return (p[1].strip() if len(p) > 1 else "")
+    return ""
+
+def _squeue_jobs(user):
+    rc, out, err = _sh(["squeue", "-u", user, "-h", "-o", "%i|%Z|%T"])
+    if rc == 0:
+        jobs = []
+        for ln in (out or "").splitlines():
+            p = ln.split("|")
+            if len(p) >= 3:
+                jobs.append((p[0].strip(), _norm(p[1]), p[2].strip()))
+        return ("wd", jobs)
+    rc2, out2, _ = _sh(["squeue", "-u", user, "-h", "-o", "%i|%j|%T"])
+    if rc2 == 0:
+        jobs = []
+        for ln in (out2 or "").splitlines():
+            p = ln.split("|")
+            if len(p) >= 3:
+                jobs.append((p[0].strip(), p[1].strip(), p[2].strip()))
+        return ("name", jobs)
+    return (None, None)
+
+def _set_jobname(path, name, insert):
+    try:
+        with open(path, encoding="utf-8") as f:
+            s = f.read()
+    except OSError:
+        return
+    s = re.sub(r"(?m)^(#SBATCH[ \t]+--job-name=).*$", r"\g<1>" + name, s)
+    s = re.sub(r"(?m)^(#SBATCH[ \t]+-J[ \t]+).*$", r"\g<1>" + name, s)
+    if insert and not re.search(r"(?m)^#SBATCH[ \t]+--job-name=", s):
+        s = re.sub(r"(?m)^(#SBATCH.*)$", r"\g<1>\n#SBATCH --job-name=" + name, s, count=1)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(s)
+    except OSError:
+        pass
+
+def main():
+    argv = sys.argv
+    cfg = json.loads(base64.b64decode(argv[argv.index("--config64") + 1]).decode("utf-8"))
+    step_dir = _norm(cfg["dir"])
+    jobname = str(cfg.get("jobname") or "")
+    fanout = str(cfg.get("fanout") or "")
+    only = [str(x) for x in (cfg.get("only") or [])]
+    force = bool(cfg.get("force"))
+    submit = str(cfg.get("submit") or "submit.sh")
+    lock_timeout = float(cfg.get("lock_timeout", 120))
+    vis_window = float(cfg.get("vis_window", 60))
+    user = str(cfg.get("user") or "") or getpass.getuser()
+
+    if not os.path.isdir(step_dir):
+        _emit(False, [], "步骤目录不存在：" + step_dir)
+
+    jn = re.sub(r"[^A-Za-z0-9_.-]", "_", jobname)
+    cands = [submit] + [c for c in ("submit.sh", "sub.sh", "job.sh", "run.sh", "sub.slurm")
+                        if c != submit]
+
+    if fanout:
+        subs = sorted(p for p in _glob.glob(os.path.join(step_dir, fanout))
+                      if os.path.isdir(p))
+        if only:
+            keep = set(only)
+            subs = [p for p in subs if os.path.basename(p) in keep]
+        targets = [_norm(p) for p in subs]
+    else:
+        targets = [step_dir]
+
+    # Use the nearest common fanout root so direct-child and fanout submissions share a lock.
+    lock_base = step_dir
+    probe = step_dir
+    while True:
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        sibling_dirs = [p for p in _glob.glob(os.path.join(probe, "*")) if os.path.isdir(p)]
+        if any(os.path.isfile(os.path.join(p, submit)) for p in sibling_dirs):
+            lock_base = probe
+            break
+        probe = parent
+    lock = os.path.join(lock_base, ".tf_submit.lock")
+    try:
+        fd = open(lock, "a+")
+    except OSError as e:
+        _emit(False, [], "无法创建提交锁：" + str(e))
+    got = False
+    if lock_timeout <= 0:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        got = True
+    else:
+        deadline = time.time() + lock_timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.2)
+    if not got:
+        _emit(False, [], "提交锁获取超时（%ss，同一目录有别的提交正在进行）" % lock_timeout)
+
+    try:
+        mode, jobs = _squeue_jobs(user)
+        if jobs is None:
+            _emit(False, [], "squeue 查询失败，拒绝提交（fail closed）")
+        wdmap = {}
+        for jid, key, st in jobs:
+            if key and key not in wdmap:
+                wdmap[key] = (jid, st)
+        blocking = {}
+        for key, (jid, st) in wdmap.items():
+            if force and st.upper() in ("CG", "CF", "CA"):
+                continue
+            blocking[key] = (jid, st)
+        for t in targets:
+            for key, (jid, st) in blocking.items():
+                hit = ((key == t or key.startswith(t + os.sep)) if mode == "wd"
+                       else (key == jn or (bool(fanout) and key.startswith(jn + "-"))))
+                if hit:
+                    _emit(False, [], "已有作业 %s(%s) 占用该目录，拒绝重复提交" % (jid, st))
+        for t in targets:
+            rcpt = _read_receipt(t)
+            if not rcpt:
+                continue
+            jid, ts = rcpt
+            age = time.time() - ts
+            st = _sacct_state(jid)
+            if st is None:
+                _emit(False, [], "存在提交回执 %s 但 sacct 查询失败，拒绝重复提交" % jid)
+            if st == "":
+                _emit(False, [], "存在提交回执 %s 但状态不可见，拒绝重复提交" % jid)
+            # sacct 的状态可能带后缀（如 "CANCELLED by 1023"、
+            # "FAILED (ExitCode)"），精确匹配会把手已终止的作业误判为"仍活跃"，
+            # 导致回执永久挡住重投。取首词比较。
+            if st.upper().split()[0] not in _TERMINAL:
+                _emit(False, [], "回执作业 %s 仍活跃（%s），拒绝重复提交" % (jid, st))
+        out_lines = []
+        jids = []
+        for t in targets:
+            if not os.path.isdir(t):
+                _emit(False, jids, "子目录不存在：" + t)
+            os.chdir(t)
+            f = ""
+            for c in cands:
+                if os.path.isfile(c):
+                    f = c
+                    break
+            if not f:
+                found = [x for x in os.listdir(t) if x.endswith((".sub", ".slurm"))]
+                f = found[0] if found else ""
+            if not f:
+                _emit(False, jids, "%s 里找不到提交脚本" % t)
+            name = (jn + "-" + os.path.basename(t)) if (jn and fanout) else jn
+            if name:
+                _set_jobname(os.path.join(t, f), name, insert=not bool(fanout))
+            rc, out, err = _sh(["sbatch", f])
+            out_lines.append((out or "").strip())
+            if rc != 0:
+                _emit(False, jids, "sbatch 失败：%s %s" % ((out or "").strip(), (err or "").strip()))
+            m = re.search(r"Submitted batch job\s+(\d+)", out or "")
+            if m:
+                jids.append(m.group(1))
+                _write_receipt(t, m.group(1))
+        for ln in out_lines:
+            if ln:
+                print(ln)
+        _emit(True, jids, "")
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _sbatch_guarded(cfg, step_dir, host="__default__", jobname=None, fanout=None,
+                    only=None, force=False, submit=None):
+    from tfpkg import run_remote
+    """在远端 step_dir 上：目录锁 + 实时 squeue 去重 + 回执/sacct 防可见性延迟，再 sbatch。
+    返回 (ok, out, 逗号分隔 jobid 或 None)。查询失败一律 fail closed（拒绝提交）。"""
+    _conf = {
+        "dir": step_dir,
+        "jobname": jobname or "",
+        "fanout": fanout or "",
+        "only": list(only or []),
+        "force": bool(force),
+        "submit": submit or "submit.sh",
+        "lock_timeout": float(os.environ.get(
+            "TF_SBATCH_LOCK_TIMEOUT", str(cfg.get("sbatch_lock_timeout", 120))) or 120),
+        "vis_window": float(os.environ.get(
+            "TF_SBATCH_VIS_WINDOW", str(cfg.get("sbatch_vis_window", 60))) or 60),
+        "user": str(cfg.get("user") or ""),
+    }
+    b64_script = base64.b64encode(_SBATCH_GUARD.encode("utf-8")).decode()
+    b64_conf = base64.b64encode(
+        json.dumps(_conf, ensure_ascii=False).encode("utf-8")).decode()
+    line = "echo %s | base64 -d | python3 - --config64 %s" % (b64_script, b64_conf)
+    rc, out = run_remote(cfg, line, host=host)
+    res = None
+    for ln in (out or "").splitlines():
+        if ln.startswith("__TF_RESULT__ "):
+            try:
+                res = json.loads(ln[len("__TF_RESULT__ "):])
+            except ValueError:
+                res = None
+            break
+    if res is not None:
+        jids = [str(x) for x in (res.get("jobids") or [])]
+        return bool(res.get("ok")), out, (",".join(jids) if jids else None)
+    return False, out, None   # guard 未产出结果（ssh/python3 失败）→ fail closed
+
+
+def remote_sbatch_fanout(cfg, s, jobname=None, force=False):
     from tfpkg import run_remote, sh_b64
-    """扇出步骤：步骤目录下每个匹配子目录各自 sbatch 一次。
+    """扇出步骤：步骤目录下每个匹配子目录各自 sbatch 一次（目录锁 + 实时队列去重）。
 
     s["fan_todo"] 非空时只提交这些子目录（retry 只补没完成的）；
     为空或缺失时提交全部（首次 gen 之后就是这条路）。
@@ -549,63 +934,16 @@ def remote_sbatch_fanout(cfg, s, jobname=None):
                     "conf --set params.METHOD=alm\n"
                     "  永久调阈值：全局 tf.yaml 写 fanout_max: <N>"
                     % (_n, _cap, _n + 1), None)
-    cands = [s["submit"]] + [c for c in ("submit.sh", "sub.sh", "job.sh",
-                                         "run.sh", "sub.slurm")
-                             if c != s["submit"]]
-    jn = re.sub(r"[^A-Za-z0-9_.-]", "_", str(jobname or ""))
-    ln = ["cd %s || exit 1" % shlex.quote(s["dir"]), "rc=0",
-          "ONLY=%s" % (shlex.quote(" ".join(only)) if only else "''"),
-          "for d in %s; do" % pat,
-          '  [ -d "$d" ] || continue',
-          '  if [ -n "$ONLY" ]; then',
-          '    case " $ONLY " in *" $d "*) ;; *) continue ;; esac',
-          '  fi',
-          '  ( cd "$d" || exit 1',
-          '    f=""',
-          '    for c in %s; do [ -f "$c" ] && f="$c" && break; done' % " ".join(cands),
-          '    [ -z "$f" ] && f=$(ls *.sub *.slurm 2>/dev/null | head -1)',
-          '    if [ -z "$f" ]; then',
-          '      echo "ERROR: $d 里找不到提交脚本" >&2; exit 1',
-          '    fi']
-    if jn:
-        ln.append('    sed -i -e "s/^#SBATCH[[:space:]]\\+--job-name=.*/'
-                  '#SBATCH --job-name=%s-$d/" -e "s/^#SBATCH[[:space:]]\\+-J'
-                  '[[:space:]].*/#SBATCH --job-name=%s-$d/" "$f" '
-                  '2>/dev/null || true' % (jn, jn))
-    ln += ['    sbatch "$f" ) || rc=1',
-           "done",
-           "exit $rc"]
-    rc, out = run_remote(cfg, sh_b64("\n".join(ln)),
-                         host=s.get("_host") or "__default__")
-    jids = re.findall(r"Submitted batch job\s+(\d+)", out or "")
-    return (rc == 0 and bool(jids)), out, (",".join(jids) if jids else None)
+    return _sbatch_guarded(cfg, s["dir"], s.get("_host") or "__default__",
+                           jobname=jobname, fanout=pat, only=only, force=force,
+                           submit=s.get("submit"))
 
-# ===== remote_sbatch (原 L3436-L3459) =====
-def remote_sbatch(cfg, s, jobname=None):
-    from tfpkg import run_remote
+
+def remote_sbatch(cfg, s, jobname=None, force=False):
     if s.get("fanout"):                       # v1.4
-        return remote_sbatch_fanout(cfg, s, jobname=jobname)
-    cands = [s["submit"]] + [c for c in
-                             ("submit.sh", "sub.sh", "job.sh", "run.sh", "sub.slurm")
-                             if c != s["submit"]]
-    loop = ("f=''; for c in %s; do [ -f \"$c\" ] && f=\"$c\" && break; done; "
-            % " ".join(cands))
-    loop += ("[ -z \"$f\" ] && f=$(ls *.sub *.slurm 2>/dev/null | head -1); "
-             "[ -z \"$f\" ] && { echo 'ERROR: 步骤目录里找不到提交脚本' >&2; exit 1; }; ")
-    if jobname:
-        jn = re.sub(r"[^A-Za-z0-9_.-]", "_", str(jobname))
-        loop += ("sed -i -e 's/^#SBATCH[[:space:]]\\+--job-name=.*/#SBATCH --job-name=%s/' "
-                 "-e 's/^#SBATCH[[:space:]]\\+-J[[:space:]].*/#SBATCH --job-name=%s/' \"$f\"; "
-                 "grep -q '^#SBATCH --job-name=%s' \"$f\" || "
-                 "sed -i '0,/^#SBATCH/s//#SBATCH --job-name=%s\\n&/' \"$f\"; " % (jn, jn, jn, jn))
-    loop += "sbatch \"$f\""
-    rc, out = run_remote(cfg, "cd %s && %s" % (shlex.quote(s["dir"]), loop),
-                         host=s.get("_host") or "__default__")
-    jid = None
-    m = re.search(r"Submitted batch job\s+(\d+)", out or "")
-    if m:
-        jid = m.group(1)
-    return rc == 0 and jid is not None, out, jid
+        return remote_sbatch_fanout(cfg, s, jobname=jobname, force=force)
+    return _sbatch_guarded(cfg, s["dir"], s.get("_host") or "__default__",
+                           jobname=jobname, force=force, submit=s.get("submit"))
 
 # ===== kill_if_queued (原 L3462-L3476) =====
 def kill_if_queued(cfg, s, force, tag):
@@ -672,7 +1010,9 @@ def do_submit(cfg, t, m, s, force, gen_first, contcar_cp, tag, submit=True):
     if not kill_if_queued(cfg, s, force, tag):
         return False
     if gen_first or not s["has_incar"]:
-        _relay_prev_across_host(cfg, m, s)   # v1.12：跨集群回传前序产物
+        _fetch_stamp_clear(m, s["name"])
+        s["done"] = False  # the collected completion belongs to the previous run
+        _relay_prev_across_host(cfg, m, s, t)   # v1.13：跨集群按 needs 回传依赖产物（含 WAVECAR）
         ok, out = remote_gen(cfg, t, m, s["name"], host=s.get("_host"), wd=s.get("_wd"))
         if not ok:
             print("%s: gen 失败。%s" % (tag, out))
@@ -686,15 +1026,87 @@ def do_submit(cfg, t, m, s, force, gen_first, contcar_cp, tag, submit=True):
               % (tag, m["name"].split("/")[-1], s["label"]))
         log_action(m, "gen %s（只生成输入，待 start 提交）" % s["label"])
         return True
+    if str(s.get("_host") or m.get("host_eff") or cfg.get("host") or "__default__") != "__default__":
+        ok, reason = _remote_submit_preflight(cfg, m, s, t)
+        if not ok:
+            print("%s: 远端提交前检查失败：%s" % (tag, reason), file=sys.stderr)
+            return False
     jobname = "%s-%s-%s" % (m["name"].split("/")[-1], m["tt"], s["label"])
-    ok, out, jid = remote_sbatch(cfg, s, jobname=jobname)
+    ok, out, jid = remote_sbatch(cfg, s, jobname=jobname, force=force)
     print("%s: %s" % (tag, ("已提交 %s (jobid=%s)" % (jobname, jid)) if ok
                             else ("提交失败。" + out)))
     if ok:
         log_action(m, "%s jobid=%s" % (tag.split(" ", 1)[0] + " " + s["label"], jid))
         _fetch_stamp_clear(m, s["name"])   # v1.11：重交后结果会更新，清戳记重拉
+        s["done"] = False  # do not reuse completion from before submission
         _scancel_clear(m, s["name"])       # v1.4：重交成功，清 stop 标记
     return ok
+
+def _remote_submit_preflight(cfg, m, s, t=None):
+    """远端提交前验证连接，并把当前步骤输入保存到本地 result。
+
+    t = 该技能的类型骨架；技能可用 skill.yaml 的 submit_required 自报必须
+    存在的输入清单（默认行为不变）。"""
+    import subprocess
+    host = str(s.get("_host") or m.get("host_eff") or cfg.get("host") or "")
+    connector = "/home/wangchao/bin/hanhai25-connect" if "hanhai" in host.lower() else ""
+    if connector and os.path.isfile(connector):
+        p = subprocess.run([connector], capture_output=True, text=True,
+                           timeout=30)
+        if p.returncode != 0:
+            return False, (p.stderr or p.stdout or "hanhai25-connect 失败").strip()
+    is_mace = "mace" in str(m.get("tt") or "").lower()
+    # v3.24：不跑 VASP 的技能（力常数拟合等）没有 INCAR/KPOINTS，硬要求会让
+    # 它永远提交不出去。技能声明了就用它的清单，否则沿用历史默认。
+    # cfg["task_types"] 才是合并后的技能骨架：collect_data() 造出的 data["types"]
+    # 只带回 steps_cfg/gen_need 等少数字段，t 上不一定有本键。
+    declared = (((cfg.get("task_types") or {}).get(m.get("tt")) or {})
+                .get("submit_required") or (t or {}).get("submit_required"))
+    required = (tuple(str(x) for x in declared) if declared
+                else (("POSCAR", "submit.sh") if is_mace
+                      else ("INCAR", "POSCAR", "KPOINTS", "submit.sh")))
+    dest = os.path.join(m.get("result_dir") or "", s["name"])
+
+    # 扇出步骤的输入在 deform-*/ 子目录中，父目录通常只有 POSCAR，不能
+    # 按普通步骤检查父目录。先按本次待提交子目录逐项检查；缺失时只回拉
+    # 这些子目录的输入文件，避免把已完成帧的大型 OUTCAR/vasprun.xml 全部拉回。
+    if s.get("fanout"):
+        names = list(s.get("fan_todo") or s.get("subs") or [])
+        missing = []
+        for name in names:
+            for item in required:
+                if not os.path.isfile(os.path.join(dest, name, item)):
+                    missing.append("%s/%s" % (name, item))
+        if missing:
+            paths = [os.path.join(name, item) for name in names for item in required]
+            remote = ("cd %s || exit 1; tar --ignore-failed-read -cf - %s"
+                      % (shlex.quote(s["dir"]),
+                         " ".join(shlex.quote(path) for path in paths)))
+            from tfpkg import _ssh_cmd
+            cmd = _ssh_cmd(cfg, host, [remote])
+            os.makedirs(dest, exist_ok=True)
+            p1 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p2 = subprocess.run(["tar", "xf", "-", "-C", dest], stdin=p1.stdout,
+                                 capture_output=True, text=True)
+            p1.stdout.close()
+            err = p1.stderr.read().decode(errors="replace") if p1.stderr else ""
+            rc1 = p1.wait()
+            if rc1 != 0 or p2.returncode != 0:
+                return False, "扇出输入回拉失败：%s" % (p2.stderr or err).strip()
+        missing = ["%s/%s" % (name, item) for name in names for item in required
+                   if not os.path.isfile(os.path.join(dest, name, item))]
+        return (True, "") if not missing else (False, "本地仍缺少 " + ", ".join(missing[:12]))
+
+    missing = [x for x in required if not os.path.isfile(os.path.join(dest, x))]
+    if missing:
+        if not m.get("result_dir"):
+            return False, "result_dir 未配置，无法保存提交输入"
+        if not fetch_material(cfg, m, only_steps={s["name"]}, quiet=True,
+                              force_steps={s["name"]},
+                              fetch_files_override=required):
+            return False, "提交前回拉输入失败"
+    missing = [x for x in required if not os.path.isfile(os.path.join(dest, x))]
+    return (True, "") if not missing else (False, "本地仍缺少 " + ", ".join(missing))
 
 # ===== _fanout_guard (原 L3549-L3578) =====
 def _fanout_guard(m, s, yes, action):
@@ -1112,11 +1524,12 @@ def _fetch_stamp_clear(m, step_name):
         pass
 
 # ===== _relay_prev_across_host (原 L5101-L5142) =====
-def _relay_prev_across_host(cfg, m, s):
+def _relay_prev_across_host(cfg, m, s, t=None):
     from tfpkg import _ssh_cmd, log_action
-    """per-step 跨集群数据传递：当前步骤与其前序步骤不在同一超算时，把本地
-    result_dir/<prev>/ 已 fetch 的产物上传到当前 host 的 <prev>/ 目录，让 gen
-    脚本的 find_prev_dir 就地找到（FORCES_FC3 等大文件走 tar 流，吃内存低）。"""
+    """per-step 跨集群数据传递：当前步骤与其依赖(needs)步骤不在同一超算时，把本地
+    result_dir/<dep>/ 已 fetch 的产物上传到当前 host 的 <dep>/ 目录，让 gen
+    脚本的 find_prev_dir 就地找到。v1.13：按 needs 回传（不只 seq 前序），并把
+    WAVECAR 一起拉回（大文件走 tar 流，吃内存低）。"""
     steps = m.get("steps") or []
     idx = next((i for i, x in enumerate(steps) if x.get("name") == s.get("name")), -1)
     if idx <= 0:
@@ -1126,17 +1539,30 @@ def _relay_prev_across_host(cfg, m, s):
     rdir = m.get("result_dir")
     if not cur_host or not cur_dir or not rdir:
         return
-    for p in reversed(steps[:idx]):
+    # 需要回传的依赖步骤：needs 优先，未写 needs 回退成 seq 前一步
+    prev_name = steps[idx - 1].get("name") if idx > 0 else None
+    dep_names = _dag_needs(t, m, s, prev_name) if t is not None else ([prev_name] if prev_name else [])
+    name2step = {x.get("name"): x for x in steps}
+    # 技能子目录根：cur_dir 尾部去掉 "/<step.name>"（step.name 形如 "step2_bandgap/step2.3_hse"）
+    rel = s.get("name") or ""
+    skill_root = cur_dir[: -len(rel) - 1] if rel and cur_dir.endswith("/" + rel) else os.path.dirname(cur_dir)
+    for dep_name in dep_names:
+        p = name2step.get(dep_name)
+        if p is None:
+            continue
         if not (p.get("exists") or p.get("done")):
             continue
         if p.get("_host") == cur_host:
-            return   # 同集群：gen 就地能找到，无需回传
+            continue   # 同集群：gen 就地能找到，无需回传
         local = os.path.join(rdir, p["name"])
         if not os.path.isdir(local):
-            fetch_material(cfg, m, only_steps={p["name"]}, quiet=True)
+            # v1.13 fix：needs 步（如 step2.2_pbe）的 WAVECAR 不在 fetch_files，
+            # 跨集群必须连同 WAVECAR 一起拉回，否则 gen 读到的是陈旧/缺失的大文件。
+            fetch_material(cfg, m, only_steps={p["name"]}, quiet=True,
+                           fetch_files_override=(m.get("fetch_files") or []) + ["WAVECAR"])
         if not os.path.isdir(local):
-            continue   # 前序产物拉取失败
-        remote_prev = os.path.join(os.path.dirname(cur_dir), p["name"])
+            continue   # 依赖产物拉取失败
+        remote_prev = os.path.join(skill_root, p["name"])
         remote = "mkdir -p %s && tar -xf - -C %s" % (
             shlex.quote(remote_prev), shlex.quote(remote_prev))
         p1 = subprocess.Popen(["tar", "-cf", "-", "-C", local, "."],
@@ -1154,31 +1580,77 @@ def _relay_prev_across_host(cfg, m, s):
         print("%s: 已把 %s 产物回传到 %s → %s"
               % (m["name"], p["label"], cur_host, remote_prev))
         log_action(m, "relay %s → %s" % (p["label"], cur_host))
-        return
 
 # ===== fetch_material (原 L5145-L5190) =====
-def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False):
+def _fetch_receipt(cfg, m, s):
+    """Completion receipt tied to source and configured transfer scope."""
+    sc = next((x for x in ((m.get("_seg") or {}).get("steps_cfg") or [])
+               if x.get("name") == s["name"]), {})
+    return {"version": 2, "complete": True,
+            "host": s.get("_host") or m.get("host_eff") or cfg.get("host"),
+            "dir": s.get("dir"), "exists": bool(s.get("exists")),
+            "files": sorted(m.get("fetch_files") or []),
+            "all": bool(sc.get("fetch_all"))}
+
+
+def _fetch_receipt_valid(cfg, m, s):
+    # A receipt is meaningful only for a freshly collected completed step;
+    # callers also gate this, but keep the invariant at the receipt seam.
+    if not s.get("done") or s.get("job"):
+        return False
+    from tfpkg import FETCH_STAMP
+    try:
+        with open(os.path.join(m["result_dir"], s["name"], FETCH_STAMP)) as f:
+            return json.load(f) == _fetch_receipt(cfg, m, s)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _fetch_receipt_write(cfg, m, s):
+    from tfpkg import FETCH_STAMP
+    if not s.get("done") or s.get("job"):
+        return
+    dest = os.path.join(m["result_dir"], s["name"])
+    try:
+        os.makedirs(dest, exist_ok=True)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", dir=dest, prefix=".tf_fetch-",
+                                         delete=False) as f:
+            json.dump(_fetch_receipt(cfg, m, s), f, sort_keys=True)
+            tmp = f.name
+        os.replace(tmp, os.path.join(dest, FETCH_STAMP))
+    except OSError:
+        pass
+
+
+def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False,
+                   force_steps=None, fetch_files_override=None):
     from tfpkg import FETCH_STAMP, _ssh_cmd, log_action
     """把该材料各已存在步骤的 fetch_files 从超算拉回本地 result_dir/<step>/。
     用 tar 管道流式传输，缺失文件自动跳过。only_steps = 只拉这些步骤名。"""
     host = m.get("host_eff") or cfg.get("host")
-    files = m.get("fetch_files") or []
-    if not files:
+    files = (fetch_files_override if fetch_files_override is not None else
+             (m.get("fetch_files") or []))
+    if not files and not all_files and not any(
+            x.get("fetch_all") for x in ((m.get("_seg") or {}).get("steps_cfg") or [])):
         if not quiet:
             print("%s: fetch_files 为空，跳过。" % m["name"])
         return True
     nstep = 0
     for s in m["steps"]:
-        if not s.get("exists"):
+        if not s.get("exists") and s["name"] not in (force_steps or set()):
             continue
         if only_steps is not None and s["name"] not in only_steps:
             continue
+        _fetch_stamp_clear(m, s["name"])
         dest = os.path.join(m["result_dir"], s["name"])
         os.makedirs(dest, exist_ok=True)
         sc2 = next((x for x in ((m.get("_seg") or {}).get("steps_cfg") or [])
                     if x.get("name") == s["name"]), {})
         if sc2.get("fetch_all") or all_files:   # v3.21：画图步骤产物文件名不固定，整目录拉回；v1.1：fetch --all 整目录
             remote = "cd %s && tar -cf - ." % shlex.quote(s["dir"])
+        elif not files:
+            continue
         else:
             remote = ("cd %s && tar --ignore-failed-read -cf - %s"
                       % (shlex.quote(s["dir"]),
@@ -1194,10 +1666,7 @@ def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False):
         if rc1 != 0 or p2.returncode != 0:
             print("%s: fetch %s 失败。%s" % (m["name"], s["label"], p2.stderr))
             return False
-        try:   # v1.11：抓取成功写戳记（auto-fetch 据此跳过，不再每次重拉）
-            open(os.path.join(dest, FETCH_STAMP), "w").close()
-        except OSError:
-            pass
+        _fetch_receipt_write(cfg, m, s)
         nstep += 1
     if nstep and not quiet:
         print("%s: 已拉回 %d 个步骤 → %s" % (m["name"], nstep, m["result_dir"]))
@@ -1220,21 +1689,10 @@ def auto_fetch(cfg, data):
                 continue
             need = []
             for s in m["steps"]:
-                if not s.get("done"):
+                if not s.get("done") or s.get("job"):
+                    _fetch_stamp_clear(m, s["name"])
                     continue
-                dest = os.path.join(m["result_dir"], s["name"])
-                # v1.11：按戳记判"已抓取"。旧守卫（dest 非空）对跳过段失效——
-                # 它们远端没目录，永远拉不到文件，会每次都重试空拉
-                if os.path.isfile(os.path.join(dest, FETCH_STAMP)):
-                    continue
-                # v1.12：老版本已拉回过的（dest 非空）补写戳记直接跳过——否则
-                # 戳记制上线第一次会把全部历史结果（含巨大的 HSE OUTCAR、整目录
-                # 画图产物）重拉一遍，表现为长时间"卡死"
-                if os.path.isdir(dest) and os.listdir(dest):
-                    try:
-                        open(os.path.join(dest, FETCH_STAMP), "w").close()
-                    except OSError:
-                        pass
+                if _fetch_receipt_valid(cfg, m, s):
                     continue
                 need.append(s["name"])
             if not need:
@@ -1254,14 +1712,11 @@ def auto_fetch(cfg, data):
             ok = False
             print("警告：auto-fetch %s 失败：%s" % (m["name"], e),
                   file=sys.stderr)
-        if ok:  # 戳记补写：跳过段远端没目录，fetch 不会经手，这里统一补上
-            for nm in need:
-                try:
-                    d = os.path.join(m["result_dir"], nm)
-                    os.makedirs(d, exist_ok=True)
-                    open(os.path.join(d, FETCH_STAMP), "w").close()
-                except OSError:
-                    pass
+        if ok:
+            # Only virtual completed steps need a receipt without a transfer.
+            for s in m["steps"]:
+                if s["name"] in need and not s.get("exists"):
+                    _fetch_receipt_write(cfg, m, s)
     if len(pending) == 1:
         one(pending[0])
     else:  # v3.17：多材料并行拉回（配合 ssh 连接复用，等待时间大幅缩短）
@@ -1548,6 +2003,34 @@ def _filter_protected(items, verb):
         print("（已跳过 %d 个受保护材料）" % nskip)
     return kept
 
+# ===== _stop_host / _ask_confirm（v3.12）=====
+def _stop_host(m, s, cfg):
+    """取消作业时该发到哪个集群。
+
+    必须用【步骤级】_host —— collect.py 给它填的是该步骤作业真正所在集群
+    （relay 到别的超算的步骤，_host 与材料级 host_eff 不同）。
+    旧代码用 m["host_eff"]，于是 relay 步骤的 scancel 发到了默认集群：
+    ssh 过去了、那边没有这些 jobid、scancel 对不存在的作业静默返回 0 ——
+    tf 打印"成功"并打上 scancel 标记，而作业在真集群上照跑。失败得完全无声。
+    本文件别处（step 就绪判断、提交）用的都是同一个三级取法，这里补齐。"""
+    return str(s.get("_host") or m.get("host_eff") or cfg.get("host") or "__default__")
+
+
+def _ask_confirm(prompt):
+    """交互确认。无 TTY 时给可执行的错误，而不是抛 EOFError 栈。
+
+    旧代码直接 input()：非交互场景（agent / cron / 管道）会抛
+    EOFError traceback，既不友好也不说明该加 -y。"""
+    if not sys.stdin or not sys.stdin.isatty():
+        sys.exit("错误：%s 需要确认，但当前不是交互终端。"
+                 "请显式加 -y 表示同意（例：tf -tt <技能> -p <材料> -j <步骤> stop -y）"
+                 % "该操作")
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        sys.exit("错误：读取确认输入失败（stdin 已关闭）。请显式加 -y 表示同意。")
+
+
 def cmd_stop(cfg, data, mname, jname, yes):
     from tfpkg import find_material, find_step, log_action
     if jname and not mname:  # v3.11：取消全部材料的指定步骤作业
@@ -1559,15 +2042,14 @@ def cmd_stop(cfg, data, mname, jname, yes):
         desc = ", ".join("%s(%s,%s)" % (j["id"], m["name"], j["state"])
                          for j, m, s in jobs)
         if not yes:
-            ans = input("取消全部材料的步骤 %s 的作业：%s ? [y/N] "
-                        % (jobs[0][2]["label"], desc)).strip().lower()
+            ans = _ask_confirm("取消全部材料的步骤 %s 的作业：%s ? [y/N] "
+                               % (jobs[0][2]["label"], desc))
             if ans not in ("y", "yes"):
                 print("已取消操作。")
                 return 1
         by_host = {}
-        for j, m, s in jobs:
-            by_host.setdefault(m.get("host_eff") or "__default__",
-                               []).append((j, m, s))
+        for j, m, s in jobs:      # v3.12：按步骤级 _host 分组（relay 步骤在别的集群）
+            by_host.setdefault(_stop_host(m, s, cfg), []).append((j, m, s))
         ok_all = True
         for h, trio in by_host.items():
             ids = [j["id"] for j, m, s in trio]
@@ -1588,27 +2070,50 @@ def cmd_stop(cfg, data, mname, jname, yes):
         steps = [find_step(m, jname)] if jname else m["steps"]
         jobs = [(s["job"], s) for s in steps if s.get("job")]
         if not jobs:
+            # v3.12：显式点名了步骤就照样打 scancel 标记。
+            #   旧行为直接 return，于是"作业已经不在了"（刚被手工 scancel、
+            #   撞墙钟、被看门狗杀、或 tf 之外的任何原因消失）时标记打不上，
+            #   auto_advance 会把它当 FAIL 自动重投 —— 而用户的本意是"停掉它"。
+            #   要标记的是【意图】，不是【作业当前是否存在】。
+            if jname:
+                for s in steps:
+                    _scancel_set(m, s["name"], None)
+                log_action(m, "stop-mark %s（无运行作业）"
+                           % ",".join(s["name"] for s in steps))
+                print("%s: 没有排队/运行的作业，仍按你的要求打了 scancel 标记：%s"
+                      % (m["name"], ", ".join(s["label"] for s in steps)))
+                print("重跑：tf -tt %s -p '%s' start（保留文件）或 rerun（推倒重来）"
+                      % (m["tt"], m["name"]))
+                return 0
             print("%s: 没有排队/运行的作业。" % m["name"])
             return 0
         desc = ", ".join("%s(%s,%s)" % (j["id"], j["state"], s["label"]) for j, s in jobs)
         if not yes:
-            ans = input("取消 %s(tt=%s) 的作业 %s ? [y/N] "
-                        % (m["name"], m["tt"], desc)).strip().lower()
+            ans = _ask_confirm("取消 %s(tt=%s) 的作业 %s ? [y/N] "
+                               % (m["name"], m["tt"], desc))
             if ans not in ("y", "yes"):
                 print("已取消操作。")
                 return 1
-        ok, out = remote_scancel(cfg, [j["id"] for j, _ in jobs],
-                                 host=m.get("host_eff") or "__default__")
-        print("%s: scancel %s %s" % (m["name"], _scancel_desc([j["id"] for j, _ in jobs]),
-                                     "成功" if ok else ("失败: " + out)))
-        if ok:   # v1.4：打 scancel 标记，auto_advance 不再自动重跑
-            for j, s in jobs:
-                _scancel_set(m, s["name"], j["id"])
+        # v3.12：按【步骤级】_host 分组 —— relay 到别的集群的步骤必须发到那边
+        by_host = {}
+        for j, s in jobs:
+            by_host.setdefault(_stop_host(m, s, cfg), []).append((j, s))
+        ok_all = True
+        for h, trio in sorted(by_host.items()):
+            ids = [j["id"] for j, _ in trio]
+            ok, out = remote_scancel(cfg, ids, host=h)
+            ok_all = ok_all and ok
+            print("%s: scancel %s @%s %s" % (m["name"], _scancel_desc(ids), h,
+                                             "成功" if ok else ("失败: " + out)))
+            if ok:   # v1.4：打 scancel 标记，auto_advance 不再自动重跑
+                for j, s in trio:
+                    _scancel_set(m, s["name"], j["id"])
+        if ok_all:
             log_action(m, "stop %s" % " ".join(j["id"] for j, _ in jobs))
             print("%s: 已打 scancel 标记（不会自动重跑）；重跑："
                   "tf -tt %s -p '%s' start（保留文件）或 rerun（推倒重来）"
                   % (m["name"], m["tt"], m["name"]))
-        return 0 if ok else 1
+        return 0 if ok_all else 1
     jobs = [(s["job"], m, s) for t in data["types"] for m in t["materials"]
             for s in m["steps"] if s.get("job")]
     if not jobs:
@@ -1617,13 +2122,13 @@ def cmd_stop(cfg, data, mname, jname, yes):
     desc = ", ".join("%s(%s|%s,%s)" % (j["id"], m["name"], m["tt"], s["label"])
                      for j, m, s in jobs)
     if not yes:
-        ans = input("取消全部 %d 个作业：%s ? [y/N] " % (len(jobs), desc)).strip().lower()
+        ans = _ask_confirm("取消全部 %d 个作业：%s ? [y/N] " % (len(jobs), desc))
         if ans not in ("y", "yes"):
             print("已取消操作。")
             return 1
     by_host = {}
-    for j, m, s in jobs:
-        by_host.setdefault(m.get("host_eff") or "__default__", []).append((j, m, s))
+    for j, m, s in jobs:          # v3.12：按步骤级 _host 分组
+        by_host.setdefault(_stop_host(m, s, cfg), []).append((j, m, s))
     ok_all = True
     for h, trio in by_host.items():
         ids = [j["id"] for j, m, s in trio]

@@ -98,6 +98,35 @@ phono3py / alm 都在 conda 环境 `atomate2_p_a`。以下三处的环境路径�
   （FourPhonon 官方主线 v1.3，ShengBTE 超集含四声子；GPU 版 ShengBTE_gpu 对 phonopy fc2 输入存在
   官方 OpenACC bug——κ 错 67~71×，尚未修复，勿用于 phonopy 数据）。
 
+### fourphonon（ShengBTE 同源引擎）多卡加速 —— 2026-09 实战验证
+step6 的 SOLVER=fourphonon 用它跑 3ph RTA（four_phonon=F，不需 fc4；输入 = 与 shengbte
+相同的 ShengBTE 格式 FORCE_CONSTANTS_2ND/3RD，拷自 S5_fc/shengbte/，需 S5 的
+EXPORT_SHENGBTE=true）。只建议在 GPU 机器多卡并行时选它；CPU 机请用 shengbte。
+
+**已固化的 multi-GPU 版**（源码 + patch 在 ~/software/taskflow/fourphonon-v13-test/）：
+- 可执行文件：…/ShengBTE_gpu_multigpu_test（NVHPC OpenACC -acc -gpu=cc86 -DGPU_VERSION
+  -DGPU_ALL_MODE_PARALLELIZATION）
+- 两个源码修复（相对官方 v1.3）：
+  1. multi-GPU 分块：processes.f90 的 RTA_driver_GPU_using_Ind 从「仅 rank0 单卡」改为
+     「每 rank 算 mm 连续段 + MPI_ALLREDUCE(MPI_IN_PLACE,…) 归约」——官方 mpirun -n 1
+     单 rank 枚举段极慢（62 原子 12³ 枚举 >5h GPU 恒 0%）。
+  2. 自动选卡：ShengBTE.f90 在 MPI_Init 后 call acc_set_device_num(myid, acc_device_nvidia)
+     ——官方版依赖 CUDA_VISIBLE_DEVICES 手动分卡，漏设则全 rank 挤 GPU0。
+- 验证：2³ 网格 1 卡 vs 4 卡 RTA 逐位一致；rank 数 = GPU 数（≤8），2³ 枚举 4 rank 比
+  1 rank 快 ~10×（116s→11s）。
+- 提交：templates/step6_kappa/submit_fourphonon.tpl（step.conf 配 FOURPHONON_EXE 绝对路径、
+  FOURPHONON_NGPU=卡数、FOURPHONON_CPUS_PER_GPU=每卡核数，默认 8——枚举段 CPU 密集吃带宽，
+  8 核/卡能明显缩短 GPU 点火前等待）。模板要求 NVHPC OpenMPI + CUDA + spglib/openblas。
+
+**fourphonon 大胞坑（2026-09 Mg2C60 62 原子实测）**：
+1. 别用 CPU 版跑大胞：枚举 11.8 亿通道（12³），64 核 CPU 都要 6.6h；single-rank GPU 更慢。
+2. 别用 AOCC/flang 编译版：jzzn 上 AOCC 版跑 62 原子 12³ 在 sg 段后 12h 零进展卡死
+   （03:51 后无日志无文件），已停；intel/NVHPC 编译版正常。
+3. intel 2019 mpiexec.hydra 部分机器损坏（连 mpirun hostname 都 FPE）——换 NVHPC OpenMPI。
+4. 官方 GPU 版 convergence=T（迭代解）未移植 GPU；即便 CPU 迭代解，62 原子 12³ 在 100K
+   发散（相对变化卡 2.088、κ 爆 0.218E73，570+ 次迭代白烧 18h）。用 RTA（convergence=F）。
+
+
 ## 另：提醒一个与本技能无关的坑
 你真实 `setting/tf.yaml` 里 `ke-dft-cpu:` 段的 `work_dir` 缩进是 2 空格（应为 4 空格），会让它变成
 `task_types` 的同级字符串键，`tf -tt <任意>` 会抛

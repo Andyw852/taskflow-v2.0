@@ -54,7 +54,7 @@ def main():
     _, vac_axis = kc.resolve_dim(out / "POSCAR", dim)
     require_dim(dim, ("2d", "3d"), "step2_disp", why="声子谱需要周期性边界")
     func = (conf["FUNC"] if conf["FUNC"] not in (None, "", "auto")
-            else meth.get("FUNC", "pbesol").lower())
+            else meth.get("FUNC", "pbe-d3").lower())
 
     if conf["SUPERCELL"]:
         reps = [int(x) for x in conf["SUPERCELL"]]

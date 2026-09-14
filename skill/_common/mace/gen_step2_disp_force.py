@@ -8,12 +8,13 @@
 
 METHOD：
   random   随机位移（--rd N）。N 缺省 auto：按 ALM 数出的自由力常数个数反推
-           （N=ceil(Σnfree/DOF)×OVERSAMPLE，对照 kl-dft-cpu 的 plan_alm），拟合走 symfc。
+           （N=max(10, ceil(Σnfree/DOF)×OVERSAMPLE)，对照 kl-dft-cpu 的 plan_alm），拟合走 symfc。
   findiff  对称有限位移。位移数由空间群约化决定，结果最干净，但 CPU 上
            高对称体系也会几百帧，慢；GPU 版才推荐。
 
-超胞尺寸：MACE 的成本对超胞是线性的，DFT 是三次方——**这里该比 kl-dft-cpu 大胆得多**。
-MIN_SC_LEN 默认 18 Å（kl-dft-cpu 是 15），fc2 还可以用 FC2_SUPERCELL 单独放到更大（--dim-fc2），
+超胞尺寸：MACE 取力成本对超胞是线性的（DFT 是三次方），上限主要受 MAX_DISP/拟合成本约束。
+默认 MIN_SC_LEN=12 Å，与 kl-dft-cpu 对齐；要更准可显式调大 MIN_SC_LEN 或 SUPERCELL（扩胞比 DFT 便宜）。
+fc2 还可以用 FC2_SUPERCELL 单独放到更大（--dim-fc2），
 因为二阶的长程尾巴是声速和低频支准不准的关键，而 fc3 短程收敛快、不必陪着一起大。
 """
 import glob
@@ -43,7 +44,7 @@ SPEC = {
     "METHOD": ("random", "str"),           # random | findiff（findiff 帧数由对称性决定，CPU 上偏多）
     "SUPERCELL": (None, "str"),            # 显式 "4 4 4"；空=按 MIN_SC_LEN 自动
     "FC2_SUPERCELL": (None, "str"),        # 二阶专用大超胞（--dim-fc2）；空=与 fc3 同
-    "MIN_SC_LEN": (18.0, "float"),
+    "MIN_SC_LEN": (12.0, "float"),
     "MAX_MULTIPLE": (8, "int"),
     "DISP_DISTANCE": (0.03, "float"),      # 位移幅度(Å)：MC-rattle 的目标 RMS / findiff 模长
     "MC_DMIN_SCALE": (0.85, "float"),      # MC-rattle d_min = 最近邻 × 此系数
@@ -51,7 +52,7 @@ SPEC = {
     "RANDOM_SEED": (2025, "int"),          # MC-rattle 随机种子
     "N_RANDOM": ("auto", "str"),           # random 帧数：auto=按 ALM nfree 反推；整数=固定
     "N_RANDOM_FC2": ("auto", "str"),       # fc2 专用超胞的随机帧数（auto=按 ALM 反推）
-    "OVERSAMPLE": (3, "int"),              # 随机位移过采样系数：N=ceil(Σnfree/DOF)*OVERSAMPLE
+    "OVERSAMPLE": (3, "int"),              # 随机位移过采样系数：N=max(10, ceil(Σnfree/DOF)*OVERSAMPLE)
     "ALM_CUT2": (None, "float"),           # 二阶截断(Å)；None=不截断
     "ALM_CUT3": (6.0, "float"),            # 三阶截断(Å)
     "MAX_DISP": (500, "int"),              # ★ 位移帧数硬闸：超过直接停步（对照 kl-dft-cpu 的 MAX_DISP）

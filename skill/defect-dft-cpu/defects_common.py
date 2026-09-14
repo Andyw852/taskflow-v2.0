@@ -361,3 +361,108 @@ def read_nelect_from_potcar(path):
     # ZVAL 每个元素一个；POTCAR 串联后每个块一个 ZVAL
     # 直接读 'number of ions per type' 不可靠，这里返回每个 ZVAL 列表供调用方按 counts 加权
     return zvals
+
+
+def guarded_sbatch(workdir, jobname, submit_file="submit.sh", user=None,
+                   lock_timeout=120, vis_window=60):
+    """带锁防重复 sbatch（纯标准库，登录节点可跑）。
+
+    与 tfpkg 远端提交守卫等价：flock 目录锁串行化，锁内实时 squeue 按 jobname
+    匹配所有活动态，查询失败 fail closed；再用持久回执 + sacct 兜住 sbatch
+    可见性延迟。返回 (ok, msg)：ok=True 表示已提交或已存在（幂等，调用方继续），
+    ok=False 表示查询/提交失败，调用方应告警（不重试不改状态）。
+    """
+    import fcntl, time, getpass, subprocess
+    user = user or os.environ.get("USER") or getpass.getuser()
+    workdir = os.path.abspath(workdir)
+    rcpt_path = os.path.join(workdir, ".tf_job_receipt")
+    lock_path = os.path.join(workdir, ".tf_submit.lock")
+    TERMINAL = {"COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "NODE_FAIL",
+                "BOOT_FAIL", "OUT_OF_MEMORY", "DEADLINE", "PREEMPTED",
+                "CD", "CA", "F", "TO", "NF", "OOM"}
+
+    def _read_receipt():
+        try:
+            with open(rcpt_path, encoding="utf-8") as f:
+                parts = f.read().strip().split()
+            return (parts[0], float(parts[1])) if len(parts) >= 2 else None
+        except (OSError, ValueError):
+            return None
+
+    def _write_receipt(jid):
+        try:
+            tmp = rcpt_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("%s %.6f\n" % (jid, time.time()))
+            os.replace(tmp, rcpt_path)
+        except OSError:
+            pass
+
+    def _sacct_state(jid):
+        try:
+            p = subprocess.run(["sacct", "-j", jid, "-n", "-P", "-X", "-o", "JobID,State"],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if p.returncode != 0:
+            return None
+        for ln in (p.stdout or "").splitlines():
+            f = ln.split("|")
+            if f and f[0].strip() == jid:
+                return (f[1].strip() if len(f) > 1 else "")
+        return ""
+
+    fd = open(lock_path, "a+")
+    try:
+        got = False
+        if lock_timeout <= 0:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            got = True
+        else:
+            deadline = time.time() + lock_timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    got = True
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        break
+                    time.sleep(0.2)
+        if not got:
+            return False, "提交锁获取超时（%ss）" % lock_timeout
+        try:
+            p = subprocess.run(["squeue", "-u", user, "-h", "-o", "%j"],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, "squeue 查询失败，拒绝提交（fail closed）"
+        if p.returncode != 0:
+            return False, "squeue 查询失败，拒绝提交（fail closed）"
+        if jobname and jobname in set((p.stdout or "").split()):
+            return True, "已在队列（jobname=%s）" % jobname
+        rcpt = _read_receipt()
+        if rcpt:
+            jid, ts = rcpt
+            if time.time() - ts < vis_window:
+                st = _sacct_state(jid)
+                if st is None:
+                    return False, "存在近期回执 %s 但 sacct 查询失败，拒绝重复提交" % jid
+                if st == "" or st.upper() not in TERMINAL:
+                    return True, "已有近期提交回执 %s（%s），跳过" % (jid, st or "尚不可见")
+        try:
+            p = subprocess.run(["sbatch", submit_file], cwd=workdir,
+                               capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, "sbatch 失败：" + str(e)
+        if p.returncode != 0:
+            return False, "sbatch 失败：" + (p.stdout + p.stderr).strip()
+        m = re.search(r"Submitted batch job\s+(\d+)", p.stdout or "")
+        if m:
+            _write_receipt(m.group(1))
+        return True, (p.stdout or "").strip() or "已提交"
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        except Exception:
+            pass

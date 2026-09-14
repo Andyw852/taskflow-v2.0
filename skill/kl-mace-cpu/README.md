@@ -28,7 +28,7 @@ tf -tt kl-mace-cpu -p <材料> start
 | 开关 | 怎么调 | 为什么 |
 |---|---|---|
 | `METHOD=random` + `N_RANDOM` | `N_RANDOM=auto` 按 ALM 数自由力常数自动反推帧数；写整数则固定 | findiff 的帧数由对称性决定、**你控制不了**；random 用 ALM 的 nfree 反推，帧数随体系自适应 |
-| `FC2_SUPERCELL` 单独放大 | 如 `"5 5 5"`，fc3 超胞保持中等 | 二阶的长程尾巴决定声速和低频支，而 fc2 的帧数远少于 fc3 |
+| `FC2_SUPERCELL` 单独放大 | 配合 `FIT_SOFTWARE=phono3py`；如 `"5 5 5"`，fc3 超胞保持中等（pheasy 暂不支持独立二阶超胞，生成期报错） | 二阶的长程尾巴决定声速和低频支，而 fc2 的帧数远少于 fc3 |
 | `KAPPA_MESH` 先小后大 | 先 `16 16 16` 看数量级 | S4 也在 CPU 上，网格加密一档很贵 |
 | `MACE_MODEL` 换 small | 最后才考虑 | 快 2~3 倍，但势的质量下降、虚频判断更不可信 |
 
@@ -38,7 +38,7 @@ tf -tt kl-mace-cpu -p <材料> -j step2_disp_force conf --set params.N_RANDOM=12
 tf -tt kl-mace-cpu -p <材料> -j step2_disp_force conf --set params.FC2_SUPERCELL="5 5 5"
 ```
 
-默认值：`MIN_SC_LEN=15`、`KAPPA_MESH=20 20 20`、`CKPT=10`、`N_RANDOM=auto`（按 ALM 数出的
+默认值：`MIN_SC_LEN=12`、`KAPPA_MESH=15 15 15`（2D 自动将真空轴设为 1，z 真空即 `15 15 1`；默认关闭 `MESH_SCAN`）、`CKPT=10`、`N_RANDOM=auto`（按 ALM 数出的
 自由力常数个数反推：`N=ceil(Σnfree/DOF)×OVERSAMPLE`，`OVERSAMPLE=3`、`ALM_CUT3=6.0 Å`）。
 
 ## 核数与断点

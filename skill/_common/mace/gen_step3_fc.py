@@ -63,17 +63,33 @@ def parse_min_freq(band_yaml):
 # `--band-dft-cpu auto` 不再产出 band-dft-cpu.yaml（只写 phono3py.yaml 摘要），所以这里直接
 # 读 symfc 拟合好的 fc2.hdf5 → Phonopy run_mesh 取 q-mesh 最小频率，再 best-effort
 # 出 band-dft-cpu.yaml 存档。stdout 打 `MIN_FREQ_THZ <值>` 供外层解析。
-_PHONON_GATE = r'''import numpy as np, os
+_PHONON_GATE = r'''import numpy as np, os, h5py
 import phono3py
 from phono3py.file_IO import read_fc2_from_hdf5
 from phonopy import Phonopy
 
-yaml = "phono3py_disp.yaml" if os.path.isfile("phono3py_disp.yaml") else "phono3py_params.yaml"
-ph3 = phono3py.load(yaml, produce_fc=False, is_nac=False, log_level=0)
-uc, scm, pm = ph3.unitcell, ph3.supercell_matrix, ph3.primitive_matrix
-fc2 = np.asarray(read_fc2_from_hdf5(filename="fc2.hdf5"))
+import json
+from pathlib import Path
+cfg = json.loads(Path("fit_config.json").read_text())
+use_nac = bool(cfg.get("nac", False))
+yaml = cfg["yaml"]
+ph3 = phono3py.load(yaml, produce_fc=False, is_nac=use_nac, log_level=0)
+scm = ph3.phonon_supercell_matrix
+if scm is None:
+    scm = ph3.supercell_matrix
+uc, pm = ph3.unitcell, ph3.primitive_matrix
+try:
+    fc2 = np.asarray(read_fc2_from_hdf5(filename="fc2.hdf5"))
+except Exception:
+    # phono3py symfc 路径把 fc2 写成 phonopy full 格式（'force_constants'，无 'fc2'）
+    with h5py.File("fc2.hdf5", "r") as _h:
+        fc2 = np.asarray(_h["force_constants"][()])
 ph = Phonopy(uc, supercell_matrix=scm, primitive_matrix=pm)
 ph.force_constants = fc2
+if use_nac:
+    if ph3.nac_params is None:
+        raise RuntimeError("NAC requested but Born parameters could not be loaded")
+    ph.nac_params = ph3.nac_params
 ph.run_mesh(mesh=60.0, with_eigenvectors=False, is_mesh_symmetry=True)
 mf = float(np.min(ph.get_mesh_dict()["frequencies"]))
 print("MIN_FREQ_THZ %.6f" % mf)
@@ -123,12 +139,16 @@ env.update({
     "PHEASY_ASR_COMBINED": "1",
     "PHEASY_NS_RANK_TOL": "1e-6",
     "PHEASY_USE_CELER": "1" if method in ("LASSO", "RFE", "RFE_TSQR") else "0",
+    # pheasy-gpu 的 CLI LASSO backend 是 CUDA FISTA；只有在显存不足时
+    # 才由内部策略回退到 CPU 迭代器。不要强制关闭 GPU。
+    "PHEASY_GPU_LASSO": "1" if method == "LASSO" else "0",
+    "PHEASY_USE_GPU": "1",
     "PHEASY_LASSO_DEBIAS": "1" if method == "LASSO" else "0",
 })
 
 cflag = "" if c3 in ("None", "none", "") else "--c3 %s" % c3
 bin = os.environ.get("PHEASY_BIN", "pheasy")
-fit = ("%s --dim %s -w 3 -f %s --ndata %d --eps 0.001 --full_ifc -l %s --hdf5"
+fit = ("%s --dim %s -w 3 -f %s --ndata %d --eps 0.001 -l %s --hdf5"
        % (bin, dim, cflag, ndata, method))
 if method == "LASSO":
     fit += " --std --mu_min -8 --mu_max -2 --max_iter 2000 --cv 5 --nmu 10 --tol 0.0001"
@@ -223,6 +243,9 @@ def main():
     if p_bin not in ("pheasy", "pheasy-gpu"):
         sys.exit("[ERROR] PHEASY_BIN 只允许 pheasy / pheasy-gpu")
     if software == "pheasy":
+        fc2_sc = params.get("FC2_SUPERCELL", "").split()
+        if fc2_sc and fc2_sc != params.get("SUPERCELL", "").split():
+            sys.exit("[ERROR] pheasy 尚不支持独立 FC2_SUPERCELL；请用 FIT_SOFTWARE=phono3py，避免忽略二阶数据")
         p_method = str(conf["PHEASY_METHOD"] or "OLS").upper()
         if p_method not in ("OLS", "LASSO", "RFE", "RFE_TSQR"):
             sys.exit("[ERROR] PHEASY_METHOD 只允许 OLS / LASSO / RFE / RFE_TSQR")

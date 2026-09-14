@@ -118,25 +118,25 @@ def collect_data(cfg, types):
 
 # ===== apply_exclude (原 L6768-L6776) =====
 def apply_exclude(data, exclude):
-    """-x：跳过指定项目（全名或 basename，逗号分隔）。"""
+    """-x：跳过指定项目（全名 / basename / <项目名>/<完整名>，逗号分隔）。"""
+    from tfpkg import _name_matches
     if not exclude:
         return
-    ex = {x.strip() for x in exclude.split(",") if x.strip()}
+    ex = [x.strip() for x in exclude.split(",") if x.strip()]
     for t in data["types"]:
         t["materials"] = [m for m in t["materials"]
-                          if m["name"] not in ex
-                          and os.path.basename(m["name"]) not in ex]
+                          if not any(_name_matches(m, x) for x in ex)]
 
 # ===== filter_projs (原 L6779-L6787) =====
 def filter_projs(data, projs):
-    """只保留指定材料（全名或 basename）；空列表 = 不过滤。"""
+    """只保留指定材料（全名 / basename / <项目名>/<完整名>）；空列表 = 不过滤。"""
+    from tfpkg import _name_matches
     if not projs:
         return
-    want = set(projs)
+    want = [x for x in projs if x]
     for t in data["types"]:
         t["materials"] = [m for m in t["materials"]
-                          if m["name"] in want
-                          or os.path.basename(m["name"]) in want]
+                          if any(_name_matches(m, x) for x in want)]
 
 # ===== filter_status (原 L6806-L6823) =====
 def filter_status(data, spec):

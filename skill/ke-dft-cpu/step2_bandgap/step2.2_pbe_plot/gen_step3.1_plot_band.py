@@ -183,6 +183,33 @@ def read_incar_flag(incar: Path, key: str):
     return None
 
 
+def read_discriminant_efermi(roots):
+    """体系判别步（step2.15_discriminant）在**更密**网格上收敛出的 E_F。
+
+    为什么需要：本步的 E_F 来自 step2.2_pbe/step2.1_static 的自洽网格，那是粗网格
+    （典型 4x4x2）上的偏值。用它当能量零点会让整张带图在能量轴上整体偏移 ——
+    半导体情形零点取 VBM 所以看不出来，**金属/半金属情形零点就取 E_F，偏值直接
+    变成带图的整体错位**。
+    判别步(step2.15)按 KSPACING<=0.02 重新生成了更密的网格，其 INCAR/POSCAR/POTCAR
+    直接复制自 step2.1_static，所以与这里**同一绝对能量参考**（同结构/同 POTCAR/
+    同 ENCUT），只是采样误差更小。
+    返回 (efermi, 来源路径) 或 (None, None)；读不到时行为与改动前完全一致。
+    """
+    import json as _json
+    for root in roots:
+        p = Path(root) / "step2_bandgap" / "step2.15_discriminant" / "discriminant.json"
+        if not p.is_file():
+            continue
+        try:
+            d = _json.loads(p.read_text())
+            for v in d.get("verdicts", []):
+                if v.get("functional", "PBE") == "PBE" and v.get("efermi_eV") is not None:
+                    return float(v["efermi_eV"]), str(p)
+        except Exception:
+            return None, None
+    return None, None
+
+
 def read_efermi(outcar: Path):
     """取【自洽阶段】的 E-fermi。
 
@@ -544,6 +571,18 @@ def main():
 
     # E-fermi 只从 step3 OUTCAR 提取数值，不拷贝大文件
     efermi = read_efermi(src / "OUTCAR")
+    efermi_source = "step2.2_pbe/OUTCAR（自洽网格，可能是粗网格偏值）"
+    # 优先用体系判别步的密网格 E_F（见 read_discriminant_efermi 的说明）
+    _ef_roots = [Path.cwd()]
+    if len(src.parents) > 1:
+        _ef_roots.append(src.parents[1])
+    _de, _dp = read_discriminant_efermi(_ef_roots)
+    if _de is not None:
+        log("[..] 能量零点用体系判别步的**密网格** E_F = %.4f eV"
+            "（本步自洽网格给的是 %s）—— 粗网格 E_F 是偏值。来源 %s"
+            % (_de, ("%.4f eV" % efermi) if efermi is not None else "N/A", _dp))
+        efermi = _de
+        efermi_source = "step2.15_discriminant 密网格 E_F（%s）" % _dp
 
     # 2) 解析（从副本读，保证目录自包含）
     try:
@@ -690,6 +729,7 @@ def main():
               "vbm": {"E_eV": round(evbm, 4), "k_frac": kfmt(kpath[iv])},
               "cbm": {"E_eV": round(ecbm, 4), "k_frac": kfmt(kpath[ic])},
               "efermi_scf_eV": efermi,
+              "efermi_source": efermi_source,
               "mesh_cross_check": mesh_info,
               "mesh_cross_check_warning": mesh_warn,
               "energy_zero": zero_name,

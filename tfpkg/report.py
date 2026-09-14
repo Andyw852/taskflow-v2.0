@@ -385,6 +385,15 @@ def find_step(m, jname):
     _d = _find_by_dotted(steps, jname)      # v1.8：-j 2.1 点号序号
     if _d is not None:
         return _d
+    # v3.12：容忍只写末段的名字。带路径的步骤名（step2_bandgap/step2.3_hse）
+    #   很容易漏前缀，漏了就直接 sys.exit —— 报错里虽然列了全名但人容易忽略，
+    #   而且非交互环境下这一退出很难追溯。唯一匹配时直接放行。
+    _base = [s for s in steps if s["name"].rsplit("/", 1)[-1] == jname]
+    if len(_base) == 1:
+        return _base[0]
+    if len(_base) > 1:
+        sys.exit("错误：%s 有多个步骤以 '%s' 结尾，请写全名：%s"
+                 % (m["name"], jname, ", ".join(s["name"] for s in _base)))
     sys.exit("错误：%s 没有步骤 '%s'（现有：%s）。"
              % (m["name"], jname,
                 ", ".join("%s|%s" % (s["label"], s["name"]) for s in steps)))

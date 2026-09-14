@@ -71,10 +71,10 @@ def main():
             D.assemble_potcar(order, potdir, out_path=str(d / "POTCAR"))
             D.render_submit(D.find_submit_tpl(True), str(d / "submit.sh"), "ref_" + name)
         if not (d / "OUTCAR").exists():
-            q = subprocess.run(["squeue", "-u", user, "-h", "-o", "%j"],
-                               capture_output=True, text=True).stdout
-            if ("ref_" + name) not in q:
-                subprocess.run(["sbatch", "submit.sh"], cwd=str(d))
+            ok, msg = D.guarded_sbatch(str(d), "ref_" + name, user=user)
+            print("  [提交] %s %s" % (name, msg))
+            if not ok:
+                print("  [警告] %s 提交未完成：%s" % (name, msg))
 
     # 2) 检查收敛 + 收集能量
     #    只要求「进 references_energy.json 的相」（ELEMENT_EL/BINARY）收敛；

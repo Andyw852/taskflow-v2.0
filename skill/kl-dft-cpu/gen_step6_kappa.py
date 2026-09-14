@@ -6,10 +6,15 @@
 渲染提交模板 → submit.sh，tf 提交到计算节点。成功后把 κ 张量写进 kappa_summary.json
 并落 KAPPA_DONE（marker 判据）。
 求解器（step.conf 的 SOLVER）：
-  phono3py : phono3py-load --br（完整支持 findiff/alm + NAC，默认）
-  shengbte : 写 ShengBTE CONTROL（复用参考引擎例程）。注意 fc3→ShengBTE 导出仅
-             random/hiphive 路线可靠，findiff 的 compact fc3 无稳定导出口——solver=shengbte
-             建议配 METHOD=alm，且需在集群装好 ShengBTE、把 exe 填进 step.conf。
+  phono3py   : phono3py-load --br（完整支持 findiff/alm + NAC，默认）
+  shengbte   : 写 ShengBTE CONTROL（复用参考引擎例程）。注意 fc3→ShengBTE 导出仅
+               random/hiphive 路线可靠，findiff 的 compact fc3 无稳定导出口——solver=shengbte
+               建议配 METHOD=alm，且需在集群装好 ShengBTE、把 exe 填进 step.conf。
+  fourphonon : ShengBTE 同源引擎，跑 3ph RTA（four_phonon=F，不需 fc4）。输入格式与
+               shengbte 相同（FORCE_CONSTANTS_2ND/3RD 拷自 S5_fc/shengbte/，需
+               EXPORT_SHENGBTE=true）。适合 GPU 机多卡加速（FOURPHONON_NGPU 张卡、
+               rank=卡、acc_set_device_num 自动分卡）；CPU 机请用 shengbte 别用
+               fourphonon（CPU 单进程枚举慢、AOCC 版易卡死，见 README）。
 产出目录：step6_kappa/
 """
 import shutil
@@ -33,8 +38,13 @@ SPEC = {
     "T_MAX":        (800,       "int"),
     "T_STEP":       (100,       "int"),
     "ISOTOPE":      (True,      "bool"),
-    "SCALEBROAD":   (0.1,       "float"), # shengbte 展宽
+    "SCALEBROAD":   (0.1,       "float"), # shengbte/fourphonon 展宽
     "SHENGBTE_EXE": ("ShengBTE", "str"),
+    "FOURPHONON_EXE": ("", "str"),          # fourphonon(multi-GPU) 可执行文件绝对路径
+    "FOURPHONON_NGPU": (4, "int"),          # fourphonon 用几张 GPU(rank=卡)
+    "FOURPHONON_CPUS_PER_GPU": (8, "int"),  # 每 GPU 配几个 CPU 核(cpus-per-task+OMP)
+    # 集群 conda.sh（tf 从 setting/<集群>.yaml 的 conda_sh 注入 step.conf，切集群自动跟着走）
+    "CONDA_SH": ("", "str"),
     # 2D κ 厚度归一化：phono3py 用含真空的原胞体积做分母，2D 面内 κ 被 Lz 稀释，
     #   需乘 Lz/d（d=有效厚度）。取法：vdw=原子z跨度+两侧vdW半径 | cell=用Lz(即不归一) | 数值=固定Å
     "KAPPA_2D_THICKNESS": ("vdw",  "str"),
@@ -139,9 +149,10 @@ def build_phono3py_cmd(mesh, ts, isotope, use_nac, extract, bte="rta"):
     #   phono3py 3.24/4.x 行为一致。use_nac=True 就默认带上（不加开关），否则显式 --nonac。
     nac_flag = "" if use_nac else " --nonac"
     # fc2/fc3 已在 step5_fc 由 symfc/alm 拟好并拷到本目录（fc2.hdf5/fc3.hdf5）。
-    # phono3py 4.x 默认读 cwd 的 fc2.hdf5/fc3.hdf5（用 --no-read-fc2/--no-read-fc3 关闭）；
-    # 3.x 的 --fc2/--fc3 开关在 4.x 已移除，加了会报 "unrecognized arguments: --fc2 --fc3"。
-    p3 = ('phono3py phono3py_disp.yaml %s --mesh %s --ts="%s"%s%s'
+    # 用 phono3py-load（phono3py>=3.x 的载入入口）：它默认读 cwd 的 fc2.hdf5/fc3.hdf5
+    # （--no-read-fc2/--no-read-fc3 关闭），不会再从 disp.yaml 重新拟合（否则报
+    # "Forces were not found"——forces 已在上一步拟进 hdf5，不在 disp.yaml 里）。
+    p3 = ('phono3py-load phono3py_disp.yaml %s --mesh %s --ts="%s"%s%s'
           % (method, mesh, ts, " --isotope" if isotope else "", nac_flag))
     return "%s 2>&1 | tee phono3py_kappa.log\n%s" % (p3, extract)
 
@@ -180,6 +191,26 @@ def prepare_shengbte(cwd, out, sb_src, conf, mesh, use_nac):
     if use_nac:
         print("[WARN] CONTROL 已置 nonanalytic=T，但未自动写 born/epsilon；"
               "极性材料请手动在 CONTROL 补 Born 有效电荷与介电张量。")
+
+
+def prepare_fourphonon(cwd, out, sb_src, conf, mesh, use_nac, ngpu):
+    """fourphonon 输入准备 = ShengBTE 同源（FORCE_CONSTANTS_2ND/3RD 格式一致），
+    复用 prepare_shengbte 后把 CONTROL 的 &flags 改成 fourphonon 3ph RTA：
+      - convergence=F（RTA；fourphonon 迭代解未移植 GPU、且大胞易发散）
+      - four_phonon=F（3ph only；4ph 需 fc4，S5 不产 fc4，勿开）
+    运行时用 multi-GPU 提交模板（rank=GPU，acc_set_device_num 自动分卡）。"""
+    prepare_shengbte(cwd, out, sb_src, conf, mesh, use_nac)
+    ctl = out / "CONTROL"
+    txt = ctl.read_text(encoding="utf-8")
+    # 确保 flags 块含 four_phonon=F；convergence 强制 F（RTA）
+    if "four_phonon" not in txt:
+        txt = txt.replace("nanowires=F,", "nanowires=F,\n  four_phonon=F,", 1)
+    txt = txt.replace("convergence=T,", "convergence=F,", 1)
+    txt = txt.replace("convergence=F,", "convergence=F,", 1)
+    ctl.write_text(txt, encoding="utf-8")
+    # 若 kappa_convergence 默认 True 生成的是 CONV，这里显式对齐 RTA
+    print("[OK] fourphonon(%d-GPU) 输入就绪：ShengBTE 格式 fc2/fc3 + CONTROL"
+          "(four_phonon=F, convergence=F RTA)" % ngpu)
 
 
 def main():
@@ -239,7 +270,10 @@ def main():
             pass
 
     params = kc.read_kl_params(out / kc.KL_PARAMS)
-    mesh = conf["MESH_OVERRIDE"] or params.get("MESH") or "20 20 20"
+    # MESH_OVERRIDE 也过 mesh_str：3D 材料被误写成 "N N 1" 时自动纠正成 "N N N"。
+    mesh = kc.mesh_str(
+        (conf["MESH_OVERRIDE"] or params.get("MESH") or "20 20 20").split(),
+        dim, vac_axis if vac_axis is not None else 2)
     ts = " ".join(str(t) for t in range(conf["T_MIN"], conf["T_MAX"] + 1, conf["T_STEP"]))
     solver = str(conf["SOLVER"]).lower()
     print("[..] 求解器=%s mesh=%s 温度=%s K NAC=%s DIM=%s" % (solver, mesh, ts, use_nac, dim or "?"))
@@ -261,16 +295,37 @@ def main():
                                  build_extract(factor, meta), conf["BTE_METHOD"])
         print("[..] BTE 方法=%s" % str(conf["BTE_METHOD"]).lower())
         tpl = kc.resolve_submit(here, "3d", "submit_p3py")   # 单节点，无 2D/3D 之分
+        # submit_p3py.tpl 的 {{CONDA_SH}}/{{CONDA_ENV}} 必须补传，否则残留字面占位符
+        # （运行时 source {{CONDA_SH}} 报 No such file）。kl-dft 的 phono3py 环境是
+        # atomate2_p_a（见 skill.yaml 的 conda 字段），与 MACE 技能的 mace_cpu 不同，
+        # 故 CONDA_ENV 固定 atomate2_p_a、CONDA_SH 用集群 conda.sh（与 S5_fc 模板一致）。
         kc.write_submit(tpl, out / "submit.sh",
-                        {"JOBNAME": kc.new_jobname(cwd, "S6kappa"), "P3PY_CMD": cmd})
+                        {"JOBNAME": kc.new_jobname(cwd, "S6kappa"),
+                         "CONDA_SH": (conf["CONDA_SH"]
+                                      or "/public/home/wangchao/miniconda3/etc/profile.d/conda.sh"),
+                         "CONDA_ENV": "atomate2_p_a",
+                         "P3PY_CMD": cmd})
     elif solver == "shengbte":
         prepare_shengbte(cwd, out, sbd, conf, mesh, use_nac)
         tpl = kc.resolve_submit(here, "3d", "submit_shengbte")
         kc.write_submit(tpl, out / "submit.sh",
                         {"JOBNAME": kc.new_jobname(cwd, "S6kappa"),
                          "SHENGBTE_EXE": conf["SHENGBTE_EXE"]})
+    elif solver == "fourphonon":
+        fp_exe = str(conf.get("FOURPHONON_EXE") or "").strip()
+        if not fp_exe:
+            sys.exit("[ERROR] SOLVER=fourphonon 但 step.conf 没填 FOURPHONON_EXE"
+                     "（multi-GPU 版绝对路径）。见 README「fourphonon」节。")
+        ngpu = int(conf.get("FOURPHONON_NGPU") or 4)
+        prepare_fourphonon(cwd, out, sbd, conf, mesh, use_nac, ngpu)
+        tpl = kc.resolve_submit(here, "3d", "submit_fourphonon")
+        kc.write_submit(tpl, out / "submit.sh",
+                        {"JOBNAME": kc.new_jobname(cwd, "S6kappa"),
+                         "FOURPHONON_EXE": fp_exe,
+                         "FOURPHONON_NGPU": str(ngpu),
+                         "FOURPHONON_CPUS_PER_GPU": str(conf.get("FOURPHONON_CPUS_PER_GPU") or 8)})
     else:
-        sys.exit("[ERROR] SOLVER 只允许 phono3py / shengbte")
+        sys.exit("[ERROR] SOLVER 只允许 phono3py / shengbte / fourphonon")
     stepconf.apply_submit(out / "submit.sh", conf.submit)
     print("[DONE] %s：submit.sh 就绪，提交后计算节点出 κ，写 kappa_summary.json(KAPPA_DONE)"
           % OUTDIR)

@@ -28,10 +28,15 @@ SOC 自动检测（无手动开关，防止旋量/标量 WAVECAR 不匹配）:
                          kpath.json + KPOINTS_OPT 降采样。【默认开启，每腿 10 点】。
                          --line-density 0 关闭，用 step3 的完整路径。
                          HSE 成本对路径点数严格线性；出版级能带每腿 10~15 点足够。
-    --kpath-slice i/n    只生成第 i 段（共 n 段），目录名 step4_HSE_band_p{i}of{n}，
-                         各段共享同一 step3 WAVECAR、各自重跑一次便宜的 SCF，
+    --kpath-slice i/n    只生成第 i 段（共 n 段），切片目录 step2_bandgap/step2.3_hse/p{i}of{n}
+                         （放在 step2.3_hse 内部，tf 的 fanout "*p*of*" 据此提交并行作业），
+                         各段共享同一 step2.2_pbe WAVECAR、各自从预收敛波函数重跑一次 SCF，
                          KPOINTS_OPT 只含本段路径点 -> n 个作业并行。
     --kpath-slice all/n  一次生成全部 n 段目录。
+
+    注意：切片只对 3D（体相）生效。2D 能带路径点少，切片并行收益小、却要为每段
+    各付一次精确交换 SCF（n 段 = n 倍 SCF），故 2D 体系自动忽略 --kpath-slice、
+    保持单作业（见 main() 里 dim == "2d" 的判断）。确需给 2D 切片可临时改该判断。
     --link-wavecar       各目录用符号链接共享 step3 WAVECAR（省磁盘）。★ 注意：仅当
                          LWAVE=.FALSE. 时安全；本版 LWAVE=.TRUE.，VASP 会写自己的
                          WAVECAR，符号链接会透过链接覆盖 step3 源，故此选项会被
@@ -183,6 +188,13 @@ HFRCUT_MODE = "auto"
 # "hsesol" 一律 GGA=PS。
 HYBRID_FLAVOR = "auto"     # "auto" | "hse06" | "hsesol"
 
+# ---- 体系判别分支（step2.15）----
+# ALGO_FROM_DISCRIMINANT=True：读 step2_bandgap/step2.15_discriminant/OUTCAR 现算
+#   体系类型，据此选 ALGO（SEMICONDUCTOR->All，SEMIMETAL/METAL->Damped）。
+#   读不到就保持 INCAR_SET 的 Damped —— 不改动前的默认行为。
+DISCRIMINANT_DIR = "step2_bandgap/step2.15_discriminant"
+ALGO_FROM_DISCRIMINANT = True
+
 # ================= 色散修正 IVDW =================
 # ★ 先明确一点：D2/D3 是加在【总能与力】上的原子对势，不进哈密顿量，
 #   所以它对本征值、带隙、能带形状【没有任何影响】。本步只出能带，
@@ -225,10 +237,15 @@ INCAR_SET = {
     #   注意 ISYM=2 与 ISYM=3 给出的不可约 k 点集相同，所以 step3(ISYM=2)
     #   的 WAVECAR 与本步(ISYM=3)完全兼容，NKPTS 不变。
     # ISYM / GGA 由主流程按 STEP4_ISYM / HYBRID_FLAVOR 注入
+    # ALGO 的**实际取值**由体系判别分支决定（见 ALGO_FROM_DISCRIMINANT）：
+    #   SEMICONDUCTOR      -> All   （共轭梯度全能带，有隙体系收敛更快）
+    #   SEMIMETAL / METAL  -> Damped（对有部分占据的体系更稳）
+    # 这里的 Damped 只是**读不到判别结果时的向后兼容默认**（判别步关掉/没跑完/
+    # 解析失败都走它），行为与改动前完全一致。
     "ALGO":     "Damped",     # HF 用 Damped/All；Normal/Fast 不适用
     "TIME":     "0.4",        # ALGO=Damped 的阻尼步长
     "LHFCALC":  ".TRUE.",     # 打开杂化
-    "HFSCREEN": "0.11",       # ★ 屏蔽参数，权威值在此（0.2=标准 HSE06/HSEsol；0.3=HSE03）
+    "HFSCREEN": "0.2",        # ★ 屏蔽参数，权威值在此（0.2=标准 HSE06/HSEsol；0.3=HSE03）
     "AEXX":     "0.25",       # ★ 精确交换比例，权威值在此（0.25=标准 HSE06/HSEsol）
     "PRECFOCK": "Fast",       # 交换积分用粗档 FFT，HSE 主要提速点（定稿用 Normal 复核）
     "LORBIT":   "11",         # ★ 轨道投影：写 PROCAR/PROCAR_OPT（lm 分解权重）→ fat band-dft-cpu 必需
@@ -825,6 +842,53 @@ def build_step4_dir(out_dir, args, ctx, part=None):
     _isym4 = "3" if STEP4_ISYM == "auto" else str(STEP4_ISYM).strip()
     incar_set["ISYM"] = _isym4
 
+    # ---- ALGO：由体系判别步（step2.15）决定 ----
+    # 混合泛函的 ALGO 选择依赖"体系有没有隙"：All（共轭梯度全能带）在有隙体系上
+    # 收敛更快，但在金属/半金属上容易出问题；Damped 对有部分占据的体系更稳。
+    # 实测教训：128 原子 496 电子 NBANDS=320 的 Mg4C60 体相，硬编码 ALGO=Damped
+    # 会停滞（dE 从 -1e-5 反弹到 +4e-4，24h 墙钟用尽仍不收敛），同样的输入换成
+    # ALGO=All 约 13h 收敛。
+    # ★ 这里**直接读 step2.15 的 OUTCAR 现算**，不读 discriminant.json ——
+    #   后者含 @杂化 覆盖、要等杂化跑完才有，读它会形成循环依赖（ALGO 必须在
+    #   杂化之前定）。
+    if ALGO_FROM_DISCRIMINANT:
+        _disc = None
+        _roots = [Path.cwd()]
+        if len(out_dir.parents) > 1:
+            _roots.append(out_dir.parents[1])
+        for _root in _roots:
+            _oc = Path(_root) / DISCRIMINANT_DIR / "OUTCAR"
+            if not _oc.is_file():
+                continue
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                import discriminant_common as _dc
+                _d = _dc.decide_from_outcar(_oc, _dc.read_mesh(_oc.parent))
+                if _d:
+                    incar_set["ALGO"] = ("All" if _d["label"] == "SEMICONDUCTOR"
+                                         else "Damped")
+                    _disc = (_d["label"], _d["functional"], _d["gap_eV"], str(_oc))
+            except Exception as _e:
+                # 显式降级（不是静默继续）：解析失败只影响 ALGO 的选择，
+                # 退回 INCAR_SET 的 Damped 是记录在案的向后兼容行为，但必须高声报出来。
+                print("[WARN] 体系判别解析失败 —— ALGO 退回默认 %s（向后兼容）。"
+                      "注意这属于**静默失败类**问题：若 %s 存在却解析不出来，"
+                      "先查判别步的 OUTCAR 是不是没跑完，或 parse_kblocks 的阈值。\n"
+                      "       原因：%s"
+                      % (incar_set.get("ALGO"), DISCRIMINANT_DIR, _e), file=sys.stderr)
+            break
+        if _disc:
+            print("[..] ALGO=%s —— 体系判别 %s@%s, gap=%+.4f eV（%s）"
+                  % (incar_set["ALGO"], _disc[0], _disc[1], _disc[2], _disc[3]),
+                  file=sys.stderr)
+            if _disc[0] != "SEMICONDUCTOR":
+                print("[..] 注意：%s@%s 是**待定**而非结论（PBE 只会低估带隙）。"
+                      "杂化跑完若开出隙，应在下一步重跑判别并以 @杂化 结果为准。"
+                      % (_disc[0], _disc[1]), file=sys.stderr)
+        else:
+            print("[..] 没有体系判别结果（step2.15 未启用/未跑完），ALGO 沿用默认 %s"
+                  "（向后兼容）" % incar_set.get("ALGO"), file=sys.stderr)
+
     incar_set["SYSTEM"] = "%s %s%s band-dft-cpu (step4; geometry=%s)%s" % (
         label, _flavor, "+SOC" if soc else "", method, tag)
     if soc:
@@ -974,10 +1038,15 @@ def main():
            "submit_tpl": tpl, "dim": dim,
            "flavor_mode": flavor_mode}
 
-    parts = parse_slice(args.kpath_slice, len(coords))
+    # 2D 能带路径点少：切片并行收益小、却要多付 N 倍精确交换 SCF，默认不切（保持单作业）
+    slice_spec = args.kpath_slice
+    if slice_spec and dim == "2d":
+        print("[..] 2D 体系跳过切片（忽略 --kpath-slice=%s）" % slice_spec, file=sys.stderr)
+        slice_spec = None
+    parts = parse_slice(slice_spec, len(coords))
     results = []
     for part in parts:
-        out_dir = STEP4_DIR if part is None else "%s_p%dof%d" % (STEP4_DIR, part[0], part[1])
+        out_dir = STEP4_DIR if part is None else os.path.join(STEP4_DIR, "p%dof%d" % (part[0], part[1]))
         results.append(build_step4_dir(out_dir, args, ctx, part))
 
     # ---------------- 汇总打印 ----------------

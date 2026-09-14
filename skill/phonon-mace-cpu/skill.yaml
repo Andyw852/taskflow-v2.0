@@ -24,7 +24,10 @@ defaults:
 fetch_files: [POSCAR, CONTCAR, SPOSCAR, workflow_method.txt, relax_summary.json,
               forces_summary.json, phonon_summary.json, band-dft-cpu.yaml, submit.sh,
               mace_relax.log, mace_forces.log, phonon.log, queue.out, queue.err,
-              phonon_band_full.png, phonon_band_lowfreq.png, phonon_band_summary.json]
+              phonon_band_full.png, phonon_band_lowfreq.png, phonon_band_summary.json,
+              disps.npy, forces.npy, phonopy_disp.yaml, klmace_params.txt, step.conf,
+              fc2.hdf5, force_constants.hdf5, FORCE_CONSTANTS, relax.traj,
+              cutoff_conv_summary.json, cutoff_conv_quality.json, band-cut*.yaml]
 
 steps:
   - {seq: 1, name: step1_mace_relax, label: S1_relax,
@@ -55,6 +58,18 @@ optional_steps:
       - {seq: 4, name: phonon_band_plot, label: S4_plot, after: step3_phonon,
          gen: "plot_phonon_band.py", check: plot, run: gen, gen_need: [],
          done_marker: phonon_band_summary.json, fetch_all: true}
+
+  # FC_CUTOFF 收敛性检查（default: false，不自动跑；tf start -j 按需启用）。
+  # 对每个 cutoff 重拟合 fc2 + mesh(60) + band，写 cutoff_conv_summary.json。
+  cutoff_conv:
+    default: false
+    steps:
+      - {seq: 5, name: step4_cutoff_conv, label: S5_conv, after: step3_phonon,
+         check: marker, marker: 'cutoff_conv_summary.json:"CUTOFF_CONV_DONE": true',
+         gen: gen_step4_cutoff_conv.py,
+         gen_need: [dim_common.py, stepconf.py, step.conf, klmace_common.py,
+                    cutoff_conv_driver.py, submit_mace_relax.tpl,
+                    disps.npy, forces.npy, klmace_params.txt, workflow_method.txt]}
 
 requires:
   python: [mace-torch, torch, ase, phonopy, symfc, spglib, numpy, alm]

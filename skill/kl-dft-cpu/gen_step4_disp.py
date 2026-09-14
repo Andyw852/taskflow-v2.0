@@ -4,7 +4,7 @@
 
 从 step1 弛豫结构接力，扩超胞并生成位移超胞，每个位移一个 disp-NNNNN 子目录单点取力。
 两种方法（step.conf 的 METHOD）：
-  alm     : 随机位移（默认）。位移数 = Σ_order ceil(nfree_order / (3·N_sc)) × OVERSAMPLE，
+  alm     : 随机位移（默认）。位移数 N = max(10, ceil(Σnfree/(3·N_sc)) × OVERSAMPLE)，
             nfree 由 ALM suggest 给出；位移用 hiPhive MC-rattle 生成（高斯幅度 +
             最近邻 d_min 保护 + rattle_std 标定），不是固定模长的 phono3py --rd。
   findiff : phono3py 对称有限位移，位移数由空间群对称约化决定。三阶全对称集在
@@ -113,7 +113,7 @@ def gate(n, conf, method, extra=""):
 # alm 分支：ALM 定帧数 + hiPhive MC-rattle 生成位移
 # ==========================================================================
 def plan_alm(out, ph3, conf):
-    """ALM suggest → nfree → N = Σ ceil(nfree/(3·N_sc))×OVERSAMPLE。返回 (N, nfree, atoms)。"""
+    """ALM suggest → nfree → N = max(10, ceil(Σnfree/(3·N_sc))×OVERSAMPLE)。返回 (N, nfree, atoms)。"""
     import lattice_kappa as lk
     from ase import Atoms
     from phonopy.interface.vasp import write_vasp
@@ -231,7 +231,7 @@ def main():
     require_dim(dim, ('2d', '3d'), "step4_disp",
                 why="晶格热导需要声子群速度和布里渊区积分，孤立分子只有分立振动模式")
     func = conf["FUNC"] if conf["FUNC"] not in (None, "", "auto") \
-        else meth.get("FUNC", "pbesol").lower()
+        else meth.get("FUNC", "pbe-d3").lower()
     method = str(conf["METHOD"]).lower()
     if method not in ("findiff", "alm"):
         sys.exit("[ERROR] METHOD 只允许 findiff / alm")

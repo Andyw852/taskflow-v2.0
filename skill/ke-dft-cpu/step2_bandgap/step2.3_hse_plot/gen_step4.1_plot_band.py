@@ -399,11 +399,18 @@ def expand_step4_dirs(spec: str):
             cand += hit
         else:
             cand.append(tok)
-    if len(cand) == 1 and not Path(cand[0]).is_dir():
-        sib = sorted(_glob.glob(cand[0] + "_p*of*"))
-        if sib:
-            log(f"[..] {cand[0]} 不存在，自动改用切片目录: {', '.join(sib)}")
-            cand = sib
+    if len(cand) == 1:
+        base = cand[0]
+        if not Path(base).is_dir():
+            sib = sorted(_glob.glob(base + "_p*of*"))  # 兼容旧兄弟目录
+            if sib:
+                log(f"[..] {base} 不存在，自动改用切片目录: {', '.join(sib)}")
+                cand = sib
+        else:
+            inner = sorted(_glob.glob(os.path.join(base, "p*of*")))  # v1.13：切片放 step4 目录内
+            if inner:
+                log(f"[..] {base} 是切片容器，改用内部目录: {', '.join(inner)}")
+                cand = inner
     seen, out = set(), []
     for c in cand:
         p = Path(c).resolve()

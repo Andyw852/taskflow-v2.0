@@ -81,7 +81,7 @@ VACUUM_MIN = 8.0     # Å；2D 常用真空 15~25 Å，8 Å 足以与层状体�
 #                    INCAR 标签会直接罢工，留着它反而跑不起来。
 #   "ioptcell_tag" : 补丁读 INCAR 的 IOPTCELL 标签，原样保留，不写 OPTCELL 文件。
 #   "none"         : 两者都不做（自行处理，如 ISIF=2 + 能量-面积扫描）。
-CELL_CONSTRAINT_2D = "ioptcell_tag"
+CELL_CONSTRAINT_2D = "auto"
 
 # ###################################################################
 # ★ 三段式结构优化 ★
@@ -108,18 +108,22 @@ CELL_CONSTRAINT_2D = "ioptcell_tag"
 RELAX_STAGES = "auto"          # "auto" | "single"
 
 # 各阶段覆盖的 INCAR 标签。None 表示删除该标签。
-# EDIFFG/POTIM 统一用高通量粗弛豫参数（EDIFFG=-0.05、POTIM=0.3）：
-# 三段只区分 ISIF/IBRION 策略（固定胞 → 放胞 → 准牛顿收尾）。
+# EDIFFG 分两档（不是笔误）：
+#   段 a（ISIF=2，只动原子）保持 -0.05 做高通量粗安顿，快；后面变胞段会把力收下去。
+#   段 b/c（ISIF=3，动晶胞）必须 -0.01 —— VASP 的 EDIFFG<0 只判【力】，
+#     力一到 -0.05 就停，晶胞往往还差几个 kbar。实测（Si 金刚石，故意放大 2%）：
+#       -0.05 时末态仍有 -1.19 kB，且从 CONTCAR 重开一遍 max|Δ晶格| = 0.000000 Å
+#       —— 完全幂等，多跑几遍治不了；只有把力判据收紧，才能把应力一起带下去。
 STAGE_SPEC = {
     "a": {"_desc": "固定胞，弛豫原子位置",
           "ISIF": "2", "IBRION": "2", "POTIM": "0.3",
           "EDIFFG": "-0.05", "NSW": "200", "IOPTCELL": None},
     "b": {"_desc": "放开晶胞（2D 仅面内），CG",
           "ISIF": "3", "IBRION": "2", "POTIM": "0.3",
-          "EDIFFG": "-0.05", "NSW": "200"},
+          "EDIFFG": "-0.01", "NSW": "200"},
     "c": {"_desc": "准牛顿收尾",
           "ISIF": "3", "IBRION": "1", "POTIM": "0.3",
-          "EDIFFG": "-0.05", "NSW": "100"},
+          "EDIFFG": "-0.01", "NSW": "100"},
 }
 STAGE_ORDER = ["a", "b", "c"]
 # ###################################################################
@@ -312,7 +316,26 @@ VACUUM_AXIS_POLICY = "error"
 #   "single"    不分段，模板里的 ISIF/IBRION 原样用
 STAGE_MODE = "in_job"
 STALL_MIN = 60                       # run_relax.sh 看门狗：OUTCAR 停滞几分钟判卡死（0=关）
-EARLY_EXIT_ON_CONVERGENCE = True     # 某段已收敛就跳过后续段
+
+# 「某段已收敛就跳过后续段」——注意这个开关只对【不改晶胞】的段有意义。
+#   _converged() 判的是 OUTCAR 里的 "reached required accuracy"，那是【力】判据；
+#   变胞段（ISIF>=3）管的是晶胞/应力，力收敛完全说明不了应力收敛。
+#   实测教训：材料的段1(a)（ISIF=2 固定胞）力已收敛，末态残余力 RMS 0.022 eV/Å，
+#   但应力仍有 8 kbar —— 而旧逻辑据此把段2(b)/段3(c) 跳过并写成 *.done，
+#   结果晶胞从未弛豫，而所有标记都显示"已完成"，谁都不会再去跑它。
+#   现在：变胞段永远不被力判据跳过；被跳过的段写 .skipped（不是 .done），
+#   retry 时仍会被执行。
+EARLY_EXIT_ON_CONVERGENCE = True     # 不改晶胞的段：已收敛就跳过后续段
+PRESS_TOL_KB = 1.0                   # 变胞段稳定判据③：|external pressure| < 此值 (kB)
+# 变胞段【多遍循环】参数 —— 把"手动 cp CONTCAR POSCAR 重跑直到零应力"固化成自动流程。
+#   为什么必须多遍：① VASP 的 EDIFFG<0 只判【力】不判【应力】，单遍跑完晶胞常差几个 kbar；
+#                  ② 体积/形状一变，平面波基组的 G 矢量集合就变了（Pulay 应力），
+#                     必须重启一遍让基组与新晶胞自洽。
+#   实测依据（Mg4C60 expcif ISIF=3 那次，3 遍收敛到 P=+0.07 kbar）：
+#     第1遍 ΔV=0.978% 力未收敛 | 第2遍 ΔV=0.063% 力未收敛 | 第3遍 ΔV=0.005% 力收敛，
+#     且末遍 max|Δ晶格分量| = 0.0013 Å —— 正好落在 CELL_PASS_TOL=0.002 之内。
+CELL_PASS_MAX = 3                    # 变胞段最多重复几遍
+CELL_PASS_TOL = 0.002                # 稳定判据②：本遍晶格矢量分量最大变化 (Å)
 
 METHOD_FILE = "workflow_method.txt"
 
@@ -344,6 +367,9 @@ KNOWN_PLACEHOLDERS = {"SYSTEM", "ENCUT", "GGA", "VDW_LINE", "JOBNAME"}
 #   mol_common 不再自己 stepconf.load()，改从 STEP_PARAMS 取。
 CONF_SPEC = {
     "FUNC": (FUNC_DEFAULT, "str"),
+    "HAS_ADSORBATE": (False, "bool"),
+    "FIXED_CELL": (False, "bool"),
+    "USES_MOLECULAR_REFERENCE": (False, "bool"),
     # 晶胞策略：step.conf 可覆盖技能默认（默认 None = 不设置，用技能 R.run 默认）。
     #   CELL_POLICY: primitive | standard | none
     #   STD_CELL:    primitive_standard | conventional （仅 CELL_POLICY=standard 生效）
@@ -450,15 +476,24 @@ def resolve_func(incar_tpl: Path, step_name=None):
             sys.exit("[ERROR] %s 的 FUNC=%r 无效，只允许：auto, %s"
                      % (where, want, ", ".join(FUNC_MAP)))
         return want, where
-    sniffed = sniff_func_from_tpl(incar_tpl)
-    if sniffed:
-        return sniffed, "FUNC=auto -> 由 %s 写死的 GGA/IVDW 反推" % incar_tpl.name
-    return FUNC_DEFAULT, "FUNC=auto -> 模板未写死，取脚本默认值"
+    import method_select
+    try:
+        from pymatgen.core import Structure
+        structure = Structure.from_file(str(Path.cwd() / "POSCAR"))
+        dimension = detect_dimension(Path.cwd() / "POSCAR", VACUUM_MIN)[0]
+    except Exception as exc:
+        sys.exit(f"[ERROR] FUNC=auto 无法读取结构并确定维度：{exc}；请显式指定 FUNC")
+    return method_select.default_method(
+        structure, dimension,
+        has_adsorbate=STEP_PARAMS.get("HAS_ADSORBATE", False),
+        uses_molecular_reference=STEP_PARAMS.get("USES_MOLECULAR_REFERENCE", False))
 
 
 def apply_step_params():
     """把 step.conf 里本模块自己要用的键落到全局量（MOL_* 由 mol_common 取用）。"""
     v = STEP_PARAMS.get("STALL_MINUTES")
+    if STEP_PARAMS.get("FIXED_CELL", False):
+        globals()["STAGE_MODE"] = "single"
     if v is not None:
         globals()["STALL_MIN"] = int(v)
 
@@ -584,9 +619,9 @@ def validate_user_config():
 
     if str(DIMENSION).lower() not in ("auto", "0d", "2d", "3d"):
         sys.exit("[ERROR] DIMENSION 只允许 'auto' / '2d' / '3d'")
-    if CELL_CONSTRAINT_2D not in ("optcell_file", "ioptcell_tag", "none"):
+    if CELL_CONSTRAINT_2D not in ("auto", "optcell_file", "ioptcell_tag", "none"):
         sys.exit("[ERROR] CELL_CONSTRAINT_2D 只允许 "
-                 "'optcell_file' / 'ioptcell_tag' / 'none'")
+                 "'auto' / 'optcell_file' / 'ioptcell_tag' / 'none'")
 
 
 def sanitize_label(text: str) -> str:
@@ -1216,13 +1251,19 @@ def apply_cell_constraint_2d(incar_path: Path, outdir: Path):
         kept.append(ln)
 
     mode = CELL_CONSTRAINT_2D
+    if mode == "auto":
+        mode = getattr(apply_cell_constraint_2d, "_constraint_mode", "ioptcell_tag")
     if mode == "ioptcell_tag":
+        if iopt is not None:
+            kept.append("IOPTCELL = " + " ".join(str(v) for v in iopt))
         if iopt is None:
             print("[WARN] CELL_CONSTRAINT_2D='ioptcell_tag' 但模板/INCAR 中没有合法的 "
                   "IOPTCELL 行 —— c 轴将不受约束，ISIF=3 会连真空一起弛豫！")
         return                # 原样保留，什么都不改
 
     if iopt is None:
+        if any(re.match(r"\s*ISIF\s*=\s*2\b", ln, re.IGNORECASE) for ln in kept):
+            return
         iopt = [1, 1, 0, 1, 1, 0, 0, 0, 0]   # 默认：面内 xx/yy/xy 放开，c 固定
 
     if mode == "optcell_file":
@@ -1283,7 +1324,7 @@ def extract_vasp_cmd(submit_text):
         s = ln.strip()
         if not s or s.startswith("#"):
             continue
-        if re.search(r"vasp_(std|ncl|gam)", s):
+        if re.match(r"(?:mpirun|mpiexec|srun)\b", s) and re.search(r"vasp_(std|ncl|gam)|TF_VASP_BIN", s):
             return s
     return None
 
@@ -1328,17 +1369,53 @@ _converged () {
     [ -f OUTCAR ] && grep -q "reached required accuracy" OUTCAR
 }
 
-# _run_stage <tag> <INCAR 文件> <是否把 CONTCAR 传给下一段:1/0> <描述>
+# _last_pressure —— OUTCAR 末态 external pressure (kB)；取不到就打印空
+_last_pressure () {
+    grep -o "external pressure =[ ]*-\{0,1\}[0-9.]*" OUTCAR 2>/dev/null | tail -1 | awk '{print $NF}' || true
+}
+
+# _abs_gt <数值> <阈值> —— |数值| > 阈值 时返回 0（真）
+_abs_gt () {
+    awk -v v="$1" -v t="$2" 'BEGIN{ if (v<0) v=-v; exit !(v>t) }'
+}
+
+# _cell_delta <文件A> <文件B> —— 两个 POSCAR/CONTCAR 的【晶格矢量分量最大绝对差】(Å)
+#   纯 awk（作业节点上不保证有 python3）。任一侧读不到就打印 9999，
+#   避免"文件缺失"被误判成"晶格已稳定"。
+_cell_delta () {
+    if [ ! -s "$1" ] || [ ! -s "$2" ]; then echo 9999; return 0; fi
+    awk -v f1="$1" -v f2="$2" '
+      FILENAME==f1 { if (FNR==2) s1=$1; else if (FNR>=3 && FNR<=5) { n++; a[n]=$1*s1; n++; a[n]=$2*s1; n++; a[n]=$3*s1 } next }
+      FILENAME==f2 { if (FNR==2) s2=$1; else if (FNR>=3 && FNR<=5) { k++; b[k]=$1*s2; k++; b[k]=$2*s2; k++; b[k]=$3*s2 } next }
+      END { m=0; if (n==0 || k==0) { print "9999.000000"; exit } for (i=1;i<=n && i<=k;i++) { d=a[i]-b[i]; if (d<0) d=-d; if (d>m) m=d } printf "%.6f\n", m }
+    ' "$1" "$2"
+}
+
+# _cell_settled <maxΔ晶格(Å)> <external pressure(kB)> —— 三条全满足才算变胞段稳定
+#   ① 力收敛（OUTCAR 出现 reached required accuracy）
+#   ② 本遍晶格几乎没动（< CELL_PASS_TOL）—— 说明基组/形状已经自洽
+#   ③ |P| < PRESS_TOL —— 真·零应力
+#   缺 ②③ 就会出现"力收敛但晶胞还差几个 kbar"的假收敛（历史上晶胞从未弛豫就是这么来的）。
+_cell_settled () {
+    if _abs_gt "$1" "${CELL_PASS_TOL}"; then return 1; fi
+    if [ -n "$2" ] && _abs_gt "$2" "${PRESS_TOL}"; then return 1; fi
+    _converged
+}
+
+# _run_stage <tag> <INCAR 文件> <是否把 CONTCAR 传给下一段:1/0> <描述> [本段允许被力判据跳过:1/0]
+#   第 5 个参数 ee（缺省 1）：
+#     1 = 本段不改晶胞（ISIF<=2），上一段力已收敛即可跳过（省机时）
+#     0 = 本段改晶胞（ISIF>=3）—— 禁止跳过。力判据 "reached required accuracy"
+#         只说明原子受力小，与晶胞/应力是否到位是两回事；跳过它等于晶胞永不弛豫。
 _run_stage () {
-    local tag="$1" incar="$2" pass="$3" desc="$4" rc=0 vpid wpid f
+    local tag="$1" incar="$2" pass="$3" desc="$4" ee="${5:-1}" rc=0 vpid wpid f
     if [ -f ".${tag}.done" ]; then
         echo "[run_relax] ${desc} —— 已完成，跳过"
         return 0
     fi
-    # 上一段已经收敛到力判据：后面的段没有意义，直接跳过（省机时）
-    if [ "${EARLY_EXIT}" = "1" ] && _converged; then
-        echo "[run_relax] ${desc} —— 上一段已收敛，跳过"
-        : > ".${tag}.done"
+    if [ "${EARLY_EXIT}" = "1" ] && [ "${ee}" = "1" ] && _converged; then
+        echo "[run_relax] ${desc} —— 上一段已收敛，跳过（本段不改晶胞）"
+        : > ".${tag}.skipped"      # ★ 写 .skipped 不写 .done：被跳过的段不算已完成
         return 0
     fi
     # 本段上次跑了一半被杀：CONTCAR 完好就从它接着算，不从头再来
@@ -1373,7 +1450,12 @@ _run_stage () {
         return 1
     fi
     : > ".${tag}.done"
-    if [ "${pass}" = "1" ] && ! _converged; then
+    if [ "${pass}" = "1" ]; then
+        # 无论本段是否收敛，下一段都必须从本段的 CONTCAR 起算：
+        #   收敛   -> 带着弛豫好的离子进下一段；
+        #   未收敛 -> 接着本段停下的地方算。
+        # 旧版只在"未收敛"时才接力，于是段1(a) 一旦收敛，段2(b) 就从原始 POSCAR
+        # 起算，把段1 的离子弛豫整个丢掉。
         if ! _contcar_ok; then
             echo "[run_relax] ${desc} 的 CONTCAR 缺失/残缺，无法接力下一段" >&2
             return 1
@@ -1383,6 +1465,28 @@ _run_stage () {
     return 0
 }
 """
+
+
+def stage_changes_cell(incar_text):
+    """这一段是否动晶胞（ISIF>=3，或写了 2D 的 IOPTCELL）。
+
+    动晶胞的段不能被"力已收敛"这个判据跳过 —— 力收敛说明不了应力收敛。
+    ISIF=2 时 IOPTCELL 会被 gen 主动忽略（见 apply_2d_cell_constraint），
+    所以只看 ISIF 就够；但为稳妥起见，IOPTCELL 非零行也一并算作动胞。"""
+    isif = "2"
+    for ln in incar_text.splitlines():
+        m = re.match(r"\s*ISIF\s*=\s*(\S+)", ln, re.IGNORECASE)
+        if m:
+            isif = m.group(1).strip()
+            break
+    m = re.match(r"(\d+)", isif)
+    if m and int(m.group(1)) >= 3:
+        return True
+    for ln in incar_text.splitlines():
+        mm = re.match(r"\s*IOPTCELL\s*=\s*(\S+)", ln, re.IGNORECASE)
+        if mm and re.search(r"[1-9]", mm.group(1)):
+            return True
+    return False
 
 
 def build_in_job_stages(outdir: Path):
@@ -1407,28 +1511,98 @@ def build_in_job_stages(outdir: Path):
                               remove_keys=[a for a, b in spec.items() if b is None])
         fname = "INCAR.s%d_%s" % (k + 1, st)
         (outdir / fname).write_text(text, encoding="utf-8", newline="\n")
-        stages.append((fname, "段%d(%s) %s" % (k + 1, st, STAGE_SPEC[st].get("_desc", ""))))
+        desc = "段%d(%s) %s" % (k + 1, st, STAGE_SPEC[st].get("_desc", ""))
+        if stage_changes_cell(text):
+            desc += " [变胞]"
+        stages.append((fname, desc, stage_changes_cell(text)))
         if k == 0:      # INCAR 本体指向第一段，便于手动排查
             (outdir / "INCAR").write_text(text, encoding="utf-8", newline="\n")
+
+    # ---- 段序切分：前缀（不改胞，跑一次）／变胞主体（多遍循环）／尾部（跑一次）----
+    cell_idx = [i for i, s in enumerate(stages) if s[2]]
+    first_cell = cell_idx[0] if cell_idx else len(stages)
+    last_cell = cell_idx[-1] if cell_idx else -1
+    prefix = list(range(0, first_cell))
+    body = list(range(first_cell, last_cell + 1))
+    tail = list(range(last_cell + 1, len(stages)))
+    last_overall = len(stages) - 1
 
     lines = ["#!/bin/bash", "set -e",
              "# 作业内分段弛豫（%s 生成，STAGE_MODE=in_job）" % SCRIPT_NAME,
              "# 段序：" + " -> ".join(s[1] for s in stages),
              "# VASP 执行命令取自 submit.sh，$SLURM_NTASKS 运行时展开",
              "#",
-             "# 断点续跑：每段完成写 .sN.done，重投时自动跳过已完成的段。",
-             "#   想强制从头重来： rm -f .s?.done .s?.started",
+             "# 断点续跑：每段【真跑完】才写 .sN.done，重投时自动跳过已完成的段。",
+             "#   因力判据被跳过的段写 .sN.skipped（不算完成，重投仍会跑）。",
+             "#   想强制从头重来： rm -f .s?.done .s?.started .s?.skipped .cellin.*",
              "# 分段存档：每段的 OUTCAR/OSZICAR/CONTCAR 另存为 *.sN，便于事后排查。",
              "",
              'VASP_CMD="%s"' % vasp_cmd,
              "STALL_MIN=%d    # OUTCAR 停滞这么多分钟判定卡死（0=关）" % int(STALL_MIN),
-             'EARLY_EXIT=%s   # 某段已收敛就跳过后续段' % ("1" if EARLY_EXIT_ON_CONVERGENCE else "0"),
+             'EARLY_EXIT=%s   # 不改胞的段：已收敛就跳过后续段' % ("1" if EARLY_EXIT_ON_CONVERGENCE else "0"),
+             "PRESS_TOL=%s     # 稳定判据③：|external pressure| < 此值 (kB)" % PRESS_TOL_KB,
+             "CELL_PASS_MAX=%d # 变胞段最多重复几遍" % int(CELL_PASS_MAX),
+             "CELL_PASS_TOL=%s # 稳定判据②：本遍晶格矢量分量最大变化 (Å)" % CELL_PASS_TOL,
+             "CELL_SETTLED=1   # 无变胞段时视为无需稳定判定；进循环会置 0",
              RUN_RELAX_HELPERS,
              ""]
-    for k, (fname, desc) in enumerate(stages):
-        lines.append('_run_stage s%d %s %s "%s"'
-                     % (k + 1, fname, "0" if k == len(stages) - 1 else "1", desc))
+
+    def _emit(i, tag, pass_flag):
+        fname, desc, cell_stage = stages[i]
+        # 变胞段一律 ee=0（禁止被力判据跳过）；不改胞的段沿用 EARLY_EXIT 开关
+        lines.append('_run_stage %s %s %s "%s" %s'
+                     % (tag, fname, pass_flag, desc, "0" if cell_stage else "1"))
+
+    for i in prefix:
+        _emit(i, "s%d" % (i + 1), "0" if i == last_overall else "1")
+
+    if body:
+        body_last_tag = "s%dr${CELL_PASS}" % (body[-1] + 1)
+        lines += ["",
+                  "# ===================== 变胞段多遍循环 =====================",
+                  "# 为什么必须多遍：",
+                  "#   ① VASP 的 EDIFFG<0 只判【力】不判【应力】，单遍跑完晶胞常差几个 kbar；",
+                  "#   ② 体积/形状一变，平面波基组的 G 矢量集合就变了（Pulay 应力），",
+                  "#      必须 CONTCAR->POSCAR 重开一遍让基组与新晶胞自洽。",
+                  "# 稳定判据（三条全满足）：力收敛 + 本遍晶格几乎不动 + |P| 达标。",
+                  "CELL_SETTLED=0",
+                  "CELL_PASS=1",
+                  'while [ -f ".%s.done" ]; do CELL_PASS=$((CELL_PASS + 1)); done' % body_last_tag,
+                  'echo "[run_relax] 变胞段从第 ${CELL_PASS} 遍开始（上限 ${CELL_PASS_MAX} 遍）"',
+                  "while : ; do",
+                  '    cp -f POSCAR ".cellin.${CELL_PASS}" 2>/dev/null || true']
+        for i in body:
+            _emit(i, "s%dr${CELL_PASS}" % (i + 1), "0" if i == last_overall else "1")
+        lines += ['    _dl="$(_cell_delta ".cellin.${CELL_PASS}" CONTCAR)"',
+                  '    _lp="$(_last_pressure 2>/dev/null || true)"',
+                  '    echo "[run_relax] 第 ${CELL_PASS} 遍：max|Δ晶格| = ${_dl} Å   |P| = ${_lp} kB"',
+                  '    if _cell_settled "${_dl}" "${_lp}"; then',
+                  '        echo "[run_relax] 变胞段稳定（力收敛 + 晶格变化 < ${CELL_PASS_TOL} Å + |P| < ${PRESS_TOL} kB），共 ${CELL_PASS} 遍"',
+                  "        CELL_SETTLED=1",
+                  "        break",
+                  "    fi",
+                  '    if [ "${CELL_PASS}" -ge "${CELL_PASS_MAX}" ]; then',
+                  '        echo "[run_relax][WARN] 已跑满 ${CELL_PASS_MAX} 遍仍未稳定：max|Δ晶格|=${_dl} Å, P=${_lp} kB" >&2',
+                  "        break",
+                  "    fi",
+                  '    echo "[run_relax] 未稳定，CONTCAR -> POSCAR 重开第 $((CELL_PASS + 1)) 遍"',
+                  "    cp -f CONTCAR POSCAR",
+                  "    CELL_PASS=$((CELL_PASS + 1))",
+                  "done",
+                  ""]
+
+    for i in tail:
+        _emit(i, "s%d" % (i + 1), "0" if i == last_overall else "1")
+
     lines += ["",
+              'lastp="$(_last_pressure 2>/dev/null || true)"',
+              'echo "[run_relax] 末态 external pressure = ${lastp:-?} kB（阈值 ${PRESS_TOL}）"',
+              'if [ "${CELL_SETTLED}" != "1" ]; then',
+              '    echo "[run_relax][WARN] 变胞段【未判定为稳定】—— 末态 P=${lastp:-?} kB，晶胞可能没到位。" >&2',
+              '    echo "[run_relax][WARN] 补救：cp CONTCAR POSCAR; rm -f .s?r?.done; 重投本步。" >&2',
+              "    echo RELAX_CELL_UNCONVERGED",
+              "fi",
+              "",
               'if grep -q "reached required accuracy" OUTCAR; then',
               '    echo RELAX_OK',
               "else",
@@ -1443,7 +1617,7 @@ def build_in_job_stages(outdir: Path):
                            encoding="utf-8", newline="\n")
     print("[OK] 作业内分段：%d 段 -> run_relax.sh；submit.sh 已改调 bash run_relax.sh"
           % len(stages))
-    for fname, desc in stages:
+    for fname, desc, cell_stage in stages:
         print("     %-22s %s" % (fname, desc))
     return True
 
@@ -1497,6 +1671,17 @@ def validate_generated_incar(path: Path):
     只校验方法关键的 GGA / IVDW 两项——其余参数模板自由增删，不做限制。
     """
     values = read_incar_values(path)
+    potcar = path.parent / "POTCAR"
+    if not potcar.is_file():
+        sys.exit("[ERROR] 缺少 POTCAR，无法校验 ENCUT 的 1.5×ENMAX 下限")
+    minimum = encut_from_potcar(potcar, max(1.5, ENCUT_FACTOR))
+    try:
+        actual = float(values.get("ENCUT", "nan"))
+    except ValueError:
+        actual = float("nan")
+    if not math.isfinite(actual) or actual < minimum:
+        sys.exit(f"[ERROR] 生成的 INCAR ENCUT={values.get('ENCUT')} 低于"
+                 f" POTCAR 下限 {minimum} eV；请修正硬编码模板")
     method = FUNC_MAP[FUNC]
     gga = values.get("GGA", "").upper()
     ivdw = values.get("IVDW", "").split()[0] if values.get("IVDW") else None
@@ -1547,6 +1732,11 @@ def main():
     dim, vac_axis, dim_note = resolve_dimension(cwd / "POSCAR")
     incar_tpl = resolve_tpl(cwd, "incar", dim)
     submit_tpl = resolve_tpl(cwd, "submit_std", dim)
+    template_text = submit_tpl.read_text(encoding="utf-8", errors="ignore")
+    capability = re.search(r"^export TF_CELL_CONSTRAINT=(ioptcell_tag|optcell_file|none)$", template_text, re.M)
+    if dim == "2d" and (not capability or capability.group(1) == "none"):
+        sys.exit("[ERROR] 2D 优化模板未声明约束能力，请配置集群 vasp.relax_2d")
+    apply_cell_constraint_2d._constraint_mode = capability.group(1) if capability else "none"
     print(f"[..] 维度：{dim.upper()} — {dim_note}")
     print(f"[..] 模板：{incar_tpl.name} + {submit_tpl.name}")
     if dim == "2d" and incar_tpl.name == "incar.tpl":
@@ -1582,7 +1772,10 @@ def main():
     # 「跑过」、不表示「收敛过」——上次 FAIL 后重投若不清理，run_relax.sh 会把所有段
     # 判成「已完成，跳过」，作业 0 秒“完成”、判据原样挂掉。gen 只在本步无作业时
     # 执行（do_submit 先 kill_if_queued），这里清理不会误伤在跑作业。
-    for _m in sorted(outdir.glob(".s*.done")) + sorted(outdir.glob(".s*.started")):
+    # .cellin.N 是变胞多遍循环每遍的晶格起点快照，也必须一起清——
+    # 否则重投时会拿上一代的旧快照去比新 CONTCAR，_cell_delta 直接算错。
+    for _m in (sorted(outdir.glob(".s*.done")) + sorted(outdir.glob(".s*.started"))
+               + sorted(outdir.glob(".s*.skipped")) + sorted(outdir.glob(".cellin.*"))):
         _m.unlink()
         print("[..] 清掉旧阶段标记 %s（本代重新从头续跑）" % _m.name)
 
@@ -1611,17 +1804,26 @@ def main():
         print("[SKIP] RUN_VASPKIT=False，已跳过 VASPKIT")
 
     # 确定 ENCUT
-    if MANUAL_ENCUT is not None:
+    if have_potcar:
+        required_encut = encut_from_potcar(outdir / "POTCAR", ENCUT_FACTOR)
+        if MANUAL_ENCUT is not None and float(MANUAL_ENCUT) < required_encut:
+            sys.exit(f"[ERROR] 手动 ENCUT={MANUAL_ENCUT} eV 低于 POTCAR 要求的"
+                     f" {ENCUT_FACTOR}×ENMAX={required_encut} eV")
+        params["ENCUT"] = str(MANUAL_ENCUT if MANUAL_ENCUT is not None else required_encut)
+        print(f"[..] ENCUT = {params['ENCUT']} eV（POTCAR 最低要求 {required_encut} eV）")
+    elif MANUAL_ENCUT is not None:
         params["ENCUT"] = str(MANUAL_ENCUT)
-        print(f"[..] 使用手动 ENCUT = {MANUAL_ENCUT} eV")
-    elif have_potcar:
-        params["ENCUT"] = str(encut_from_potcar(outdir / "POTCAR", ENCUT_FACTOR))
+        print(f"[..] 使用手动 ENCUT = {MANUAL_ENCUT} eV（无 POTCAR，无法校验 ENMAX）")
     else:
         print(f"[WARN] 没有 POTCAR，ENCUT 暂用兜底值 {params['ENCUT']} eV")
 
     # 生成并校验 INCAR
     render(incar_tpl, outdir / "INCAR", params)
     validate_generated_incar(outdir / "INCAR")
+    if STEP_PARAMS.get("FIXED_CELL", False):
+        incar_path = outdir / "INCAR"
+        incar_path.write_text(set_incar_tags(incar_path.read_text(), {"ISIF": "2"},
+                                           remove_keys=["IOPTCELL"]))
     print("[OK] INCAR 泛函检查通过")
 
     # ---- 磁性自动判定并注入 INCAR（覆盖模板里的 ISPIN/MAGMOM）----

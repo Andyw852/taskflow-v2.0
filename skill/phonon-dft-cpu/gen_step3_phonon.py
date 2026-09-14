@@ -18,7 +18,7 @@ STEP   = "step3_phonon"
 DISP   = "step2_disp"
 
 SPEC = {
-    "FUNC":        ("pbesol", "str"),   # 全局带入，本步不用
+    "FUNC":        ("auto", "str"),   # 继承 step1 的方法卡
     "IMAG_THR":    (0.10, "float"),
     "BAND_POINTS": (51,   "int"),
 }

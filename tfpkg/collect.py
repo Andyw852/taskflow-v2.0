@@ -281,8 +281,13 @@ def _ssh_cmd(cfg, host, remote_args):
             os.makedirs(sockdir, exist_ok=True)
         except OSError:
             pass
+        # HanHai 的连接助手可能在备用入口建立 master；统一使用固定
+        # hanhai25 socket，避免备用别名导致 taskflow 找不到可复用连接。
+        control_path = (os.path.join(sockdir, "tf-%r@114.214.255.25:%p.sock")
+                        if str(host).lower() in {"hanhai25", "hanhai25-02"}
+                        else os.path.join(sockdir, "tf-%r@%h:%p.sock"))
         opts += ["-o", "ControlMaster=auto",
-                 "-o", "ControlPath=" + os.path.join(sockdir, "tf-%r@%h:%p.sock"),
+                 "-o", "ControlPath=" + control_path,
                  "-o", "ControlPersist=600"]
     return ["ssh"] + opts + [host] + remote_args
 
@@ -293,20 +298,42 @@ def _ssh_cmd_pre(cfg, host, pre_opts, remote_args):
     return base[:-1] + pre_opts + [host] + remote_args
 
 # ===== collect (原 L2069-L2097) =====
+def _effective_remote_path_prefix(cfg, host):
+    """Return the configured remote PATH prefix for an SSH host.
+
+    Cluster configuration filenames use the logical cluster name (for example
+    ``a800.yaml``), while the SSH alias may differ in case or spelling
+    (``A800``).  Resolve both forms so input generation and collection run in
+    the same remote environment.
+    """
+    from tfpkg import _PKG_ROOT, _load_yaml_file, pkg_setting_path
+    prefix = (cfg.get("remote_path_prefix") or "").strip()
+    if not host:
+        return prefix
+    config_paths = []
+    direct = pkg_setting_path(str(host) + ".yaml")
+    if direct:
+        config_paths.append(direct)
+    setting_dir = os.path.join(_PKG_ROOT, "setting")
+    for candidate in sorted(glob.glob(os.path.join(setting_dir, "*.yaml"))):
+        if candidate not in config_paths:
+            config_paths.append(candidate)
+    for candidate in config_paths:
+        cluster = _load_yaml_file(candidate) or {}
+        if candidate == direct or str(cluster.get("ssh_host") or "").lower() == str(host).lower():
+            configured = cluster.get("remote_path_prefix")
+            if configured:
+                return str(configured).strip()
+    return prefix
+
+
 def collect(cfg, types, host="__default__"):
     # v1.2：把本次涉及技能的 checks.py 源码一起打包，远端注册成判据
     from tfpkg import COLLECTOR, _load_yaml_file, pkg_setting_path, skill_checks_for
     extra = skill_checks_for(cfg, [td.get("key") for td in types])
     if host == "__default__":
         host = cfg.get("host")
-    _pp = (cfg.get("remote_path_prefix") or "").strip()
-    # 集群级 remote_path_prefix 覆盖（同 run_remote）
-    if host:
-        _cp = pkg_setting_path(str(host) + ".yaml")
-        if _cp:
-            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
-            if _cpp:
-                _pp = str(_cpp).strip()
+    _pp = _effective_remote_path_prefix(cfg, host)
     payload = base64.b64encode(
         json.dumps({"user": cfg.get("user"), "types": types,
                     "extra_checks": extra,
@@ -336,18 +363,9 @@ def collect(cfg, types, host="__default__"):
 def run_remote(cfg, shell_line, host="__default__", use_stdin=False):
     """use_stdin=True 时整个脚本经 stdin 投递（bash -s），不受 argv 长度限制
     （gen 推送大量 base64 文件时必须用，否则 Argument list too long）。"""
-    from tfpkg import _load_yaml_file, pkg_setting_path
     if host == "__default__":
         host = cfg.get("host")
-    _pp = (cfg.get("remote_path_prefix") or "").strip()
-    # 集群级 remote_path_prefix 覆盖：setting/<ssh_host>.yaml 里可写 remote_path_prefix
-    # （hanhai25 等新集群用自己的 pybin，含 python/python3/vaspkit 软链，供 gen 脚本用）。
-    if host:
-        _cp = pkg_setting_path(str(host) + ".yaml")
-        if _cp:
-            _cpp = (_load_yaml_file(_cp) or {}).get("remote_path_prefix")
-            if _cpp:
-                _pp = str(_cpp).strip()
+    _pp = _effective_remote_path_prefix(cfg, host)
     if _pp and host:
         shell_line = "export PATH=\"%s:$PATH\"; %s" % (_pp, shell_line)
     if use_stdin:
@@ -394,4 +412,3 @@ def _parallel_map(worker, items, nw=None, desc="批量操作"):
             _f.add_done_callback(_progress)
         out = [_f.result() for _f in _futs]
     return out
-

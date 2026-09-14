@@ -117,12 +117,13 @@ STAGE_SPEC = {
     "a": {"_desc": "固定胞，弛豫原子位置",
           "ISIF": "2", "IBRION": "2", "POTIM": "0.3",
           "EDIFFG": "-0.05", "NSW": "200", "IOPTCELL": None},
+    # 变胞段 -0.01：EDIFFG<0 只判力，-0.05 会让晶胞带着几个 kbar 就停
     "b": {"_desc": "放开晶胞（2D 仅面内），CG",
           "ISIF": "3", "IBRION": "2", "POTIM": "0.3",
-          "EDIFFG": "-0.05", "NSW": "200"},
+          "EDIFFG": "-0.01", "NSW": "200"},
     "c": {"_desc": "准牛顿收尾",
           "ISIF": "3", "IBRION": "1", "POTIM": "0.3",
-          "EDIFFG": "-0.05", "NSW": "100"},
+          "EDIFFG": "-0.01", "NSW": "100"},
 }
 STAGE_ORDER = ["a", "b", "c"]
 # ###################################################################
@@ -1211,6 +1212,9 @@ def apply_cell_constraint_2d(incar_path: Path, outdir: Path):
         kept.append(ln)
 
     mode = CELL_CONSTRAINT_2D
+    mode = getattr(apply_cell_constraint_2d, "_constraint_mode", mode)
+    if mode == "none" and any(re.match(r"\s*ISIF\s*=\s*[3-8]\b", line, re.I) for line in kept):
+        sys.exit("[ERROR] 2D 变胞优化需要配置 vasp.relax_2d 约束版本")
     if mode == "ioptcell_tag":
         if iopt is None:
             print("[WARN] CELL_CONSTRAINT_2D='ioptcell_tag' 但模板/INCAR 中没有合法的 "
@@ -1278,7 +1282,7 @@ def extract_vasp_cmd(submit_text):
         s = ln.strip()
         if not s or s.startswith("#"):
             continue
-        if re.search(r"vasp_(std|ncl|gam)", s):
+        if re.match(r"(?:mpirun|mpiexec|srun)\b", s) and re.search(r"vasp_(std|ncl|gam)|TF_VASP_BIN", s):
             return s
     return None
 
@@ -1323,17 +1327,22 @@ _converged () {
     [ -f OUTCAR ] && grep -q "reached required accuracy" OUTCAR
 }
 
-# _run_stage <tag> <INCAR 文件> <是否把 CONTCAR 传给下一段:1/0> <描述>
+# _run_stage <tag> <INCAR 文件> <是否把 CONTCAR 传给下一段:1/0> <描述> [本段允许被力判据跳过:1/0]
+#   第 5 个参数 ee（缺省 1）：
+#     1 = 本段不改晶胞（ISIF<=2），上一段力已收敛即可跳过（省机时）
+#     0 = 本段改晶胞（ISIF>=3）—— 禁止跳过。力判据 "reached required accuracy"
+#         只说明原子受力小，与晶胞/应力是否到位是两回事；跳过它等于晶胞永不弛豫。
+#   （和 skill/_common/opt/relax_common.py 同步修的这一条：opt-dft-cpu 是靠把
+#     EARLY_EXIT 整体关掉绕过去的，其它技能继承默认 True 就中招。）
 _run_stage () {
-    local tag="$1" incar="$2" pass="$3" desc="$4" rc=0 vpid wpid f
+    local tag="$1" incar="$2" pass="$3" desc="$4" ee="${5:-1}" rc=0 vpid wpid f
     if [ -f ".${tag}.done" ]; then
         echo "[run_relax] ${desc} —— 已完成，跳过"
         return 0
     fi
-    # 上一段已经收敛到力判据：后面的段没有意义，直接跳过（省机时）
-    if [ "${EARLY_EXIT}" = "1" ] && _converged; then
-        echo "[run_relax] ${desc} —— 上一段已收敛，跳过"
-        : > ".${tag}.done"
+    if [ "${EARLY_EXIT}" = "1" ] && [ "${ee}" = "1" ] && _converged; then
+        echo "[run_relax] ${desc} —— 上一段已收敛，跳过（本段不改晶胞）"
+        : > ".${tag}.skipped"      # ★ 写 .skipped 不写 .done：被跳过的段不算已完成
         return 0
     fi
     # 本段上次跑了一半被杀：CONTCAR 完好就从它接着算，不从头再来
@@ -1384,6 +1393,24 @@ _run_stage () {
 """
 
 
+def stage_changes_cell(incar_text):
+    """这一段是否动晶胞（ISIF>=3，或写了 IOPTCELL）。动晶胞的段不能被力判据跳过。"""
+    isif = "2"
+    for ln in incar_text.splitlines():
+        m = re.match(r"\s*ISIF\s*=\s*(\S+)", ln, re.IGNORECASE)
+        if m:
+            isif = m.group(1).strip()
+            break
+    m = re.match(r"(\d+)", isif)
+    if m and int(m.group(1)) >= 3:
+        return True
+    for ln in incar_text.splitlines():
+        mm = re.match(r"\s*IOPTCELL\s*=\s*(\S+)", ln, re.IGNORECASE)
+        if mm and re.search(r"[1-9]", mm.group(1)):
+            return True
+    return False
+
+
 def build_in_job_stages(outdir: Path):
     """把 outdir/INCAR 按 STAGE_SPEC 拆成 INCAR.s1_<段> …，生成 run_relax.sh，
        并把 submit.sh 里的 VASP 执行行换成 `bash run_relax.sh`。
@@ -1406,7 +1433,11 @@ def build_in_job_stages(outdir: Path):
                               remove_keys=[a for a, b in spec.items() if b is None])
         fname = "INCAR.s%d_%s" % (k + 1, st)
         (outdir / fname).write_text(text, encoding="utf-8", newline="\n")
-        stages.append((fname, "段%d(%s) %s" % (k + 1, st, STAGE_SPEC[st].get("_desc", ""))))
+        desc = "段%d(%s) %s" % (k + 1, st, STAGE_SPEC[st].get("_desc", ""))
+        cell_stage = stage_changes_cell(text)
+        if cell_stage:
+            desc += " [变胞]"
+        stages.append((fname, desc, cell_stage))
         if k == 0:      # INCAR 本体指向第一段，便于手动排查
             (outdir / "INCAR").write_text(text, encoding="utf-8", newline="\n")
 
@@ -1424,9 +1455,11 @@ def build_in_job_stages(outdir: Path):
              'EARLY_EXIT=%s   # 某段已收敛就跳过后续段' % ("1" if EARLY_EXIT_ON_CONVERGENCE else "0"),
              RUN_RELAX_HELPERS,
              ""]
-    for k, (fname, desc) in enumerate(stages):
-        lines.append('_run_stage s%d %s %s "%s"'
-                     % (k + 1, fname, "0" if k == len(stages) - 1 else "1", desc))
+    for k, (fname, desc, cell_stage) in enumerate(stages):
+        # 变胞段一律 ee=0（禁止被力判据跳过）；不改胞的段沿用 EARLY_EXIT 开关
+        lines.append('_run_stage s%d %s %s "%s" %s'
+                     % (k + 1, fname, "0" if k == len(stages) - 1 else "1", desc,
+                        "0" if cell_stage else "1"))
     lines += ["",
               'if grep -q "reached required accuracy" OUTCAR; then',
               '    echo RELAX_OK',
@@ -1442,7 +1475,7 @@ def build_in_job_stages(outdir: Path):
                            encoding="utf-8", newline="\n")
     print("[OK] 作业内分段：%d 段 -> run_relax.sh；submit.sh 已改调 bash run_relax.sh"
           % len(stages))
-    for fname, desc in stages:
+    for fname, desc, cell_stage in stages:
         print("     %-22s %s" % (fname, desc))
     return True
 
@@ -1546,6 +1579,9 @@ def main():
     dim, vac_axis, dim_note = resolve_dimension(cwd / "POSCAR")
     incar_tpl = resolve_tpl(cwd, "incar", dim)
     submit_tpl = resolve_tpl(cwd, "submit_std", dim)
+    capability = re.search(r"^export TF_CELL_CONSTRAINT=(ioptcell_tag|optcell_file|none)$",
+                           submit_tpl.read_text(encoding="utf-8"), re.M)
+    apply_cell_constraint_2d._constraint_mode = capability.group(1) if capability else "none"
     print(f"[..] 维度：{dim.upper()} — {dim_note}")
     print(f"[..] 模板：{incar_tpl.name} + {submit_tpl.name}")
     if dim == "2d" and incar_tpl.name == "incar.tpl":

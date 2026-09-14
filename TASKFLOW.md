@@ -99,6 +99,8 @@ tf --version
 
 ## 3. 命令参考
 
+简明帮助：`tf -h`、`tf --help`、`tf help`；完整参数和高级命令：`tf --help-all`。`retry` 保留产物重生成，`rerun` 删除后重生成，`clean` 只删除，三者不合并。`auto` 控制推进开关，`monitor` 持续执行采集和推进。
+
 ```
 tf summary                        巡检首选：只读极简汇总（每任务类型一行 done/run/err/
                                   scancel/wait 计数 + FAIL 清单），省 token，绝不提交。
@@ -124,11 +126,12 @@ tf [-tt TT] [-p MAT] stop        取消作业。取消的步骤打 scancel 标�
                                   或跨材料 -status scancel start（retry/rerun）；
                                   重交成功/rerun/clean 后标记自动清除，
                                   步骤出现新作业或已完成时标记也会自愈
-tf [-tt TT] [-p MAT] retry       用现有输入文件重交（在超算手改 INCAR/KPOINTS 后用它，
-                                  tf 不动超算上的文件，直接 sbatch 提交）
+tf [-tt TT] [-p MAT] retry       保留 OUTCAR/CONTCAR 等产物，按项目配置重新生成输入，
+                                  不提交；检查后 start。持久参数改到项目配置/模板，
+                                  不要假定远端手改的 INCAR 会原样保留。
 tf -p A B retry                  同时操作多个项目（也支持 -p A,B 逗号分隔；
                                   start/stop/rerun/clean/status/dir/fetch 同样适用）
-tf [-tt TT] [-p MAT] rerun       删除旧的生成文件 → gen 重新生成 → 提交
+tf [-tt TT] [-p MAT] rerun       删除旧步骤产物 → gen 重新生成；不提交，检查后 start
 tf -j STEP rerun                 跨材料只重做该步骤（gen 脚本改动后一键修复全部材料；
                                   自动跳过 done 的和前序未完成的，加 -f 可强制）
 tf -j STEP start/stop/retry/clean  同理：-j 不带 -p = 对全部材料只操作该步骤
@@ -136,7 +139,7 @@ tf -x A,B ...                    任何命令加 -x 跳过指定项目（逗号�
 tf -status ST ...                只保留含指定状态步骤的材料，对任意命令生效：
                                   tf -status scancel          只看被 stop 取消的
                                   tf -status scancel start    把它们全部重跑（保留文件重交）
-                                  tf -status error retry      重交全部失败步骤
+                                  tf -status error retry      重生成全部失败步骤输入（不提交）
                                   状态词 done/running/pd/error/waiting/scancel，逗号分隔
 tf [-p MAT] [-j STEP] clean       只删不建回到 PREP：无 -p=全部材料（本地+超算只留 POSCAR）；
                                   -p C20=该体系全部材料；-p -j=单个步骤目录。
@@ -162,7 +165,11 @@ tf [-tt TT] -p MAT -j STEP conf    查看/修改该步骤的 step.conf（分层�
                                   例：tf -tt kl-mace-cpu -p X -j 2 conf
                                       tf -tt kl-mace-cpu -p X -j 2 conf --set params.METHOD=random
                                       tf -tt opt-dft-cpu -p X -j 3 conf --set MU="C:-9.0 Li:-1.9"
-tf auto [on|off]                 一键开关全局 auto_advance（动目录/恢复备份前先 off）
+tf auto [on|off]                 开关全局 auto_advance（动目录/恢复备份前先 off）
+tf -tt TT -p MAT auto on|off      只改指定项目的技能开关；on 会立即推进就绪步骤
+tf -tt TT -p MAT auto resume      开启推进并清除该项目该技能的取消标记；仍按依赖等待，
+                                  不删除产物、不重算已完成步骤、不清除其他技能标记。
+                                  必须显式指定 -tt/-p；普通 auto on 保留取消标记。
 tf init                          批量初始化：当前目录下所有项目生成 project_setting/
 tf -p MAT init                   只初始化该项目（如 -p C20/qHPC20 → C20/project_setting）
 tf -p MAT -j STEP init           只生成该步骤输入文件（gen），不提交——提交前可先检查
@@ -174,10 +181,11 @@ tf monitor [-i 秒]                监控模式（前台）：每 interval 秒�
 tf monitor -d                    后台监控（推荐）：不占终端，日志/pid 固定在
                                   tf.yaml 所在目录（.tf_watch.log，tail -f 查看）；
                                   tf monitor --stop 任意目录可停止
-tf monitor restart               重做后台监控：先停旧的再起新的（改配置/换 tf 版本后建议用它）
+tf monitor --restart             重启后台监控：先停旧的再起新的（换 tf 版本后使用）
 tf monitor --install / --uninstall crontab 保活：每 10 分钟检查，监控死了自动
                                   拉起（重启/WSL 关闭后自动恢复），不会重复启动
-                                  （watch 是 monitor 的旧名，仍可用）
+                                  （watch 是 monitor 的旧名，仍可用；restart、watch restart、
+                                  monitor restart 均兼容 monitor --restart）
 tf -tt TT migrate-subdir [--dry-run | -y]  迁移材料到 技能子目录 布局（band-dft-cpu 已迁移完，
                                   新技能默认 skill_subdir: true，一般用不到）
 tf -tt TT adopt [--dry-run | -y]  接管"人手工搬进 材料/<技能>/"的目录（先 tf auto off）

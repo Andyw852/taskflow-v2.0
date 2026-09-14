@@ -282,6 +282,29 @@ NBANDS_ROUND = 8          # 估算时向上取整到该整数的倍数
 #   - submit.sh 用 submit_ncl.tpl（vasp_ncl），产出【非共线 WAVECAR】供 step4 热启动
 # 关闭时: submit.sh 用 submit_std.tpl（vasp_std），保留 INCAR_SET 里的 NCORE。
 SOC = "auto"            # "auto" | True | False
+# ★ 允许 step.conf [params] 写 SOC=True/False/auto 覆盖上面的默认值。
+#   不写 SOC 键 = 维持 "auto"（重元素自动开），对其他项目零影响。
+try:
+    _sc = stepconf.parse(Path(stepconf.CONF_NAME).read_text(encoding="utf-8-sig"),
+                         stepconf.CONF_NAME)
+    for _k, _v, _ln in _sc.get("params", []):
+        _ku = _k.upper()
+        if _ku == "SOC" and _v not in (None, ""):
+            _v = str(_v).strip().lower()
+            if _v in ("true", "1", "yes", "on"):
+                SOC = True
+            elif _v in ("false", "0", "no", "off"):
+                SOC = False
+            elif _v == "auto":
+                SOC = "auto"
+        elif _ku == "NBANDS" and _v not in (None, ""):
+            _v = str(_v).strip()
+            if _v.isdigit():
+                STEP3_NBANDS = int(_v)
+        elif _ku == "ISYM" and _v not in (None, ""):
+            STEP3_ISYM = str(_v).strip()
+except Exception:
+    pass
 SOC_ELEMS = {           # Z >= 50
     "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba",
     "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er",

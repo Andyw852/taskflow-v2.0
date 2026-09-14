@@ -41,15 +41,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import relax_common as R
 
-# ---- opt-dft-cpu 专属：固定胞预弛豫 + 变胞弛豫，力判据统一 -0.05 ----
+# ---- opt-dft-cpu 专属：固定胞预弛豫(-0.05) + 变胞弛豫(-0.01) ----
+#   变胞段必须比段 a 紧：EDIFFG<0 只判力，-0.05 会让晶胞带着几个 kbar 就停。
+#   实测 Si：-0.05 末态仍 -1.19 kB，且重开一遍幂等（max|Δ晶格|=0.000000 Å）治不了。
 GEOMOPT_STAGE_SPEC = {
     "a": {"_desc": "固定胞安顿原子（CG），力判据 -0.05",
           "ISIF": "2", "IBRION": "2", "POTIM": "0.2",
           "EDIFFG": "-0.05", "NSW": "80",
           "IOPTCELL": None},                 # 显式去掉面内变胞约束 = 固定胞
-    "b": {"_desc": "放开胞弛豫（CG），力判据 -0.05；从 a 的 CONTCAR 接力",
+    "b": {"_desc": "放开胞弛豫（CG），力判据 -0.01；从 a 的 CONTCAR 接力",
           "ISIF": "3", "IBRION": "2", "POTIM": "0.2",
-          "EDIFFG": "-0.05", "NSW": "120"},
+          "EDIFFG": "-0.01", "NSW": "120"},
 }
 GEOMOPT_STAGE_ORDER = ["a", "b"]
 

@@ -21,6 +21,9 @@ running 之外的"还没跑" -> OUTCAR missing
 
 注意：作业内分段只有一个目录，所以 tf 看不到段间状态；进度信息从
 .sN.done 标记和 OUTCAR.sN 存档里读，判据的 note 会带上"已完成 N/M 段"。
+
+.sN.done 只表示【这一段真的跑完了】。因力判据被提前跳过的段写 .sN.skipped
+（见 relax_common.EARLY_EXIT：变胞段禁止被跳过），不计入已完成，note 里单独报。
 """
 
 import os
@@ -48,11 +51,15 @@ def _conv(d):
 
 
 def _stage_progress(d):
-    """返回 (已完成段数, 计划段数, 有没有段跑了一半没完成)。"""
+    """返回 (已完成段数, 计划段数, 有没有段跑了一半没完成, 被跳过的段数)。
+
+    .sN.done = 该段真跑完；.sN.skipped = 该段因"上一段力已收敛"被跳过（只有
+    不改晶胞的段会这样）。两者都算"占了一个位"，但只有 done 算完成。"""
     planned = len(_glob.glob(os.path.join(d, "INCAR.s*_*")))
     done = len(_glob.glob(os.path.join(d, ".s*.done")))
     started = len(_glob.glob(os.path.join(d, ".s*.started")))
-    return done, planned, started > done
+    skipped = len(_glob.glob(os.path.join(d, ".s*.skipped")))
+    return done, planned, started > done, skipped
 
 
 def ck_relax_injob(d, sc):
@@ -66,22 +73,28 @@ def ck_relax_injob(d, sc):
             return True, "旧分段 %s 已收敛，跳过" % legacy
 
     if _conv(d):
-        done, planned, _ = _stage_progress(d)
+        done, planned, _, skipped = _stage_progress(d)
         if planned:
-            return True, "converged（%d/%d 段）" % (done, planned)
+            note = "converged（%d/%d 段" % (done, planned)
+            if skipped:
+                note += "，跳过 %d 段" % skipped
+            return True, note + "）"
         return True, "converged"
 
     if not os.path.isfile(os.path.join(d, "OUTCAR")):
         return False, "OUTCAR missing"
 
-    done, planned, half = _stage_progress(d)
+    done, planned, half, skipped = _stage_progress(d)
     if planned and done >= planned:
         return False, ("%d 段全部跑完但未收敛 —— 看 OUTCAR.s* / OSZICAR.s* 定位是哪一段"
                        "开始震荡，调完 step.conf 后 tf retry" % planned)
     if half:
         return False, ("第 %d 段中断（有 .started 无 .done）：可能撞墙钟或被看门狗杀掉；"
                        "重投会从 CONTCAR 续跑" % (done + 1))
-    return False, "已完成 %d/%d 段" % (done, planned or 1)
+    note = "已完成 %d/%d 段" % (done, planned or 1)
+    if skipped:
+        note += "（另有 %d 段因力判据被跳过）" % skipped
+    return False, note
 
 
 CHECKERS = {"relax_injob": ck_relax_injob}

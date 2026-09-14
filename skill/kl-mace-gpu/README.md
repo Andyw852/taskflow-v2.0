@@ -50,7 +50,7 @@ tf -tt kl-mace-gpu -p <材料> -j step2_disp_force conf --set params.MIN_SC_LEN=
 tf -tt kl-mace-gpu -p <材料> -j step4_kappa conf --set params.MESH_SCAN="16 16 16; 20 20 20; 24 24 24"
 ```
 
-默认值：`MIN_SC_LEN=20`、`KAPPA_MESH=24 24 24`、`CKPT=50`、`N_RANDOM=200`，
+默认值：`MIN_SC_LEN=12`、`KAPPA_MESH=24 24 24`、`CKPT=50`、`N_RANDOM=200`，
 `[submit]` 里 `partition=gpu`、`gres=gpu:1`。队列名按你们集群改。
 
 多卡不会更快——`mace_forces.py` 没做数据并行，申请多卡只是浪费。

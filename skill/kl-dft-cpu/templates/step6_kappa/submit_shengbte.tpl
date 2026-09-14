@@ -39,18 +39,61 @@ mpirun -n 1 \
 # 汇总：优先 _CONV（迭代解），退回 _RTA
 python - <<'PY'
 import glob, json
+def _read_kt(fname):
+    rows = [l.split() for l in open(fname) if l.strip() and not l.startswith("#")]
+    out = []
+    for r in rows:
+        try:
+            vals = [float(x) for x in r[:10]]
+        except ValueError:
+            continue
+        if abs(vals[1]) < 1e6 and abs(vals[5]) < 1e6 and abs(vals[9]) < 1e6:
+            out.append(vals)
+    return out
+
 cand = ["BTE.KappaTensorVsT_CONV", "BTE.KappaTensorVsT_RTA"]
-f = next((c for c in cand if glob.glob(c)), None)
+best = None
+for c in cand:
+    rows = _read_kt(c) if glob.glob(c) else []
+    if not rows:
+        continue
+    if len(rows) >= 3:  # CONV 发散（1e147 量级）被过滤后可能 <3 行 -> 回退 RTA
+        best = (c, rows)
+        if c.endswith("_CONV"):
+            # CONV 正常温度点数（CONTROL T 扫描计数）不足时：发散点被过滤 =
+            # 曲线不完整，回退 RTA（更稳定、全温度）
+            _tmax = None
+            try:
+                for ln in open("CONTROL"):
+                    s = ln.strip()
+                    if s.startswith("T_max="):
+                        _tmax = float(s.split("=")[1].split(",")[0].strip())
+                    elif s.startswith("T_min="):
+                        pass
+            except Exception:
+                pass
+            _nt_expected = 8
+            if _tmax:
+                try:
+                    for ln in open("CONTROL"):
+                        s = ln.strip()
+                        if s.startswith("T_step="):
+                            _ts = float(s.split("=")[1].split(",")[0].strip())
+                            _nt_expected = int(round((_tmax - 100.0) / _ts)) + 1
+                            break
+                except Exception:
+                    pass
+            if len(rows) < _nt_expected:
+                print("[shengbte] CONV 温度点 %d < 预期 %d（发散被过滤），回退 RTA" % (len(rows), _nt_expected))
+                continue
+        break
+f, rows = best if best else (None, [])
 d = {"KAPPA_DONE": bool(f)}
 if f:
-    rows = [l.split() for l in open(f) if l.strip() and not l.startswith("#")]
-    if rows:
-        d["source"] = f
-        d["temperatures"] = [float(r[0]) for r in rows]
-        # ShengBTE KappaTensorVsT：col0=T，col1..9=kappa 张量 xx xy xz yx yy yz zx zy zz
-        d["kappa_xx_yy_zz"] = [[float(r[1]), float(r[5]), float(r[9])] for r in rows]
-    else:
-        d["KAPPA_DONE"] = False
+    d["source"] = f
+    d["temperatures"] = [r[0] for r in rows]
+    # ShengBTE KappaTensorVsT：col0=T，col1..9=kappa 张量 xx xy xz yx yy yz zx zy zz
+    d["kappa_xx_yy_zz"] = [[r[1], r[5], r[9]] for r in rows]
 json.dump(d, open("kappa_summary.json", "w"), ensure_ascii=False, indent=2)
 print("KAPPA_DONE" if d["KAPPA_DONE"] else "NO_KAPPA")
 PY

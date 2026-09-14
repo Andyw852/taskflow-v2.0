@@ -66,6 +66,7 @@ steps:
      check: marker, marker: "OUTCAR:MACROSCOPIC STATIC DIELECTRIC TENSOR",
      gen: gen_step8_dielect.py,
      gen_need: [stepconf.py, step.conf, ke_common.py, dim_common.py, check_common.py,
+                discriminant_common.py,
                 incar_dfpt_2d.tpl, incar_dfpt_3d.tpl,
                 submit_std_2d.tpl, submit_std_3d.tpl],
      needs: ["step1_opt"]}
@@ -78,7 +79,7 @@ steps:
      needs: ["step1_opt"]}
 
   - {seq: 7, name: step7_deform, label: S7_deform, src: step7_deform,
-     check: outcar, fanout: "*deform*", gen: gen_step9_deform.py,
+     check: deform, fanout: "*deform*", gen: gen_step9_deform.py,
      gen_need: [stepconf.py, step.conf, ke_common.py, dim_common.py, incar_deform_2d.tpl, incar_deform_3d.tpl,
                 submit_std_2d.tpl, submit_std_3d.tpl],
      needs: ["step1_opt"]}
@@ -90,7 +91,7 @@ steps:
 
   - {seq: 8, name: step8_amset, label: S8_kappa, src: step8_amset,
      check: marker, marker: "transport.json:thermal_conductivity",
-     gen: gen_step10_amset.py, gen_need: [stepconf.py, step.conf, submit_amset.tpl, vdw_radii.py], fetch_all: true,
+     gen: gen_step10_amset.py, gen_need: [stepconf.py, step.conf, submit_amset.tpl, vdw_radii.py, discriminant_common.py], fetch_all: true,
      needs: ["step4_wave", "step5_dielect", "step6_elastic", "step7b_deform_read", "step2_bandgap/step2.2_pbe_plot", "step2_bandgap/step2.3_hse_plot"]}
 
 # --- 2 带隙段：子步嵌套进 step2_bandgap/，状态表合并成 S2_bandgap 一列 ---------
@@ -115,6 +116,30 @@ optional_steps:
          gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step2_check_and_resubmit.py,
                     incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl],
      needs: ["step1_opt"]}
+      # --- 体系判别分支（seq 2.15 / 2.155）------------------------------------
+      # 2.15 : 独立**更密**网格的静态 SCF（判据用带指标法 min_k E[nocc]-max_k E[nocc-1]，
+      #        不用 OUTCAR 的 fundamental gap 行 —— 有带重叠时那一行会给正值）。
+      #        INCAR/POSCAR/POTCAR 从 step2.1_static 复制，唯一差别就是 k 网格，
+      #        且强制严格更密（绝不复用 step2.2 的网格）。顺带给出密网格 E_F。
+      # 2.155: 分析步，写 discriminant.json（label@functional + ALGO 建议 + 阻断项）。
+      # ★ 必须在 2.3 杂化**之前**：2.3 的 ALGO 由它选（SEMICONDUCTOR->All，
+      #   SEMIMETAL/METAL->Damped）。但 2.3 是**直接读 2.15 的 OUTCAR 现算**，
+      #   不读 discriminant.json —— 后者含 @杂化 覆盖、要等杂化跑完才有，读它成循环依赖。
+      # ★ 阻断只是**默认拦截**，下游 gen 的 FORCE_TRANSPORT=True 可覆盖；PBE 判
+      #   METAL 是"待定"而非结论（PBE 只会低估带隙，单侧失效）。
+      - {seq: 2.15, name: "step2_bandgap/step2.15_discriminant", label: S2.15_discr,
+         group: S2_bandgap, after: "step2_bandgap/step2.1_static",
+         src: step2_bandgap/step2.15_discriminant, check: outcar,
+         gen: gen_step2.15_discriminant.py,
+         gen_need: [check_common.py, check_discriminant.py, decide_discriminant.py,
+                    discriminant_common.py, stepconf.py, step.conf, dim_common.py],
+     needs: ["step2_bandgap/step2.1_static"]}
+      - {seq: 2.155, name: "step2_bandgap/step2.155_discriminant_decide", label: S2.155_discr,
+         group: S2_bandgap, after: "step2_bandgap/step2.15_discriminant",
+         src: step2_bandgap/step2.15_discriminant, check: plot, run: gen,
+         done_marker: discriminant.json, gen: "decide_discriminant.py",
+         gen_need: [discriminant_common.py], fetch_all: true,
+     needs: ["step2_bandgap/step2.15_discriminant"]}
       - {seq: 2.2, name: "step2_bandgap/step2.2_pbe", label: S2.2_pbe,
          group: S2_bandgap, after: "step2_bandgap/step2.1_static",
          src: step2_bandgap/step2.2_pbe, check: wavecar, gen: gen_step3_WAVECAR.py,
@@ -130,12 +155,14 @@ optional_steps:
      needs: ["step2_bandgap/step2.2_pbe"]}
   # HSE 分支单独一组：默认开=走到 HSE 带隙；BANDGAP=pbe（或 bandgap_hse: false）
   # 则整段跳过，只留 PBE 带隙。2.3 hse 从 2.2_pbe 继承，2.3_hse_plot 画 HSE 能带。
+  # 2.3_hse 默认 --kpath-slice all/4 并行分段（fanout "*p*of*"）：3D 体相切 4 段并行；
+  # 2D 体系在 gen 内自动跳过切片、保持单作业（能带路径点少，切片要多付 n 倍精确交换 SCF）。
   bandgap_hse:
     default: true
     steps:
       - {seq: 2.3, name: "step2_bandgap/step2.3_hse", label: S2.3_hse,
          group: S2_bandgap, after: "step2_bandgap/step2.2_pbe",
-         src: step2_bandgap/step2.3_hse, check: outcar, gen: gen_step4_HSE.py,
+         src: step2_bandgap/step2.3_hse, check: outcar, gen: "gen_step4_HSE.py --kpath-slice all/4", hpc: jzzn, fanout: "*p*of*",
          gen_need: [stepconf.py, step.conf, dim_common.py, check_common.py, step4_check_and_resubmit.py,
                     incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl,
                     submit_ncl_2d.tpl, submit_ncl_3d.tpl],
@@ -168,7 +195,7 @@ optional_steps:
          after: step8,
          src: step8.1_boltztrap, check: plot, run: gen,
          done_marker: boltztrap_crta.json,
-         gen: gen_step11_boltztrap.py, gen_need: [], fetch_all: true,
+         gen: gen_step11_boltztrap.py, gen_need: [discriminant_common.py], fetch_all: true,
          needs: ["step3_uniform", "step6_elastic", "step7b_deform_read",
                  "step8.2_dpt"]}
 

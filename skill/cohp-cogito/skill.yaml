@@ -1,0 +1,73 @@
+# =============================================================================
+# skill/cohp-cogito/skill.yaml —— COHP/ICOHP/ICOBI 成键分析（COGITO）
+#
+# 用途：从上游 step3_PBE_WAVECAR 的 WAVECAR，用 COGITO 做投影式成键分析，
+#       输出 ICOHP（eV/bond）、ICOBI（elec/bond）、Löwdin 轨道占据、COHP 曲线。
+#
+# 为什么是 COGITO 而不是 LOBSTER（详见 NOTES.md）：
+#   实测 LOBSTER 5.1.1 与 VASP 6.x 的 WAVECAR 不兼容——连 Si 金标准测试都
+#   只恢复 0/8 电子、charge spilling 恒为 NaN（9 轮对照实验）。COGITO 是
+#   开源替代（pip install cogito-dft），同一份 Si WAVECAR 得 8.0/8.0、spilling
+#   0.6%、Si–Si ICOHP −7.48 eV/bond。
+#
+# 上游要求（band-dft-cpu 的 step3_PBE_WAVECAR 满足）：
+#   NSW=0 静态 / ISYM=1..3 约化网格 / LWAVE=.TRUE. /
+#   NBANDS=(12-20)*natoms / 无 LSORBIT
+#   —— 在 templates/step3_PBE_WAVECAR/step.conf 写：
+#        [params]
+#        SOC = False
+#        NBANDS = 144
+#        ISYM = 2
+#
+# 执行模型：
+#   S1_COHP    提交 Slurm 作业（COGITO 需 ~23 分钟，超过 tf 本地步的
+#              `timeout 600` 上限，故必须走作业）
+#   S2_summary 本地即时步（run: gen，秒级）：解析 bond_info.txt 出结构化表
+#              + 中文摘要 icohp_report.md
+#
+# 参数（step.conf 三层合并）：
+#   tf -tt cohp-cogito -p <材料> conf --set params.NUM_OUTER=6
+#     NUM_OUTER   轨道优化外循环（默认 4；收敛告警时 +1/+2）
+#     DENSIFY     COHP 曲线加密（默认空；2/3 更平滑）
+# =============================================================================
+schema: 1
+name: cohp-cogito
+desc: COHP/ICOHP/ICOBI 成键分析 (COGITO)
+version: "0.2"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  upstream_skill: band-dft-cpu
+  upstream_terminal_step: step3_PBE_WAVECAR
+  hpc: jzzn          # COGITO 装在 jzzn（pip install cogito-dft 0.3.13）
+  skill_subdir: true
+
+# 提交前检查：本技能不跑 VASP，只看 gen 实际写出的文件
+submit_required: [submit.sh, cogito_input.json]
+
+# 拉回本地
+fetch_files: [bond_info.txt, bond_cohp_plot.html, crystal_bonds.html, analysis.txt, error_output.txt, metadata.json,
+              all_atoms.json, all_bonds.json, all_unique_bonds.json,
+              icohp_table.json, icohp_short_long.json, icohp_report.md,
+              cogito_summary.json, cogito_input.json, COG_output.txt,
+              post.log, analyze.log, cogito_run.log, submit.sh, queue.out, queue.err, cohp_traces.csv, cohp_plot.png]
+
+steps:
+  # S1：提交作业，作业内跑 COGITO -> COGITOanalyze -> COGITOpost
+  #     done_marker 为最终键表；check: plot 即"done_marker 存在即通过"
+  - {seq: 1, name: step1_cohp, label: S1_COHP, check: plot,
+     gen: gen_step1_cohp.py, done_marker: bond_info.txt, fetch_all: true,
+     gen_need: [stepconf.py, step.conf, cogito_common.py, submit_cohp.tpl]}
+
+  # S2：本地汇总（登录节点即时步）
+  - {seq: 2, name: step2_summary, label: S2_summary, after: step1_cohp,
+     needs: [step1_cohp], check: plot, run: gen,
+     gen: gen_step2_summary.py, done_marker: icohp_report.md, fetch_all: true,
+     gen_need: [stepconf.py, step.conf, cogito_common.py]}
+
+requires:
+  python: [numpy, scipy, pymatgen]
+  conda: atomate2_p_a
+  exe: [COGITO, COGITOanalyze, COGITOpost]

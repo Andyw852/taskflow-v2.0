@@ -23,6 +23,30 @@ except Exception:
     _HAS_KC = False
 
 # =========================== 可改参数区 ===========================
+# ---------- 体系判别阻断（step2.15_discriminant）----------
+# False = 默认拦截 SEMIMETAL/METAL@PBE（这套半导体框架不适用）。
+# True  = 强制继续（金属体系也有人要算输运，或 PBE 误判而杂化还没来得及重判）。
+# ★ 不是硬停：读不到 discriminant.json 时一律放行，行为与加这道闸门前完全一致。
+FORCE_TRANSPORT = False
+
+
+def _disc_gate():
+    """体系判别闸门：默认拦截 SEMIMETAL/METAL@PBE，FORCE_TRANSPORT 可覆盖。"""
+    import sys as _s
+    from pathlib import Path as _P
+    try:
+        _s.path.insert(0, str(_P(__file__).resolve().parent))
+        import discriminant_common as _dc
+        if not _dc.gate(_P.cwd(), "step8_amset", force=FORCE_TRANSPORT):
+            _s.exit("[BLOCKED] 体系判别为 SEMIMETAL/METAL@PBE —— step8_amset 已阻断。"
+                    "完整提示见 step2_bandgap/step2.15_discriminant/discriminant.json "
+                    "的 block.hint；强制继续请把本脚本顶部 FORCE_TRANSPORT 设为 True。")
+    except SystemExit:
+        raise
+    except Exception as _e:
+        print("[WARN] 体系判别闸门异常，放行：%s" % _e, file=_s.stderr)
+
+
 OUTDIR_NAME = "step8_amset"
 WAVE_DIR    = "step4_wave"
 READ_DIR    = "step7b_deform_read"
@@ -40,6 +64,11 @@ DOPING      = "-1e21:-1e17:5, 1e17:1e21:5"   # n 型 + p 型各 5 点（对数�
 TEMPERATURES = "100:900:9"            # 100,200,...,900 K，每 100 K 一个点
 SCATTERING  = ["ADP", "IMP", "POP"]   # 形变势声学 + 电离杂质 + 极性光学 "ADP", "IMP", "POP"
 MANUAL_BANDGAP = None                 # None=自动读；或写数值(eV) 覆盖 scissor
+# patch_dielec_assert：介电产物必须通过物理性硬断言，否则直接停步（不静默往下传）。
+#   检查项：eps_inf 存在 / 对角项 >= 1 / 不是单位矩阵（DFPT 初值签名）/
+#   有 IONIC CONTRIBUTION 块（否则 Frohlich 耦合恒为 0、POP 静默丢失）。
+#   已知要强行继续时改 False —— 但结果里必须注明 POP 不生效。
+REQUIRE_PHYSICAL_DIELECTRIC = True
 # patch_require_bandgap：半导体输运没有 scissor 的结果没有意义——
 #   读不到带隙直接停步，不再静默用 PBE 带隙跑完。金属体系才设 False。
 REQUIRE_BANDGAP = True
@@ -81,7 +110,7 @@ _STEP1_METHOD_CANDS = ["step1_opt", "step1_std_opt",
 
 
 def read_dielectric(dielect_dir: Path):
-    """从 DFPT OUTCAR 读 ε∞（电子）与 ε₀（静态）对角平均。"""
+    """从 DFPT OUTCAR 读完整 3x3 ε∞ 与 ε₀ 张量。"""
     oc = dielect_dir / "OUTCAR"
     if not oc.is_file():
         return None, None
@@ -100,21 +129,68 @@ def read_dielectric(dielect_dir: Path):
                 break
         if len(rows) < 3:
             return None
-        return round((rows[0][0] + rows[1][1] + rows[2][2]) / 3.0, 4)
+        return rows
     eps_inf = grab("MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects in DFT)")
     eps_0 = grab("MACROSCOPIC STATIC DIELECTRIC TENSOR IONIC CONTRIBUTION")
+
+    # ================= patch_dielec_assert：硬断言，不许静默错 =================
+    # 这条链上已经出现两次"静默错"伤人的案例：
+    #   1) OUTCAR 的 fundamental gap 行在带重叠时给正值 -> 半金属被报成有隙；
+    #   2) 下面的 eps_static = eps_inf 兜底 -> Frohlich 耦合 (1/eps_inf - 1/eps_static)
+    #      **恒等于 0** -> POP 散射被整个丢掉，只在日志里留一行 WARN。
+    #      实测签名：max|mobility/POP| = 2.3e48（分母趋零），而 sigma 被系统性高估。
+    # 所以这里**抛错而不往下传**。确属已知情形要强行继续，显式改本开关。
+    def _diele_fail(msg):
+        if REQUIRE_PHYSICAL_DIELECTRIC:
+            raise ValueError(
+                "[step5_dielect 产物不可用] %s\n"
+                "  覆盖方式：本脚本顶部 REQUIRE_PHYSICAL_DIELECTRIC = False\n"
+                "  最常见根因：step5_dielect 的 DFPT 崩过/没跑完。先查那里的 OUTCAR 有没有\n"
+                "  完整写出 'MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field\n"
+                "  effects in DFT)' 与 '... IONIC CONTRIBUTION' 两块，以及 queue.err 里\n"
+                "  有没有 signal 11。DFPT 的 INCAR 走 skill 模板（KPAR=1/NCORE=1/LPEAD=.FALSE.）。"
+                % msg)
+        print("[WARN][已按开关放行] %s" % msg)
+
+    if eps_inf is None:
+        _diele_fail("没读到 eps_inf（%s/OUTCAR 里没有 "
+                    "'MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects "
+                    "in DFT)' 块）—— DFPT 没跑完或崩了。" % dielect_dir)
+        return None, None
+    # 电子静态响应必须 >= 1；< 1 在正常绝缘体里不可能出现
+    _diag_inf = [eps_inf[i][i] for i in range(3)]
+    if min(_diag_inf) < 1.0:
+        _diele_fail("eps_inf 对角项 %.4f %.4f %.4f 中有 < 1 的分量 —— "
+                    "电子静态介电不可能小于 1，这是垃圾值。" % tuple(_diag_inf))
+    # 单位矩阵 = DFPT 的**迭代初值**签名（零响应）。跑挂的作业会把初值留在 OUTCAR 里。
+    if max(abs(eps_inf[i][j] - (1.0 if i == j else 0.0))
+           for i in range(3) for j in range(3)) < 1e-6:
+        _diele_fail("eps_inf 恰为单位矩阵 —— 这是 DFPT 迭代初值的签名（零响应），"
+                    "不是结果。DFPT 在写出 MACROSCOPIC 块之前就结束了。")
+
     # ε₀ = 电子 + 离子
-    if eps_inf is not None and eps_0 is not None:
-        eps_static = round(eps_inf + eps_0, 4)
-        # patch_dielec_guard：ε_ionic<0 / ε_static<=0 非物理（多为 Γ 近零声学模
-        # 污染 DFPT 离子介电）——弃离子项、退回 ε∞ 兜底并告警
-        if eps_0 < 0 or eps_static <= 0:
-            print("[WARN] eps_ionic=%.2f eps_static=%.2f 非物理，"
-                  "多因 Gamma 近零声学模污染；弃离子项改用 eps_inf=%.2f 兜底"
-                  % (eps_0, eps_static, eps_inf))
-            eps_static = eps_inf
-    else:
-        eps_static = eps_inf
+    if eps_0 is None:
+        _diele_fail(
+            "有 eps_inf 但**没有** IONIC CONTRIBUTION 块（离子介电没算出来）。"
+            "若按旧逻辑兜底成 eps_static = eps_inf，则 Frohlich 耦合 "
+            "(1/eps_inf - 1/eps_static) 恒为 0，**POP 散射会被静默丢弃**，"
+            "sigma 与 mobility 被系统性高估。必须先把离子贡献算出来。")
+        # 显式放行时仍退回 eps_inf，但把"POP 已失效"写进返回值之外可查的地方
+        print("[WARN] POP 散射本次不生效（eps_static == eps_inf），"
+              "结果里应注明该项缺失。")
+        return eps_inf, eps_inf
+    eps_static = [[eps_inf[i][j] + eps_0[i][j] for j in range(3)] for i in range(3)]
+    # patch_dielec_guard：ε_ionic<0 / ε_static<=0 非物理（多为 Γ 近零声学模
+    # 污染 DFPT 离子介电）——弃离子项、退回 ε∞ 兜底并告警
+    if any(eps_0[i][i] < 0 for i in range(3)):
+        raise ValueError(
+            "离子介电对角项为负（eps_ionic=%.2f:%.2f:%.2f，eps_static=%.2f），非物理，"
+            "多因 Gamma 近零声学模污染 DFPT 离子介电；必须检查 DFPT 收敛与声子稳定性。"
+            % (eps_0[0][0], eps_0[1][1], eps_0[2][2], eps_static[0][0]))
+    _coup = [1.0 / eps_inf[i][i] - 1.0 / eps_static[i][i] for i in range(3)]
+    if max(abs(c) for c in _coup) < 1e-9:
+        _diele_fail("eps_static 与 eps_inf 对角项相同，Frohlich 耦合 %.3e 恒为 0 -> "
+                    "POP 散射不生效。" % max(abs(c) for c in _coup))
     return eps_inf, eps_static
 
 
@@ -512,20 +588,26 @@ def expand_spec(spec, log):
 
 # === patch_amset_pop：DFPT OUTCAR 的 Γ 声子频率 -> pop_frequency（THz）===
 def read_pop_frequency(dielect_dir):
-    """取 IBRION=8 OUTCAR 里最高光学声子频率(THz)近似 pop_frequency；虚频(f/i=)
-    与读不到时返回 None（此时上层自动跳过 POP）。这是"最高光学支"近似，够跑通、
-    可横向比较；要发表精度请用 amset phonon-frequency 做介电加权有效频率。"""
-    oc = Path(dielect_dir) / "OUTCAR"
-    if not oc.is_file():
-        return None
-    freqs = []
-    for m in re.finditer(r"^\s*\d+\s+f\s*=\s*([0-9.]+)\s*THz",
-                         oc.read_text(errors="ignore"), re.M):
+    """用 AMSET 官方 phonon-frequency 命令计算有效 POP 频率。"""
+    import subprocess
+    commands = [["amset", "phonon-frequency", "-o", "OUTCAR", "-v", "vasprun.xml"]]
+    # 远端 gen 由 taskflow 的 Python 直接执行，非交互 shell 未必加载 conda；
+    # 使用配置约定的 amset_clean 作为无 shell 的兜底，避免误报“缺少 POP”。
+    commands.append(["/opt/miniconda3/bin/conda", "run", "--no-capture-output", "-n", "amset_clean",
+                     "amset", "phonon-frequency", "-o", "OUTCAR", "-v", "vasprun.xml"])
+    commands.append(["conda", "run", "--no-capture-output", "-n", "amset_clean",
+                     "amset", "phonon-frequency", "-o", "OUTCAR", "-v", "vasprun.xml"])
+    for command in commands:
         try:
-            freqs.append(float(m.group(1)))
-        except ValueError:
-            pass
-    return round(max(freqs), 4) if freqs else None
+            p = subprocess.run(command, cwd=str(dielect_dir), capture_output=True,
+                               text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        text = (p.stdout or "") + "\n" + (p.stderr or "")
+        vals = re.findall(r"pop_frequency\s*[:=]\s*([0-9.]+)\s*THz", text, re.I)
+        if p.returncode == 0 and vals:
+            return round(float(vals[-1]), 4)
+    return None
 
 
 def _is_nonpolar():
@@ -540,14 +622,12 @@ def _is_nonpolar():
 
 
 def _amset_scatterers():
-    """SCATTERING 含 POP 但非极性 / 拿不到 pop_frequency 时自动去掉 POP。"""
+    """校验 POP 所需输入；非极性体系按物理口径移除 POP。"""
     if "POP" in SCATTERING and _is_nonpolar():
         print("[WARN] 单元素非极性体系无极性光学声子——跳过 POP 散射")
         return [s for s in SCATTERING if s != "POP"]
     if "POP" in SCATTERING and read_pop_frequency(Path.cwd() / DIELECT_DIR) is None:
-        print("[WARN] 未解析到 pop_frequency（DFPT OUTCAR 无声子频率？）——"
-              "本次跳过 POP 极性光学散射；纯共价体系影响很小，极性体系请补声子数据")
-        return [s for s in SCATTERING if s != "POP"]
+        raise ValueError("AMSET 有效 POP 频率缺失；检查环境和 DFPT 文件，禁止静默删除 POP")
     return list(SCATTERING)
 
 
@@ -583,26 +663,29 @@ def _dielectric_2d_inplane(dielect_dir, out_dir, eps_inf_fb, eps_static_fb):
         txt = (Path(dielect_dir) / "OUTCAR").read_text(errors="ignore")
     except OSError:
         return eps_inf_fb, eps_static_fb
-    inf = _grab_diag3(txt, "MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects in DFT)")
-    ion = _grab_diag3(txt, "MACROSCOPIC STATIC DIELECTRIC TENSOR IONIC CONTRIBUTION")
+    inf = _grab_matrix3(txt, "MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects in DFT)")
+    ion = _grab_matrix3(txt, "MACROSCOPIC STATIC DIELECTRIC TENSOR IONIC CONTRIBUTION")
     if inf is None:
         return eps_inf_fb, eps_static_fb
-    inf_ip = (inf[0] + inf[1]) / 2.0                 # 面内 ε∞
-    if ion is not None and not _is_nonpolar():
-        stat_ip = ((inf[0] + ion[0]) + (inf[1] + ion[1])) / 2.0
-        ion_ip = (ion[0] + ion[1]) / 2.0
-        if ion_ip < 0 or stat_ip <= 0:               # 近零声学模污染 → 弃离子项
-            stat_ip = inf_ip
-    else:                                            # 非极性/无离子项：static=ε∞
-        stat_ip = inf_ip
-    corr_inf = round(1 + factor * (inf_ip - 1), 4)
-    corr_stat = round(1 + factor * (stat_ip - 1), 4)
-    print("[OK] 2D 面内介电扣真空(×L/t=%.3f)：eps_inf %.3f->%.3f  eps_static %.3f->%.3f"
-          % (factor, inf_ip, corr_inf, stat_ip, corr_stat))
-    return corr_inf, corr_stat
+    stat = [[inf[i][j] + ion[i][j] for j in range(3)] for i in range(3)] if ion else inf
+    corr = lambda mat: [[((1 if i == j else 0) + factor * (mat[i][j] - (1 if i == j else 0)))
+                         for j in range(3)] for i in range(3)]
+    return corr(inf), corr(stat)
 
 
-
+def _grab_matrix3(txt, tag):
+    """取 tag 后完整 3x3 张量。"""
+    i = txt.rfind(tag)
+    if i < 0:
+        return None
+    rows = []
+    for ln in txt[i:].splitlines()[1:]:
+        nums = re.findall(r"-?\d+(?:\.\d+)?", ln)
+        if len(nums) >= 3:
+            rows.append([float(x) for x in nums[:3]])
+        if len(rows) == 3:
+            return rows
+    return None
 def write_settings(out: Path, eps_inf, eps_static, gap, elastic,
                    is_2d=False, c_len=None):
     lines = ["# amset settings.yaml（gen_step10 自动生成，可手改后重跑本步）"]
@@ -693,6 +776,7 @@ def _guard_not_0d(cwd, step_name, why):
 
 
 def main():
+    _disc_gate()
     cwd = Path.cwd()
     global LAYER_THICKNESS
     if (cwd / "step.conf").is_file():

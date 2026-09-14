@@ -512,6 +512,36 @@ except ImportError as _e:
 out["skill_rev"] = sys.argv[2] if len(sys.argv) > 2 else "UNKNOWN"
 out["read_paths"] = {k: dict(v) for k, v in _resolved_paths.items()}
 
+# [体系判别] 带重叠时"带边"只是形式上的极值点 —— 标注出来，避免被当物理带边用。
+# 判据来自 step2_bandgap/step2.15_discriminant/discriminant.json（带指标法）。
+try:
+    from pathlib import Path as _DP
+    import json as _DJ
+    _dp = _DP(outdir).parents[1] / "step2_bandgap" / "step2.15_discriminant" / "discriminant.json"
+    if _dp.is_file():
+        _dd = _DJ.loads(_dp.read_text())
+        _lab = _dd.get("label", "")
+        _eff = _dd.get("effective") or {}
+        _gap = _eff.get("gap_eV")
+        out["discriminant"] = {
+            "label": _lab,
+            "functional": _eff.get("functional"),
+            "gap_eV": _gap,
+            "decisive": (_dd.get("block") or {}).get("decisive"),
+            "source": str(_dp),
+        }
+        if _lab.startswith("SEMIMETAL") or _lab.startswith("METAL"):
+            out["validity"] = ("INVALID: band overlap, edge is formal (%s, gap=%s eV). "
+                               "带重叠时 VBM/CBM 不是真正的带边，E1/D 只是形式上的极值点，"
+                               "不应作为物理带边引用。" % (_lab, _gap))
+            print("[WARN] 体系判别 %s -> band_edges.json validity 标为 INVALID" % _lab)
+        else:
+            out["validity"] = "OK"
+    else:
+        out["validity"] = "UNKNOWN: no discriminant.json"
+except Exception as _de:
+    print("[WARN] 读体系判别失败，validity 未写：%s" % _de)
+
 with open(outdir + "/band_edges.json", "w") as fh:
     json.dump(out, fh, indent=2, ensure_ascii=False)
 print("[OK] band_edges.json 已生成（amset 权威带边 E1 + 真空对齐 E1_vac）")

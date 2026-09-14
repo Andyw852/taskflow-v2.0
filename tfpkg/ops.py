@@ -98,7 +98,7 @@ def _hung_scan(cfg, host="__default__"):
     - err_node/err_disk: queue.err 是否有 NODE FAILURE / No space
     - algo/amix/nelm: INCAR 当前状态（供 SCF 升级决策）'''
     code = r'''
-import subprocess, os, time, json, getpass, re
+import subprocess, os, time, json, getpass, re, glob
 u = getpass.getuser()
 now = time.time()
 out = []
@@ -113,32 +113,61 @@ try:
         if not wd:
             continue
         rec = {"jobid": jid, "wd": wd, "running": True, "age": None,
-               "bytes": 0, "lines": 0, "last3": [], "err_node": False,
+               "bytes": 0, "lines": 0, "qbytes": 0, "last3": [], "err_node": False,
                "err_disk": False, "algo": "", "amix": False, "nelm": 0}
-        for f in ("OUTCAR", "OSZICAR"):
-            path = os.path.join(wd, f)
-            if not os.path.isfile(path):
-                continue
-            st = os.stat(path)
-            a = now - st.st_mtime
-            if rec["age"] is None or a < rec["age"]:
-                rec["age"] = round(a, 1)
-            if f == "OUTCAR":
-                rec["bytes"] = st.st_size
-            else:
-                try:
-                    rec["lines"] = sum(1 for _ in open(path, errors="ignore"))
-                except Exception:
-                    rec["lines"] = 0
-                try:
-                    lines = open(path, errors="ignore").read().strip().splitlines()
-                    rec["last3"] = lines[-3:]
-                except Exception:
-                    pass
+        # 指纹要覆盖 wd 及其一层子目录。两个理由：
+        #   1. queue.out 也计入：HSE 等"迭代写 stdout"的计算，OUTCAR 会长时间缓冲
+        #      不落盘，只看 OUTCAR/OSZICAR 会把正常推进的作业误判成挂死；
+        #   2. 子目录也计入：两段式步骤（如 deform 的 ionrelax/）主目录不再更新，
+        #      真正的输出写在子目录里——只盯主目录会把正在跑的作业误判成挂死。
+        _dirs = [wd]
         try:
-            q = open(os.path.join(wd, "queue.err"), errors="ignore").read()[-3000:].upper()
+            _dirs += [d for d in glob.glob(os.path.join(wd, "*"))
+                      if os.path.isdir(d)]
+        except Exception:
+            pass
+        _newest_scf = None
+        for _d in _dirs:
+            for f in ("OUTCAR", "OSZICAR", "queue.out"):
+                path = os.path.join(_d, f)
+                if not os.path.isfile(path):
+                    continue
+                st = os.stat(path)
+                a = now - st.st_mtime
+                if rec["age"] is None or a < rec["age"]:
+                    rec["age"] = round(a, 1)
+                if f == "OUTCAR":
+                    rec["bytes"] += st.st_size
+                elif f == "queue.out":
+                    rec["qbytes"] += st.st_size
+                else:
+                    try:
+                        _nl = sum(1 for _ in open(path, errors="ignore"))
+                        rec["lines"] += _nl
+                        if _nl:
+                            _ls = open(path, errors="ignore").read().strip().splitlines()
+                            if _ls and (_newest_scf is None or a < _newest_scf[0]):
+                                _newest_scf = (a, _ls[-3:])
+                    except Exception:
+                        pass
+        if _newest_scf:
+            rec["last3"] = _newest_scf[1]
+        try:
+            # queue.err 的读取：**先 glob、后 legacy**。
+            # 顺序不能反 —— 迁移过/改名过的目录里老 queue.err 还在，
+            # 若先查它就会永远赢过新生成的 queue-%j.err，状态机永久读陈旧文件，
+            # 正是改名要避免的那件事换了个形态。
+            # 为什么会有 queue-%j.err：SLURM 默认 truncate，同一目录重跑会把上一次
+            # 失败作业的 stderr 覆盖掉（我们真丢过一次 OOM 现场）。改成 per-job 文件
+            # 后每轮互不污染；代价就是这里要能认出它们。
+            _cands = sorted(glob.glob(os.path.join(wd, "queue-*.err")),
+                            key=os.path.getmtime)
+            _qp = _cands[-1] if _cands else os.path.join(wd, "queue.err")
+            q = (open(_qp, errors="ignore").read()[-3000:].upper()
+                 if os.path.exists(_qp) else "")
             rec["err_node"] = "NODE FAILURE" in q
             rec["err_disk"] = ("NO SPACE" in q) or ("DISK QUOTA" in q)
+            rec["err_src"] = os.path.basename(_qp) if q else ""
         except Exception:
             pass
         try:
@@ -166,7 +195,7 @@ try:
         if any(x["wd"] == wd for x in out):
             continue
         out.append({"jobid": p[0].strip(), "wd": wd, "running": False,
-                    "age": 0, "bytes": 0, "lines": 0, "last3": [],
+                    "age": 0, "bytes": 0, "lines": 0, "qbytes": 0, "last3": [],
                     "err_node": True, "err_disk": False,
                     "algo": "", "amix": False, "nelm": 0})
 except Exception:
@@ -275,11 +304,13 @@ def _hung_scancel_wait(cfg, jobid, timeout=90):
 # ===== _hung_resume (原 L4596-L4612) =====
 def _hung_resume(cfg, wdir):
     from tfpkg import run_remote
+    from tfpkg.workflow import _sbatch_guarded
     '''从 CONTCAR 续跑（数据安全版）：
     先校验 CONTCAR 完整（>=8 行、原子数行与 POSCAR 一致），通过才 cp CONTCAR POSCAR，
     否则保留原 POSCAR 直接重跑并告警（IO 异常时 CONTCAR 可能是截断的，不能覆盖好 POSCAR）；
-    备份旧输出为 *.hung，清理二进制残留，重新 sbatch。返回 (rc, msg)。'''
-    lines = (
+    备份旧输出为 *.hung，清理二进制残留，重新 sbatch（走目录锁 + 实时队列去重守卫，
+    避免与 tf start/auto_advance 并发时重复提交）。返回 (rc, msg)。'''
+    prep = (
         "cd %s && mv -f OUTCAR OUTCAR.hung 2>/dev/null; "
         "mv -f OSZICAR OSZICAR.hung 2>/dev/null; "
         "rm -f vaspout.* XDATCAR WAVECAR 2>/dev/null; "
@@ -288,9 +319,15 @@ def _hung_resume(cfg, wdir):
         "  cp CONTCAR POSCAR; "
         "else "
         "  echo 'WARN: CONTCAR 缺失/不完整，保留原 POSCAR 直接重跑'; "
-        "fi; "
-        "sbatch submit.sh 2>&1" % shlex.quote(wdir))
-    return run_remote(cfg, lines)
+        "fi" % shlex.quote(wdir))
+    rc, out = run_remote(cfg, prep)
+    if rc != 0:
+        return rc, out
+    ok, out2, _jids = _sbatch_guarded(cfg, wdir, host="__default__",
+                                      jobname=None, submit="submit.sh")
+    msg = "\n".join(ln for ln in (out2 or "").splitlines()
+                    if not ln.startswith("__TF_RESULT__"))
+    return (0 if ok else 1), msg
 
 # ===== auto_recover_hung (原 L4615-L4773) =====
 def auto_recover_hung(cfg, data):
@@ -328,15 +365,49 @@ def auto_recover_hung(cfg, data):
     min_rounds = int(_hung_cfg(cfg, None, None, "hang_min_stale_rounds", 2))
     grace = int(_hung_cfg(cfg, None, None, "hang_grace_rounds", 3))
     dry = bool(_hung_cfg(cfg, None, None, "hang_dry_run", False))
-    rc, out = _hung_scan(cfg)
-    if rc != 0:
-        print("hang-check：远端扫描失败：%s" % (out or "")[:200])
-        return
-    try:
-        jobs = json.loads(out or "[]")
-    except ValueError:
-        print("hang-check：远端扫描输出解析失败：%s" % (out or "")[:200])
-        return
+    # hang_exclude_hosts：这些集群上的挂死作业只告警、不自动 scancel/重交
+    # （需人工确认后再处理；用于避免对跨集群共享集群上的作业擅自取消）。
+    _excl = _hung_cfg(cfg, None, None, "hang_exclude_hosts", None) or []
+    if isinstance(_excl, str):
+        _excl = [x.strip() for x in _excl.replace(",", " ").split() if x.strip()]
+    _excl = {str(x) for x in _excl}
+    # hang_stale_secs_by_host：按集群覆盖判死阈值。有的集群单轮迭代极长
+    # （如 jzzn 的 bulk HSE，DMP 单轮约 3.2h），用全局 90min 会把正常推进
+    # 的作业反复误判成挂死。写成 {集群: 秒数}，未列出的集群用全局值。
+    _stale_by_host = _hung_cfg(cfg, None, None, "hang_stale_secs_by_host", None) or {}
+    if not isinstance(_stale_by_host, dict):
+        _stale_by_host = {}
+    # v1.12：遍历本项目涉及的所有集群，而不是只扫默认集群。
+    # 多集群项目（如 hanhai25 的 deform/elastic + jzzn 的 HSE）原先只扫默认集群，
+    # 其余集群的作业完全不在检测范围；这里按材料 host 逐个扫描后合并结果。
+    hosts = []
+    for t in (data or {}).get("types", []) or []:
+        for m in t.get("materials", []) or []:
+            # 步骤级 hpc（如 ke 的 S2.3_hse 指向 jzzn）只体现在每个步骤的 _host 上，
+            # 材料级 host_eff 只是"默认集群"；两者都要收，否则步骤级集群的作业漏检。
+            for s in m.get("steps", []) or []:
+                h = s.get("_host")
+                if h and h not in hosts:
+                    hosts.append(h)
+            h2 = m.get("host_eff") or m.get("hpc_name")
+            if h2 and h2 not in hosts:
+                hosts.append(h2)
+    if not hosts:
+        hosts = ["__default__"]
+    jobs = []
+    for _host in hosts:
+        rc, out = _hung_scan(cfg, host=_host)
+        if rc != 0:
+            print("hang-check：远端扫描失败（host=%s）：%s"
+                  % (_host, (out or "")[:200]))
+            continue
+        try:
+            for _rec in json.loads(out or "[]"):
+                _rec["_host"] = _host      # 记录来源集群，供 hang_exclude_hosts 过滤
+                jobs.append(_rec)
+        except ValueError:
+            print("hang-check：远端扫描输出解析失败（host=%s）：%s"
+                  % (_host, (out or "")[:200]))
     state = _hung_state_load(cfg)
     _now = time.strftime("%H:%M:%S")
     for rec in jobs:
@@ -382,14 +453,18 @@ def auto_recover_hung(cfg, data):
         age = rec.get("age")
         if age is None:
             continue
-        fp = (rec.get("bytes") or 0, rec.get("lines") or 0)
+        # 该作业所在集群的判死阈值（按集群覆盖，缺省用全局值）
+        _stale = int(_stale_by_host.get(str(rec.get("_host") or ""), stale_secs))
+        # 指纹三元组：OUTCAR 字节 / OSZICAR 行 / queue.out 字节。
+        # 任一在涨就是活着（旧格式无 qbytes 视为 0，首轮自然重置一次）。
+        fp = (rec.get("bytes") or 0, rec.get("lines") or 0, rec.get("qbytes") or 0)
         if (st.get("bytes") == fp[0] and st.get("lines") == fp[1]
-                and st.get("bytes") is not None):
+                and st.get("qbytes") == fp[2] and st.get("bytes") is not None):
             st["unchanged"] = st.get("unchanged", 0) + 1
         else:
             st["unchanged"] = 0
-        st["bytes"], st["lines"] = fp[0], fp[1]
-        if age < stale_secs or st.get("unchanged", 0) < min_rounds:
+        st["bytes"], st["lines"], st["qbytes"] = fp[0], fp[1], fp[2]
+        if age < _stale or st.get("unchanged", 0) < min_rounds:
             continue
         # 长单步 SCF 还在降 rms = 慢但活着，放它继续算
         if _hung_scf_rms_trend(rec.get("last3")):
@@ -419,16 +494,25 @@ def auto_recover_hung(cfg, data):
                     incar_fix = 2
                 else:
                     incar_fix = 0
+        _excluded = str(rec.get("_host") or "") in _excl
         if dry:
             print("[%s] hang[干跑]：job %s（%s）指纹 %d 轮不变/无输出 %.0fs，"
                   "原因=%s，将执行 %s。"
                   % (_now, rec.get("jobid"), wd, st.get("unchanged", 0), age, cause,
-                     ("INCAR升级+重跑" if incar_fix else
-                      ("只告警不重跑" if cause == "disk" else "重跑"))))
+                     ("仅告警（集群 %s 在 hang_exclude_hosts，需人工确认）"
+                      % rec.get("_host") if _excluded else
+                      ("INCAR升级+重跑" if incar_fix else
+                       ("只告警不重跑" if cause == "disk" else "重跑")))))
             continue
         if cause == "disk":
             print("[%s] hang：job %s（%s）磁盘满告警（No space），不重跑，请清理磁盘。"
                   % (_now, rec.get("jobid"), wd))
+            continue
+        if _excluded:
+            print("[%s] hang：job %s（%s）无输出 %.0fs，原因=%s；"
+                  "但集群 %s 在 hang_exclude_hosts：只告警、不取消不重交，"
+                  "请人工确认后再处理。"
+                  % (_now, rec.get("jobid"), wd, age, cause, rec.get("_host")))
             continue
         ok, msg = _hung_scancel_wait(cfg, rec.get("jobid"))
         if not ok:
@@ -639,7 +723,7 @@ def _scan_root_dirs(root):
 
 # ===== resolve_mat_dir (原 L5441-L5487) =====
 def resolve_mat_dir(cfg, types, tt, want, cwd=None):
-    from tfpkg import _RESOLVE_DISC_CACHE, discover_local, get_types
+    from tfpkg import _RESOLVE_DISC_CACHE, _name_matches, discover_local, get_types
     """按名字定位材料的本地目录，找不到返回 None。
     先走正常发现（local_root -> discover_local）；再扫盘兜底——clean 删光
     project_setting 后 local_root 也跟着没了，只能靠扫盘自举回来。
@@ -665,7 +749,8 @@ def resolve_mat_dir(cfg, types, tt, want, cwd=None):
                     continue
                 _RESOLVE_DISC_CACHE[_key] = mats
             for m in mats:
-                if m["name"] == want or os.path.basename(m["name"]) == want:
+                # v3.21：也接受 <项目名>/<完整名>（跨项目重名材料的限定形式）
+                if _name_matches(m, want, t0):
                     return m["lpath"]
     roots = [cwd or os.getcwd()]
     for r in (cfg.get("project_roots") or []):
@@ -1147,7 +1232,7 @@ def _write_hpc_yaml(path, d, note):
 
 # ===== cmd_hpc (原 L5926-L6013) =====
 def cmd_hpc(cfg, types, projs, cluster, tt, yes):
-    from tfpkg import _load_yaml_file, discover_local, find_asset, pkg_setting_path, resolve_material_local
+    from tfpkg import _load_yaml_file, _name_matches, discover_local, find_asset, pkg_setting_path, resolve_material_local
     """v1.7：把 -p 指定的项目（一个或多个）分配到指定超算；未指定的项目一律不动。
       tf -p X,Y hpc <集群名>             材料级：改写 project_setting/hpc.yaml
                                          （该材料全部技能生效）
@@ -1184,7 +1269,7 @@ def cmd_hpc(cfg, types, projs, cluster, tt, yes):
             if key in seen:
                 continue
             resolve_material_local(t, root, m)
-            if m["name"] in projs or os.path.basename(m["name"]) in projs:
+            if any(_name_matches(m, p, t) for p in projs):
                 seen.add(key)
                 todo.append((t, root, m))
     if not todo:
@@ -1355,10 +1440,13 @@ def cmd_auto_project(cfg, types, proj, tt, arg):
                       ("开" if cur is True else "关")))   # autonow：缺这行 = 关
         return 0
     a = str(arg).strip().lower()
-    if a not in ("on", "off", "1", "0", "true", "false", "开", "关"):
+    if a == "resume" and not tt:
+        print("错误：auto resume 必须用 -tt 指定技能和 -p 指定项目。")
+        return 1
+    if a not in ("on", "off", "1", "0", "true", "false", "开", "关", "resume"):
         print("错误：auto 只接受 on/off（收到 %r）。" % arg)
         return 1
-    on = a in ("on", "1", "true", "开")
+    on = a in ("on", "1", "true", "开", "resume")
     fails = 0
     for w in wants:
         for k in keys:
@@ -1370,6 +1458,15 @@ def cmd_auto_project(cfg, types, proj, tt, arg):
                 fails += 1
                 continue
             _set_yaml_bool(f, "auto_advance", on)
+            if a == "resume":
+                from tfpkg.workflow import _scancel_load, _scancel_save
+                material = {"lpath": lp, "tt": k}
+                marks = _scancel_load(material)
+                remaining = {key: value for key, value in marks.items()
+                             if not key.startswith(k + "/")}
+                _scancel_save(material, remaining)
+                print("  %s[%s]：恢复 %d 个已取消步骤，仍按依赖等待"
+                      % (w, k, len(marks) - len(remaining)))
             print("  %s[%s]：auto_advance = %s" % (w, k, "true" if on else "false"))
     if not cfg.get("auto_advance"):
         print("注意：全局 auto_advance 还是关的，本开关要配合 tf auto on 才生效。")
@@ -1597,7 +1694,7 @@ def cmd_adopt(cfg, types, proj, yes, dry, tt):
 
 # ===== cmd_migrate_subdir (原 L6391-L6483) =====
 def cmd_migrate_subdir(cfg, data, proj, yes, dry):
-    from tfpkg import _mat_all_done, log_action, run_remote
+    from tfpkg import _mat_all_done, _name_matches, log_action, run_remote
     """v1.2：把该技能已完成材料的数据迁进技能子目录（跟着项目走的目录结构）。
     远端 work/材料/step* → work/材料/<技能>/step*；本地 result、log → 材料/<技能>/；
     项目配置该技能段加 skill_subdir: true（状态随即按新路径采集，保持 done）。
@@ -1605,8 +1702,7 @@ def cmd_migrate_subdir(cfg, data, proj, yes, dry):
     t = data["types"][0]
     key, sub = t["key"], str(t.get("dir_name") or t["key"])
     mats = [m for m in t["materials"]
-            if not proj or m["name"] == proj
-            or os.path.basename(m["name"]) == proj]
+            if not proj or _name_matches(m, proj)]
     if proj and not mats:
         print("错误：%s 下没有材料 %s。" % (key, proj))
         return 1
@@ -1942,4 +2038,3 @@ def cmd_watch(cfg, types, projs, exclude, interval, tt=None, root=None,
             _time.sleep(interval)
     except KeyboardInterrupt:
         print("\n已退出监控。")
-

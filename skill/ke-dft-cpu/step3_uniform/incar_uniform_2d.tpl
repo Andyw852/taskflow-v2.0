@@ -16,7 +16,7 @@ LREAL  = .FALSE.
 LASPH  = .TRUE.
 
 ALGO   = Normal
-EDIFF  = 1E-8            # AMSET 要求高精度波函数
+EDIFF  = 1E-7            # AMSET 要求高精度波函数
 NELM   = 200
 NELMIN = 6
 AMIN   = 0.01          # 2D 长真空层电子步稳定

@@ -24,6 +24,10 @@ SPEC = {
     "DTYPE": ("float64", "str"),
     "CONDA_SH": (kc.DEFAULT_CONDA_SH, "str"),
     "CONDA_ENV": (kc.DEFAULT_CONDA_ENV, "str"),
+    "FC_CUTOFF": (6.0, "float"),
+    # 声子最高频率下限(THz)：低于它判为 fc2 拟合可疑（summary 里 fit_suspect=true，
+    # stable 判定作废，数据照常保留）。留空 = 关闭该检查（默认，兼容旧行为）。
+    "MAX_FREQ_MIN_THZ": (20.0, "float"),
 }
 
 
@@ -56,6 +60,13 @@ def main():
                      "CONDA_ENV": conf["CONDA_ENV"] or kc.DEFAULT_CONDA_ENV,
                      "MACE_CMD": "python phonon_fit_driver.py",
                      "LOG": "phonon.log"})
+    inherited = kc.read_kl_params(src / kc.KL_PARAMS)
+    inherited["FC_CUTOFF"] = conf["FC_CUTOFF"]
+    if conf["MAX_FREQ_MIN_THZ"]:
+        inherited["MAX_FREQ_MIN_THZ"] = conf["MAX_FREQ_MIN_THZ"]
+    else:
+        inherited.pop("MAX_FREQ_MIN_THZ", None)
+    kc.write_kl_params(out / kc.KL_PARAMS, **inherited)
     stepconf.apply_submit(out / "submit.sh", conf.submit)
     print("[DONE] %s：submit.sh 就绪（作业跑完写 phonon_summary.json + band-dft-cpu.yaml）"
           % OUTDIR)

@@ -180,10 +180,10 @@ DEFAULTS: Dict[str, Any] = {
 
     # ── ENCUT（工作流注入；其余电子结构精度全部见 INCAR 模板）──────────────
     #   ENCUT = max(ENMAX) × encut_scale，relax/static/dft 全程一致。
-    #   1.3× 同时抑制 ISIF=3 的 Pulay/基组不完备，故单次弛豫即可（无需变胞重启）。
+    #   1.5× 统一满足 POTCAR 精度下限，避免不同步骤基组不一致。
     #   是否做结构优化由顶部 relax 开关控制（relax=False 则完全跳过）。
     "encut":       None,   # 绝对值(eV)：设定则全程强制此值，忽略 encut_scale
-    "encut_scale": 1.3,    # ENCUT = max(ENMAX) × 此值（建议 1.3，保守可设 1.5）
+    "encut_scale": 1.5,    # ENCUT = max(ENMAX) × 此值（统一精度下限）
 
     # ── 超胞 / 对称 ─────────────────────────────────────────────────────────
     "supercell":         None,   # ★显式扩胞倍数 [a,b,c]（int）。给定即直接采用（跳过推荐，
@@ -1447,7 +1447,7 @@ def run(config: Dict[str, Any]) -> dict:
             logging.info("基准 ENCUT = %.0f eV（用户强制 encut，忽略 encut_scale）", base_encut)
         else:
             enmax = encut_from_potcar(prim_potcar)
-            base_encut = enmax * C["encut_scale"]
+            base_encut = math.ceil(enmax * max(1.5, C["encut_scale"]) / 10.0) * 10
             logging.info("基准 ENCUT = max(ENMAX) %.0f × %.2f = %.0f eV",
                          enmax, C["encut_scale"], base_encut)
 
@@ -1704,7 +1704,7 @@ def run(config: Dict[str, Any]) -> dict:
         if C["encut"]:
             encut_sc = float(C["encut"])
         else:
-            encut_sc = encut_from_potcar(potcar_path) * C["encut_scale"]
+            encut_sc = math.ceil(encut_from_potcar(potcar_path) * max(1.5, C["encut_scale"]) / 10.0) * 10
         logging.info("超胞力计算 ENCUT = %.0f（与 relax/static 一致）", encut_sc)
 
         # 超胞磁矩：按 eq_supercell_atoms 真实原子顺序几何映射（原子数已变）
@@ -2407,6 +2407,69 @@ def _parse_shengbte_kappa(path):
         raise ValueError(f"无法解析 {path}")
     data = np.array(rows)
     return data[:, 0], data[:, 1:]
+
+
+def _write_fourphonon_control(C, atoms, SUPERCELL, out_path, use_nac, convergence=False):
+    """fourphonon CONTROL = ShengBTE CONTROL + four_phonon=F(3ph RTA)。
+    fourphonon 的 GPU 版只实现了 RTA(convergence=F)；迭代解(convergence=T)未移植 GPU，
+    且 62 原子级大胞迭代易发散(相对变化卡 2.08、κ 爆 1e73)。4ph(four_phonon=T)需 fc4，
+    kl-dft-cpu 的 S5 只拟 fc2/fc3，勿开。"""
+    _write_shengbte_control(C, atoms, SUPERCELL, out_path, use_nac)
+    txt = out_path.read_text(encoding="utf-8")
+    if "four_phonon" not in txt:
+        txt = txt.replace("nanowires=F,", "nanowires=F,\n  four_phonon=F,", 1)
+    if not convergence:
+        txt = txt.replace("convergence=T,", "convergence=F,", 1)
+    out_path.write_text(txt, encoding="utf-8")
+
+
+def _solve_fourphonon(C, prim, SUPERCELL, kappa_dir, fcs, use_nac, config, ngpu=4, omp=2):
+    """fourphonon(3ph RTA) 求解 —— 输入准备与 _solve_shengbte 相同(ShengBTE 格式 fc2/fc3)，
+    只是 CONTROL 置 four_phonon=F + 用 multi-GPU 版可执行文件按 ngpu 张卡跑。
+    手动/参考运行入口；tf 流水线(step6_kappa SOLVER=fourphonon)走 gen_step6_kappa.py。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ase_write(str(kappa_dir / "POSCAR"), prim, format="vasp", direct=True, sort=False)
+
+    def _safe_wrap_spos(atoms, eps=1e-9):
+        frac = atoms.get_scaled_positions(wrap=True)
+        frac = np.where(frac >= 1.0 - eps, 0.0, frac)
+        frac = np.where(frac < eps, 0.0, frac)
+        atoms.set_scaled_positions(frac)
+
+    _safe_wrap_spos(fcs._supercell)
+    _safe_wrap_spos(prim)
+    fcs.write_to_phonopy(str(kappa_dir / "FORCE_CONSTANTS_2ND"), format="text")
+    fcs.write_to_shengBTE(str(kappa_dir / "FORCE_CONSTANTS_3RD"), prim)
+    _write_fourphonon_control(C, prim, SUPERCELL, kappa_dir / "CONTROL", use_nac)
+    logging.info("[kappa/fourphonon] 输入就绪(3ph RTA, %d-GPU)，等待 multi-GPU 提交脚本执行", ngpu)
+    # 提交由 tf 模板(submit_fourphonon.tpl)负责；此处留给 hpc.submit_* 调用方。
+    for f in ("CONTROL", "FORCE_CONSTANTS_2ND", "FORCE_CONSTANTS_3RD", "POSCAR"):
+        if not (kappa_dir / f).is_file():
+            raise FileNotFoundError(f"fourphonon 缺输入: {f}")
+
+    rta = kappa_dir / "BTE.KappaTensorVsT_RTA"
+    if not rta.exists():
+        raise FileNotFoundError("未找到 BTE.KappaTensorVsT_RTA（fourphonon RTA 失败）")
+    temps_out, kt = _parse_shengbte_kappa(rta)
+    kxx, kyy, kzz = kt[:, 0], kt[:, 4], kt[:, 8]
+    lines = [f"求解器: fourphonon (3ph RTA, {ngpu}-GPU) | ngrid={C['kappa_mesh']}",
+             "温度(K)    κ_xx        κ_yy        κ_zz        平均κ (W/m·K)", "-" * 60]
+    for i, T in enumerate(temps_out):
+        lines.append(f"{T:6.0f}    {kxx[i]:8.3f}    {kyy[i]:8.3f}    {kzz[i]:8.3f}    "
+                     f"{(kxx[i]+kyy[i]+kzz[i])/3:8.3f}")
+    txt = kappa_dir / "kappa_result.txt"
+    txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logging.info("热导率结果:\n%s", "\n".join(lines))
+    plt.figure(figsize=(6, 4.2))
+    plt.plot(temps_out, (kxx + kyy + kzz) / 3, "o-", label="κ (fourphonon RTA)")
+    plt.xlabel("Temperature (K)"); plt.ylabel(r"$\kappa_{lat}$ (W/m·K)")
+    plt.legend(); plt.grid(alpha=0.3); plt.tight_layout()
+    fig = kappa_dir / "kappa_fig.png"; plt.savefig(str(fig), dpi=150)
+    return {"kappa_result": str(txt), "kappa_fig": str(fig), "kappa_solver": "fourphonon"}
 
 
 def _solve_shengbte(C, prim, SUPERCELL, kappa_dir, fcs, use_nac, config):

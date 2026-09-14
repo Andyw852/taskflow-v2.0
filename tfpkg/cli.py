@@ -90,10 +90,26 @@ def _dry_run_report(cfg, data, cmd, projs, jobs):
         print("  （共 %d 个材料，无任何目标）" % len(mats))
 
 
+def normalize_monitor_command(command, positional, restart=False):
+    positional = list(positional)
+    if command == "restart":
+        return "monitor", positional, True
+    if command == "watch":
+        command = "monitor"
+    if command == "monitor" and "restart" in positional:
+        positional.remove("restart")
+        restart = True
+    return command, positional, restart
+
+
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
-    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
+    if "--help-all" in sys.argv[1:]:
         print(USAGE)
+        return
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        from tfpkg import QUICK_USAGE
+        print(QUICK_USAGE)
         return
     if any(a in ("-V", "--version") for a in sys.argv[1:]):
         print("taskflow (tf) version %s" % TF_VERSION)
@@ -110,7 +126,7 @@ def main():
         print("  tf summary   只读极简汇总（巡检省 token，见 AGENTS.md）")
         print("  tf status    刷新状态 + auto-fetch + auto-advance")
         print("  tf monitor   后台监控（-i 秒，-d 后台，restart 重做；watch 为旧名）")
-        print("  tf -h        全部命令")
+        print("  tf -h        常用命令；tf --help-all 查看完整帮助")
         return
     p = argparse.ArgumentParser(prog="tf")
     p.add_argument("-tt", dest="tt")
@@ -185,12 +201,14 @@ def main():
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
-            print(USAGE)
+            from tfpkg import QUICK_USAGE
+            print(QUICK_USAGE)
             return
         if tok in commands and cmd == "status":
             cmd = tok
         else:
             pos.append(tok)
+    cmd, pos, a.restart = normalize_monitor_command(cmd, pos, a.restart)
     # 本地存在的目录 → 旧版 ROOT 语义；其余位置参数留给材料名消歧
     mat_toks = []
     for tok in pos:
@@ -230,14 +248,14 @@ def main():
     cfg["_config_dir"] = (os.path.dirname(os.path.abspath(cfg_path))
                           if cfg_path else os.getcwd())
     cfg["_config_path"] = cfg_path
-    if cmd in ("watch", "monitor", "restart"):   # 控制类操作不采集状态，提前短路
+    if cmd == "monitor":   # 控制类操作不采集状态，提前短路
         if a.install:
             sys.exit(_watch_cron(True))
         if a.uninstall:
             sys.exit(_watch_cron(False))
         if a.stop:
             sys.exit(_watch_stop(cfg))
-        if a.restart or cmd == "restart":
+        if a.restart:
             _watch_stop(cfg)
             _watch_daemon(a, mat_toks, root, cfg)
             return
@@ -281,13 +299,16 @@ def main():
         # 并标记为已消费。原来固定取 mat_toks[0] 且不消费，导致
         #   `tf auto on`           -> "on" 落到后面被当材料名解析而报错
         #   `tf -tt ke <材料> auto on` -> 材料名被当成了 on/off 参数
-        _AUTO_WORDS = ("on", "off", "1", "0", "true", "false",
+        _AUTO_WORDS = ("on", "off", "1", "0", "true", "false", "resume",
                        "\u5f00", "\u5173")
         _arg = next((x for x in mat_toks
                      if str(x).strip().lower() in _AUTO_WORDS), None)
         _rest = [x for x in mat_toks
                  if str(x).strip().lower() not in _AUTO_WORDS]
         _proj = a.proj or (",".join(_rest) if _rest else None)
+        if _arg == "resume" and (not _proj or not a.tt):
+            print("错误：auto resume 必须用 -tt 指定技能和 -p 指定项目。")
+            sys.exit(1)
         mat_toks, a.proj = [], _proj
         if _proj:       # v1.9.9：带 -p（或位置参数）就只改这些材料/技能
             _rc = cmd_auto_project(cfg, types, _proj, a.tt, _arg)
@@ -302,7 +323,7 @@ def main():
         # autonow：on 且全部成功 → 不退出，置标志落到下面的 status 分支，
         # 当场跑一轮采集 + 推进。off / 无参查询 / 有失败 → 原样，只翻开关。
         if _rc != 0 or str(_arg or "").strip().lower() not in (
-                "on", "1", "true", "开"):
+                "on", "1", "true", "开", "resume"):
             sys.exit(_rc)
         print("auto_advance 已开，下面立刻提交可开始的步骤"
               "（只想看不提交：tf list）。")
@@ -401,7 +422,7 @@ def main():
         _dry_run_report(cfg, data, _eff_cmd, projs, jobs)
         return
 
-    if cmd in ("watch", "monitor", "restart"):   # 前台监控（控制标志已在前面短路）
+    if cmd == "monitor":   # 前台监控（控制标志已在前面短路）
         _ov = {}                        # v1.8：自动重载时命令行覆盖照旧生效
         if a.host is not None:
             _ov["host"] = a.host or None
@@ -469,6 +490,9 @@ def main():
         # autonow：只有从 auto on 落过来时才推进；裸 tf / tf status / tf list
         # 仍是 fixte⑤ 的只读语义（不提交任务）。
         if _force_advance:
+            _t1 = _time.time()
+            auto_recover_hung(cfg, data)   # v1.11: 挂死自动恢复（含 UCX 卡死），与 auto_advance 同轮
+            _dbg_t("hang-check 挂死检测", _t1)
             _t1 = _time.time()
             auto_advance(cfg, data)
             _dbg_t("auto-advance 推进", _t1)
@@ -566,4 +590,3 @@ def main():
                     fails += cmd_fetch(cfg, data, pj, all_files=a.all_files)
         if fails:
             sys.exit(1)
-

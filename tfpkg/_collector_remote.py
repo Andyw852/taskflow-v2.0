@@ -285,6 +285,24 @@ def ck_outcar(d, cfg):
         return False, "OUTCAR incomplete"
     return True, "finished"
 
+def ck_deform(d, cfg):
+    """形变势单点（2D 才带 ionrelax/）：
+    主单点 OUTCAR 完成 + 若存在 ionrelax/ 则其 OUTCAR 也必须完成。
+    2D 的 xx±/yy± 4 个点靠 ionrelax 取 E1（真空对齐）；ionrelax 缺失时
+    step7b 会静默回退到刚性口径（E1 偏小 ~24%），所以这里必须判未完成，
+    否则 tf 会把「主单点完成但 ionrelax 没跑」误判为 done、永不补算。"""
+    ok, diag = ck_outcar(d, cfg)
+    if not ok:
+        return ok, diag
+    ir = os.path.join(d, "ionrelax")
+    if os.path.isdir(ir):
+        iro = os.path.join(ir, "OUTCAR")
+        if not os.path.isfile(iro):
+            return False, "ionrelax/OUTCAR missing"
+        if "General timing and accounting informations" not in tail_text(iro, 400000):
+            return False, "ionrelax/OUTCAR incomplete"
+    return True, "finished (ionrelax ok)"
+
 def ck_wavecar(d, cfg):
     p = os.path.join(d, "WAVECAR")
     if not os.path.isfile(p):
@@ -426,6 +444,7 @@ def ck_relax_skip(d, sc):
 
 
 CHECKERS = {"outcar_relax": ck_outcar_relax, "outcar": ck_outcar,
+            "deform": ck_deform,
             "wavecar": ck_wavecar, "eigenval": ck_eigenval, "marker": ck_marker,
             "plot": ck_plot, "relax_skip": ck_relax_skip}
 
@@ -498,7 +517,7 @@ def collect_type(t, jobs_by_dir):
                 # v1.4 扇出步骤：步骤目录下每个子目录 = 一个独立作业。
                 # done 要求全部子目录判据都过；has_* 取子目录的并集，
                 # 这样 step_state 的 PREP/TODO/FAIL 三态判断照常成立。
-                subs = sorted((p for p in glob.glob(
+                subs = sorted((os.path.normpath(p) for p in glob.glob(
                     os.path.join(d, str(sc["fanout"]))) if os.path.isdir(p)),
                     key=natkey)
                 ck = CHECKERS.get(sc.get("check", "outcar"), ck_outcar)
@@ -538,7 +557,13 @@ def collect_type(t, jobs_by_dir):
                     f["done"] = False
                     f["diag"] = ""     # 进度已在 label 里（R@3/5 2R 0PD），不重复
                 elif not n:
-                    f["done"], f["diag"] = False, "dir missing"
+                    # fanout 声明但无子目录 → 回退单目录判据（未切片/旧单目录产物）
+                    if f["exists"]:
+                        f["done"], f["diag"] = ck(d, sc)
+                        f["has_incar"] = os.path.isfile(os.path.join(d, "INCAR"))
+                        f["has_outcar"] = os.path.isfile(os.path.join(d, "OUTCAR"))
+                    else:
+                        f["done"], f["diag"] = False, "dir missing"
                 else:
                     f["done"] = (ndone == n)
                     f["diag"] = ("%d/%d" % (ndone, n) if f["done"] else

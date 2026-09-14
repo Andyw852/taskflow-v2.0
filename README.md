@@ -35,6 +35,23 @@ tf summary --diff               # 首选巡检：无变化 0 字节
 tf -tt opt-mace-cpu summary     # 只看某技能
 ```
 
+## 常用命令与兼容入口
+
+`tf --help`（或 `tf help`）显示简明帮助；`tf --help-all` 显示高级命令、全部参数和示例。本仓库入口为 `bin/tf`，可用 `python3 bin/tf --help` 检查新版；`tf --version` 可核对 PATH 实际指向的版本。
+
+| 用途 | 推荐命令 | 行为 |
+|---|---|---|
+| 只读巡检 | `tf summary --diff` | 无变化静默；总表用 `tf list` |
+| 提交 | `tf -tt TT -p MAT start` | 生成缺失输入并提交 |
+| 保留产物重生成 | `tf -tt TT -p MAT retry` | 不提交，检查后执行 `start` |
+| 删除后重生成 | `tf -tt TT -p MAT rerun` | 删除旧步骤产物，不提交 |
+| 只删除 | `tf -tt TT -p MAT clean` | 不重新生成 |
+| 自动推进 | `tf -tt TT -p MAT auto on` | 开启并推进就绪步骤，保留取消标记 |
+| 恢复取消步骤 | `tf -tt TT -p MAT auto resume` | 开启推进并清除指定技能的取消标记，仍等待依赖 |
+| 持续监控 | `tf monitor -d` | `--stop` 停止，`--restart` 重启 |
+
+`watch` 兼容 `monitor`；`restart`、`watch restart`、`monitor restart` 兼容 `monitor --restart`。旧入口保留，但新脚本统一使用推荐写法。`auto resume` 必须同时指定 `-tt` 和 `-p`，只在明确需要恢复取消步骤时执行，不放进周期巡检。`status` 会拉结果且可能自动提交，不属于只读查询。
+
 ## 三个超算
 
 | 集群 | ssh 别名 | 类型 | 适用技能 |

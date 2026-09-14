@@ -70,7 +70,7 @@ steps:
      marker: 'kappa_summary.json:"KAPPA_DONE": true',
      gen: gen_step6_kappa.py, fetch_all: true,
      gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py, lattice_kappa.py,
-                submit_p3py.tpl, submit_shengbte.tpl, vdw_radii.py]}
+                submit_p3py.tpl, submit_shengbte.tpl, submit_fourphonon.tpl, vdw_radii.py]}
 
 # NAC 为可选步组：极性绝缘体默认开（LO-TO 劈裂需要）。
 #   关闭：项目配置写 nac: false —— tf 直接不注入 step3_nac，S5/S6 因无 BORN 自然无 NAC。
