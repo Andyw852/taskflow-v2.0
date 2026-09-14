@@ -116,8 +116,27 @@ def build_gen_provenance(cfg, t, m, sname, files, host=None, gen_script=None,
             "argv": " ".join(__import__("sys").argv[:1]),
         },
     }
-    if compact:                      # 时间线用：一行一条，便于 append 与 grep
-        return json.dumps(prov, ensure_ascii=False, sort_keys=False)
+    if compact:
+        # 时间线专用【瘦身版】：一行一条，便于 append 与 grep。
+        # 只留"谁在什么时候用哪份输入跑了哪一步"——本地路径、step.conf 全文、
+        # 每份输入的来源都留在 <材料>/provenance/<步骤>.json 里，不在这里重复
+        # （否则每步再刷 5 KB，几十步就是几百 KB 的无用时间线）。
+        slim = {
+            "schema": PROV_SCHEMA,
+            "kind": "gen",
+            "ts": now,
+            "skill": prov["skill"]["key"],
+            "step": sname,
+            "material": prov["material"]["name"],
+            "hpc": prov["hpc"],
+            "tf_version": TF_VERSION,
+            "generator": {"script": gen_script,
+                          "sha256": prov["generator"]["sha256"]},
+            "n_inputs": len(files),
+            "inputs": {k: (v or {}).get("sha256") for k, v in sorted(files.items())},
+            "actor": prov["run"]["actor"],
+        }
+        return json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(prov, ensure_ascii=False, indent=2, sort_keys=False)
 
 

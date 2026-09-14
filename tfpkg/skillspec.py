@@ -50,7 +50,13 @@ _IO_STEP_KEYS = ("step", "title", "tool", "generator", "validator",
                  "inputs", "outputs", "note")
 
 # ---- flow 字段规范 ----------------------------------------------------------
-_FLOW_KEYS = ("summary", "stages", "next_skills", "requires", "ref", "notes")
+_FLOW_KEYS = ("title", "tagline", "backend", "summary", "stages",
+              "next_skills", "requires", "ref", "notes")
+# 论文版卡片抬头缺省文案（照论文图 2 的版式）
+_CARD_TAGLINE_DEFAULT = ("Fixed validated workflow; configurable templates "
+                         "and backends")
+_CARD_DEF_LINE = ("Skill definition: skill.yaml + templates + generators "
+                  "+ validators")
 _FLOW_STAGE_KEYS = ("name", "steps", "produces", "desc")
 _FLOW_NEXT_KEYS = ("skill", "via", "desc")
 
@@ -714,137 +720,233 @@ def _card_steps(skel, spec):
     return out
 
 
-def _card_box(seq_txt, title, gen, tool, vd, outs, opt, box_w):
+def _wrap(s, w, max_lines=3, indent=0):
+    """按显示宽度折行：优先在空格断；单个超长词（长脚本名）才硬切。
+    续行缩进 indent 格（标签下挂的内容读起来更清楚）。超 max_lines 用 … 收尾。"""
+    s = str(s).strip()
+    if not s:
+        return [""]
+    lines, cur = [], ""
+    for tok in s.split():
+        cand = (cur + " " + tok).strip()
+        if _disp_width(cand) <= w:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        while _disp_width(tok) > w:          # 只有超长单词才切（保留连字符）
+            cut = ""
+            for ch in tok:
+                if _disp_width(cut + ch) > w:
+                    break
+                cut += ch
+            lines.append(cut)
+            tok = tok[len(cut):]
+        cur = tok
+    if cur:
+        lines.append(cur)
+    lines = lines or [""]
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = _fit(lines[-1] + " …", w)
+    if indent:
+        lines = [lines[0]] + [" " * indent + l for l in lines[1:]]
+    return lines
+
+
+def _panel_box(lines, box_w):
+    """把一个盒子画成方框（内容已按 box_w-2 排好）。"""
     inner = box_w - 2
-    head = _fit(" %s  %s%s" % (seq_txt, title, "  (可选)" if opt else ""), inner)
-    lines = ["┌" + "─" * inner + "┐",
-             "│" + _pad(head, inner) + "│",
-             "├" + "─" * inner + "┤"]
-    vals = (_fit(gen, inner), _fit(tool, inner), _fit(vd, inner), _fit(outs, inner))
-    for lab, val in zip(_CARD_LABELS, vals):
-        lines.append("│" + _pad(lab, inner) + "│")
-        lines.append("│" + _pad(val, inner) + "│")
-    lines.append("└" + "─" * inner + "┘")
-    return lines
+    out = ["┌" + "─" * inner + "┐"]
+    for ln in lines:
+        out.append("│" + _pad(ln, inner) + "│")
+    out.append("└" + "─" * inner + "┘")
+    return out
 
 
-def _join_boxes(boxes, arrow_row=1):
-    """并排拼盒子；在 arrow_row 那一行用 ──▶ 连接（对应图 2 的横向箭头）。"""
-    h = max(len(b) for b in boxes)
-    boxes = [b + [" " * _disp_width(b[0])] * (h - len(b)) for b in boxes]
-    lines = []
-    for i in range(h):
-        parts = []
-        for j, b in enumerate(boxes):
-            parts.append(b[i])
-            if j < len(boxes) - 1:
-                parts.append(" ──▶ " if i == arrow_row else "     ")
-        lines.append("".join(parts).rstrip())
-    return lines
+def _card_step_box(seq_txt, title, gen, tool, vd, outs, opt, box_w, show_values=True):
+    """单个步骤盒：Step N / 标题 / Generator / Tool / Validator / Output（论文图 2 版式）。"""
+    inner = box_w - 2
+    lines = ["Step %s%s" % (seq_txt, "  (可选)" if opt else "")]
+    lines += _wrap(title, inner, max_lines=2)
+    lines.append("")
+    for lab, val in zip(_CARD_LABELS, (gen, tool, vd, outs)):
+        lines.append(lab)
+        if show_values:
+            lines += _wrap(val, inner, max_lines=2, indent=2)
+        else:
+            lines.append("")
+    return _panel_box(lines, box_w)
 
 
-def render_skill_card(key, skel, spec, width=118, issues=None):
-    """tf skill show <技能>：把技能渲染成一张卡片（Generator/Tool/Validator/Output）。"""
+def _panel_step_rows(steps, box_w, inner_w, show_values=True, cols=None):
+    """步骤盒按行排（一行放不下就换行），盒子间用 → 连接。"""
+    gap = "  →  "
+    if cols:
+        per_row = max(1, min(len(steps), cols))
+    else:
+        per_row = max(1, (inner_w - _disp_width(gap) * 1) // (box_w + _disp_width(gap)))
+        per_row = max(1, min(len(steps), per_row))
+    rows, i = [], 0
+    while i < len(steps):
+        chunk = steps[i:i + per_row]
+        boxes = [_card_step_box(*st, box_w=box_w, show_values=show_values)
+                 for st in chunk]
+        h = max(len(b) for b in boxes)
+        boxes = [b + [" " * _disp_width(b[0])] * (h - len(b)) for b in boxes]
+        for k in range(h):
+            seg = []
+            for j, b in enumerate(boxes):
+                seg.append(b[k])
+                if j < len(boxes) - 1:
+                    # 箭头打在第 3 行（Step N 下的标题行），与图 2 一致
+                    seg.append(gap if k == 2 else " " * _disp_width(gap))
+            rows.append("".join(seg).rstrip())
+        i += per_row
+    return rows
+
+
+def render_skill_card(key, skel, spec, width=110, issues=None, full=False,
+                      show_values=True):
+    """tf skill show <技能>：论文图 2 版式的技能卡片。
+
+    版式（照论文图 2）：
+      ┌──────────────────────────────────────────────────────────┐
+      │ Skill: Lattice thermal conductivity                      │
+      │ Fixed validated workflow; configurable templates and …   │
+      │                                                          │
+      │  ┌────────────┐  →  ┌────────────┐  →  …                 │
+      │  │ Step 1     │     │ Step 2     │                       │
+      │  │ Relaxation │     │ Force …    │                       │
+      │  │ Generator  │     │ …          │                       │
+      │  └────────────┘     └────────────┘                       │
+      │                                                          │
+      │ Skill definition: skill.yaml + templates + generators …  │
+      │ Execution backend: VASP / MACE / Pheasy / Phono3py       │
+      └──────────────────────────────────────────────────────────┘
+    full=True 时在框内追加 输入/参数/可接技能/纠错/校验 几行（默认只给图 2 那几行）。"""
     spec = spec or {}
-    steps = _card_steps(skel, spec)
     io = spec.get("io_schema") if isinstance(spec.get("io_schema"), dict) else {}
     fl = spec.get("flow") if isinstance(spec.get("flow"), dict) else {}
-    corr = spec.get("corrections") or []
-    L = []
-    title = "%s — %s  v%s" % (key, skel.get("desc") or "", skel.get("_skill_version") or "?")
-    L.append("=" * min(width, 110))
-    L.append("Skill: %s" % title)
-    tag = "Validated workflow · configurable templates"
-    if any(r[3] and r[3] != "—" and ("MACE" in r[3] or "MACE" in r[2]) for r in steps):
-        tag += " · replaceable force backend (VASP / MACE)"
-    L.append(tag)
-    if fl.get("summary"):
-        L.append("流程: %s" % fl["summary"])
-    L.append("=" * min(width, 110))
+    steps = _card_steps(skel, spec)
+    title = str(fl.get("title") or skel.get("desc") or key)
+    tagline = str(fl.get("tagline") or _CARD_TAGLINE_DEFAULT)
+    # 工具链：从各步的 tool 里抽（"VASP (vasp_std)" → VASP），保持出现顺序
+    tools_seq = []
+    for _sq, _ti, ge, to, _vd, _ou, _op in steps:
+        for t in str(to).replace("(", " ").replace("/", " ").split():
+            t = t.strip(" ,·+")
+            if not t or t in ("—",) or _disp_width(t) > 14:
+                continue
+            if t[0].islower() or t.isdigit():
+                continue
+            if t not in tools_seq:
+                tools_seq.append(t)
+    backend = str(fl.get("backend") or " / ".join(tools_seq[:6]) or "—")
+
     if not steps:
-        L.append("（本技能没有声明任何步骤）")
-        return "\n".join(L)
-
-    # 盒子宽度：所有步骤取同一个宽度（好看），上限 26
-    need = 0
+        return "\n".join(["┌" + "─" * 72 + "┐",
+                           "│" + _pad(" Skill: %s" % title, 72) + "│",
+                           "│" + " " * 72 + "│",
+                           "│" + _pad(" （本技能没有声明任何步骤）", 72) + "│",
+                           "└" + "─" * 72 + "┘"])
+    # 盒子宽度：够放下所有内容，但不超过 30；面板宽度随之自适应（上限 width）
+    need = 12
     for sq, ti, ge, to, vd, ou, op in steps:
-        need = max(need, _disp_width(" %s  %s%s" % (sq, ti, "  (可选)" if op else "")),
-                   _disp_width(ge), _disp_width(to), _disp_width(vd), _disp_width(ou))
-    box_w = max(19, min(34, need + 2))
+        for s in ("Step %s%s" % (sq, "  (可选)" if op else ""), ge, to, vd, ou):
+            need = max(need, min(_disp_width(s), 30))
+        need = max(need, min(_disp_width(ti), 30))
+    arrow = "  →  "
+    gap_w = _disp_width(arrow)
+    max_inner = max(_disp_width(tagline), _disp_width(_CARD_DEF_LINE),
+                    _disp_width("Execution backend: " + backend),
+                    _disp_width("Skill: " + title))
+    # 版式：照图 2 默认一行 4 个盒子；面板宽度自适应，但不超过 width。
+    cols = min(len(steps), 4)
+    box_w = max(18, min(need + 2, 26))
+    inner = cols * box_w + (cols - 1) * gap_w + 4
+    if inner > width:              # 太宽 → 收窄盒子；仍不够就降列
+        while cols > 1 and (width - 4 - (cols - 1) * gap_w) // cols < 18:
+            cols -= 1
+        box_w = max(16, (width - 4 - (cols - 1) * gap_w) // cols)
+        inner = cols * box_w + (cols - 1) * gap_w + 4
+    inner = max(inner, max_inner + 2)
 
-    # 贪心分行：一行放不下就换行
-    rows, cur, cur_w = [], [], 0
-    for st in steps:
-        w = box_w + (5 if cur else 0)
-        if cur and cur_w + w > width:
-            rows.append(cur)
-            cur, cur_w = [], 0
-            w = box_w
-        cur.append(st)
-        cur_w += w
-    if cur:
-        rows.append(cur)
-
-    for row in rows:
-        boxes = [_card_box(*st, box_w=box_w) for st in row]
-        L += _join_boxes(boxes)
-        L.append("")
-
-    # 尾部：输入 / 参数 / 可接技能 / 纠错
-    if io.get("inputs"):
-        L.append("输入: %s" % ", ".join(str(i.get("name")) for i in io["inputs"]
-                                      if isinstance(i, dict)))
-    if io.get("params"):
-        L.append("参数: %s" % ", ".join(str(p.get("name")) for p in io["params"]
-                                      if isinstance(p, dict)))
-    if io.get("outputs"):
-        L.append("产物: %s" % ", ".join(str(o.get("name")) for o in io["outputs"]
-                                      if isinstance(o, dict)))
-    if fl.get("next_skills"):
+    body = []
+    body.append(_pad(" Skill: %s" % title, inner))
+    for i, ln in enumerate(_wrap(tagline, inner - 2, max_lines=2)):
+        body.append(_pad((" " if i == 0 else "  ") + ln, inner))
+    body.append(" " * inner)
+    for ln in _panel_step_rows(steps, box_w, inner - 2, show_values=show_values,
+                               cols=cols):
+        body.append(_pad("  " + ln, inner))
+    body.append(" " * inner)
+    body.append(_pad(" " + _CARD_DEF_LINE, inner))
+    body.append(_pad(" Execution backend: %s" % backend, inner))
+    if full:
+        body.append(" " * inner)
+        if io.get("inputs"):
+            body.append(_pad(" Inputs: %s" % ", ".join(
+                str(i.get("name")) for i in io["inputs"] if isinstance(i, dict)), inner))
+        if io.get("params"):
+            body.append(_pad(" Parameters: %s" % ", ".join(
+                str(p.get("name")) for p in io["params"] if isinstance(p, dict)), inner))
+        if io.get("outputs"):
+            body.append(_pad(" Outputs: %s" % ", ".join(
+                str(o.get("name")) for o in io["outputs"] if isinstance(o, dict)), inner))
         nxt = []
-        for n in fl["next_skills"]:
+        for n in (fl.get("next_skills") or []):
             n = {"skill": n} if isinstance(n, str) else (n or {})
-            nxt.append("%s%s" % (n.get("skill"), ("（用 %s）" % n.get("via")) if n.get("via") else ""))
-        L.append("可接: %s" % ", ".join(nxt))
-    if corr:
-        L.append("纠错: %s" % ", ".join(c.get("name") if isinstance(c, dict) else str(c)
-                                      for c in corr))
-    if not io.get("steps"):
-        L.append("提示: 本技能还没写 io_schema.steps（Tool 显示 —）。补上以后这张卡片"
-                 "就能直接当论文图 2 用：见 skill/_template/skill.yaml。")
-    if issues:
-        errs, warns = split_issues(issues)
-        if errs or warns:
-            L.append("校验: %d 错误 / %d 警告（细节看 tf schema %s）" % (len(errs), len(warns), key))
-    return "\n".join(L)
+            nxt.append("%s%s" % (n.get("skill"),
+                                 (" (via %s)" % n.get("via")) if n.get("via") else ""))
+        if nxt:
+            body.append(_pad(" Next skills: %s" % ", ".join(nxt), inner))
+        corr = spec.get("corrections") or []
+        if corr:
+            body.append(_pad(" Corrections: %s" % ", ".join(
+                c.get("name") if isinstance(c, dict) else str(c) for c in corr), inner))
+        if issues:
+            errs, warns = split_issues(issues)
+            if errs or warns:
+                body.append(_pad(" Validation: %d errors / %d warnings "
+                                 "(see tf schema %s)" % (len(errs), len(warns), key), inner))
+
+    out = ["┌" + "─" * inner + "┐"]
+    out += ["│" + b + "│" for b in body]
+    out.append("└" + "─" * inner + "┘")
+    return "\n".join(out)
 
 
 def card_dict(key, skel, spec, issues=None):
     """tf skill show --json：卡片的结构化形式（工具/AI 判读用，字段名稳定）。"""
     steps = _card_steps(skel, spec)
+    fl = (spec or {}).get("flow") if isinstance((spec or {}).get("flow"), dict) else {}
+    io = (spec or {}).get("io_schema") if isinstance((spec or {}).get("io_schema"), dict) else {}
     return {
         "skill": key,
+        "title": (fl or {}).get("title") or skel.get("desc"),
+        "tagline": (fl or {}).get("tagline") or _CARD_TAGLINE_DEFAULT,
         "desc": skel.get("desc"),
         "version": skel.get("_skill_version"),
         "manifest": skel.get("_skill_manifest"),
-        "flow_summary": ((spec or {}).get("flow") or {}).get("summary")
-        if isinstance((spec or {}).get("flow"), dict) else None,
+        "flow_summary": (fl or {}).get("summary"),
         "steps": [{"seq": sq, "title": ti, "generator": ge, "tool": to,
                    "validator": vd, "outputs": ou, "optional": op}
                   for sq, ti, ge, to, vd, ou, op in steps],
-        "inputs": [i.get("name") for i in ((spec or {}).get("io_schema") or {}).get("inputs") or []
+        "inputs": [i.get("name") for i in (io or {}).get("inputs") or []
                    if isinstance(i, dict)],
-        "params": [p.get("name") for p in ((spec or {}).get("io_schema") or {}).get("params") or []
+        "params": [p.get("name") for p in (io or {}).get("params") or []
                    if isinstance(p, dict)],
-        "outputs": [o.get("name") for o in ((spec or {}).get("io_schema") or {}).get("outputs") or []
+        "outputs": [o.get("name") for o in (io or {}).get("outputs") or []
                     if isinstance(o, dict)],
         "corrections": (spec or {}).get("corrections") or [],
         "issues": list(issues or []),
     }
 
 
-def cmd_skill_show(cfg, which=None, json_out=False, width=118):
-    """tf skill show [<技能>] —— 渲染技能卡片（论文图 2 的机器可读来源）。
+def cmd_skill_show(cfg, which=None, json_out=False, width=110, full=False):
+    """tf skill show [<技能>] [--full] [--json] —— 渲染技能卡片（论文图 2 的机器可读来源）。
 
     纯本地、不采集、不提交、不改文件。不给技能名 = 列出全部技能的一行摘要。
     退出码：0 正常；1 技能不存在。"""
@@ -873,7 +975,8 @@ def cmd_skill_show(cfg, which=None, json_out=False, width=118):
             L.append("%-14s %-5d %-8s %s" % (k, len(steps), spec_txt,
                                              _fit(", ".join(tools) or (skel.get("desc") or ""), 64)))
         L.append("")
-        L.append("看单个技能：tf skill show <技能名>     机器可读：tf skill show <技能名> --json")
+        L.append("看单个技能：tf skill show <技能名> [--full] [--json]"
+                 "     加 --full 多给输入/参数/可接/纠错")
         print("\n".join(L))
         return 0
     if wanted not in skills:
@@ -896,6 +999,6 @@ def cmd_skill_show(cfg, which=None, json_out=False, width=118):
     if json_out:
         print(_json.dumps(card_dict(wanted, skel, spec, issues), ensure_ascii=False, indent=2))
         return 0
-    print(render_skill_card(wanted, skel, spec, width=width or 118, issues=issues))
+    print(render_skill_card(wanted, skel, spec, width=width or 110, issues=issues,
+                            full=full))
     return 0
-

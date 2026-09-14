@@ -170,6 +170,8 @@ io_schema:
        validator: "kappa_summary.json 里 KAPPA_DONE 为 true"}
 
 flow:
+  title: "Lattice thermal conductivity"
+  backend: "VASP / Pheasy / Phono3py / ShengBTE"
   summary: "弛豫胞 → 静态自洽（判金属）→ [NAC 介电/Born] → 超胞位移取力 → 拟合 fc2/fc3（虚频闸）→ BTE 解 κL(T)"
   stages:
     - {name: "弛豫", steps: [S1_opt], produces: [CONTCAR],

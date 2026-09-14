@@ -153,6 +153,8 @@ io_schema:
        note: "画全范围 + 0~10 THz 低频放大两张（共享脚本 _common/mace/plot_phonon_band.py）"}
 
 flow:
+  title: "Lattice thermal conductivity (MACE/GPU)"
+  backend: "MACE / Pheasy / Phono3py / ShengBTE"
   summary: "MACE 弛豫胞（登录节点）→ phono3py 位移 + GPU 单点力 → 拟合 fc2/fc3 + 虚频闸（登录节点）→ BTE 解 κL(T)（CPU 队列）→ 声子谱出图"
   stages:
     - {name: "弛豫", steps: [S1_relax], produces: [CONTCAR, relax_summary.json],

@@ -175,6 +175,8 @@ def main():
                    help="json：打印字段 schema 说明")
     p.add_argument("--verify", dest="verify", action="store_true",
                    help="prove：逐份校验输入的 sha256 是否与档案一致")
+    p.add_argument("--full", dest="full", action="store_true",
+                   help="skill show：卡片里再给输入/参数/可接技能/纠错")
     p.add_argument("--strict", dest="strict", action="store_true",
                    help="schema：自描述有 [错误] 级问题时返回非零（CI/检查用）")
     p.add_argument("--since", dest="since", metavar="时间",
@@ -288,7 +290,7 @@ def main():
         if _args and _args[0] in ("show", "list"):
             _args.pop(0)
         sys.exit(cmd_skill_show(cfg, which=a.tt or (_args[0] if _args else None),
-                                json_out=a.json_out))
+                                json_out=a.json_out, full=a.full))
     if cmd == "history" and not a.hist_write:
         # v1.0：直接读 history.jsonl（不采集、不连超算、不提交）。
         # 记录是自动的——任何一次真正采集都会追加；--write 时才先采集一轮再读。
