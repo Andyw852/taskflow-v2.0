@@ -3,7 +3,7 @@
 # 放进技能目录即被 tf 自动发现，全局 tf.yaml 里不用再抄 steps。
 # 覆盖优先级：本文件 < 全局 tf.yaml 的 task_types.band-dft-cpu < 项目 tf_<项目>.yaml
 # =============================================================================
-schema: 1
+schema: 2          # 2 = 支持 io_schema / flow / corrections 自描述段（tf schema 看）
 name: band-dft-cpu
 desc: 能带(DFT/CPU)
 version: "1.3"
@@ -14,6 +14,51 @@ checks: ../_common/checks_relax.py   # 公共池里的私有判据（relax_injob
 # 另一种是 per_step（见 skill/elastic-dft-cpu/skill.yaml）。不写 = shared。
 template_layout: shared
 # template_dir: templates      # 目录名，缺省 templates
+
+# =============================================================================
+# 自描述三段（schema 2，v1.0 新增；只给人/AI 看，不参与运行期装配）
+#   看：tf schema band-dft-cpu        机器可读：tf schema band-dft-cpu --json
+#   写新技能照 skill/_template/ 抄。
+# =============================================================================
+io_schema:
+  inputs:
+    - {name: POSCAR, from: user, required: true,
+       desc: 材料初始结构（放材料目录根，多技能共用）}
+  outputs:
+    - {name: CONTCAR, step: S1_opt,
+       desc: 弛豫后结构，后续所有步骤的输入}
+    - {name: WAVECAR, step: S3_WAVECAR,
+       desc: PBE 自洽波函数（能带/后续电子结构计算的起点）}
+    - {name: band_summary.json, step: S3.1_plot, type: json,
+       desc: 能带汇总（带隙/高对称路径）；HSE 版由 S4.1_plot 覆盖同名产物}
+    - {name: vacuum_align_summary.json, step: S3.2_vac, type: json,
+       desc: PBEsol 真空能级对齐结果（2D 材料功函数用）}
+  params:
+    - {name: BANDGAP, values: [pbe, hse], default: hse, where: step.conf,
+       desc: 带隙层级；pbe = 只到 PBE 带隙+画图（跳过整段 HSE），hse = 继续 HSE 段}
+    - {name: plot_steps, values: [true, false], default: true, where: tf.yaml/项目配置,
+       desc: 画图步开关（S3.1_plot / S4.1_plot）}
+    - {name: vacuum_align, values: [true, false], default: true, where: tf.yaml/项目配置,
+       desc: PBEsol 真空对齐步开关（S3.2_vac / S4.2_vac）}
+    - {name: bandgap_hse, values: [true, false], default: true, where: tf.yaml/项目配置,
+       desc: HSE 段开关（S4_HSE / S4.1_plot / S4.2_vac）；也可由 BANDGAP=pbe 关掉}
+  notes: 产物落本地 result/<步骤>/（fetch_files 由技能与项目配置决定）。
+
+flow:
+  summary: 结构弛豫 → PBE 自洽 → 波函数 → （画图）→ [HSE 段] → （画图）→ 真空对齐
+  stages:
+    - {name: 弛豫, steps: [S1_opt], produces: [CONTCAR],
+       desc: 三段式弛豫（共用 seq 1），力判据 relax_injob}
+    - {name: 自洽, steps: [S2_static], desc: 静态自洽，出 CHGCAR}
+    - {name: 波函数, steps: [S3_WAVECAR], produces: [WAVECAR]}
+    - {name: PBE 能带, steps: [S3.1_plot], produces: [band_summary.json],
+       desc: 材料目录里跑画图脚本，不交 SLURM}
+    - {name: HSE 能带, steps: [S4_HSE, S4.1_plot], desc: 由 BANDGAP/bandgap_hse 开关控制}
+    - {name: 真空对齐, steps: [S3.2_vac, S4.2_vac], produces: [vacuum_align_summary.json],
+       desc: PBEsol 真空能级对齐（2D）}
+  requires: {POSCAR: 材料目录根必须已有 POSCAR}
+
+corrections: [nsw_continue, zbrent, node_fail]
 
 # ---- 站点无关的缺省值（用户在 tf.yaml 里覆盖 hpc / work_dir 即可）----------
 defaults:

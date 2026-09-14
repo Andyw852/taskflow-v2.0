@@ -148,7 +148,9 @@ log_dir: "{matdir}/log"           # 该项目的操作日志 tf.log
 SKILL_MANIFEST = "skill.yaml"
 
 # ===== SKILL_SCHEMA_MAX (原 L1092-L1092) =====
-SKILL_SCHEMA_MAX = 1
+# v1.0：schema 2 = 允许 skill.yaml 带自描述扩展段 io_schema / flow / corrections
+#（老 tf 只会忽略不认识的段，所以老技能写 schema: 1 完全不受影响）。
+SKILL_SCHEMA_MAX = 2
 
 # ===== COMMON_POOL_DIR (原 L1095-L1095) =====
 COMMON_POOL_DIR = "_common"
@@ -616,6 +618,13 @@ def _load_manifest(path):
     skel["_skill_manifest"] = path
     skel["_skill_version"] = man.get("version")
     skel["_skill_requires"] = man.get("requires") or {}
+    # v1.0：把清单的自描述扩展段（io_schema / flow / corrections）+ schema 号原样
+    # 带出来，供 tf schema / tf skills 展示与校验。它们**不参与运行期装配**
+    # （不在 _MANIFEST_TYPE_KEYS 里），纯自描述，老 tf / 老技能都不受影响。
+    from tfpkg import SPEC_SECTIONS as _SPEC_SECTIONS
+    _spec = {s: man[s] for s in _SPEC_SECTIONS if man.get(s) is not None}
+    _spec["schema"] = schema
+    skel["_skill_spec"] = _spec
     chk = man.get("checks", "checks.py")
     cp = os.path.join(sdir, str(chk)) if chk else None
     # patch_common_opt：公共判据文件随 _common 重构挪进了公共步骤子目录（opt/ 等），
@@ -649,6 +658,20 @@ def discover_skills(cfg, verbose=False):
     if bad and verbose:
         for mp, why in bad:
             sys.stderr.write("警告：技能清单 %s 已忽略（%s）\n" % (mp, why))
+    # v1.0：给每个技能算一份轻量自描述问题清单（tf skills 一行显示 / tf schema 详情）。
+    # 这里**不**校验 corrections 里的 handler 名是否已注册——那要加载 _corrections/
+    # handler 库；tf schema 会带上注册表做完整校验。发现期只做零依赖的结构校验。
+    try:
+        from tfpkg import validate_skill_spec
+        _known = set(found)
+        for _k, _sk in found.items():
+            try:
+                _sk["_skill_issues"] = validate_skill_spec(
+                    _k, _sk.get("_skill_spec") or {}, skel=_sk, known_skills=_known)
+            except Exception:
+                _sk["_skill_issues"] = []
+    except Exception:
+        pass
     return found
 
 # ===== _merge_type (原 L1201-L1214) =====
@@ -807,19 +830,56 @@ def cmd_skills(cfg, tt=None):
         return 0
     black = set(cfg.get("disabled_skills") or [])
     white = cfg.get("enabled_skills")
-    print("%-10s %-8s %-6s %-6s %s" % ("技能", "版本", "步骤", "状态", "清单"))
+    # v1.0：多一列「自描述」（io_schema 入/出/参 · flow · corrections 数量），
+    # 后面的 !N 是自描述里的问题条数（tf schema <技能> 看详情）。
+    print("%-12s %-7s %-5s %-6s %-16s %s"
+          % ("技能", "版本", "步骤", "状态", "自描述", "清单"))
+    n_io = n_flow = n_corr = n_bad = 0
     for k in sorted(skills):
         if tt and k != tt:
             continue
         s = skills[k]
         st = "关闭" if (k in black or (white and k not in white)) else "启用"
-        print("%-10s %-8s %-6d %-6s %s"
+        brief = _skill_spec_brief(s)
+        n_io += 1 if brief.startswith("io:") or " io:" in brief else 0
+        n_flow += 1 if "flow" in brief else 0
+        n_corr += 1 if "corr:" in brief else 0
+        n_bad += 1 if "!" in brief else 0
+        print("%-12s %-7s %-5d %-6s %-16s %s"
               % (k, s.get("_skill_version") or "-", len(s.get("steps") or []),
-                 st, s.get("_skill_manifest")))
+                 st, brief, s.get("_skill_manifest")))
+    if not tt:
+        print("\n自描述覆盖：io_schema %d/%d · flow %d/%d · corrections %d/%d；"
+              "有问题 %d 个" % (n_io, len(skills), n_flow, len(skills),
+                              n_corr, len(skills), n_bad))
+        print("补自描述 = 在 skill.yaml 里写 io_schema / flow / corrections 三段"
+              "（照 skill/band-dft-cpu/skill.yaml 抄）；看详情：tf schema <技能>")
     print("\n搜索路径（靠前优先）：")
     for d in skill_search_dirs(cfg):
         print("  " + d)
     return 0
+
+
+def _skill_spec_brief(s):
+    """技能自描述摘要（v1.0）：io:入/出/参 · flow · corr:N，尾巴 !N = 问题条数。"""
+    try:
+        from tfpkg import spec_stats, split_issues
+    except Exception:
+        return "-"
+    sp = (s or {}).get("_skill_spec") or {}
+    st = spec_stats(sp)
+    bits = []
+    if st["has_io"]:
+        bits.append("io:%d/%d/%d" % (st["n_in"], st["n_out"], st["n_params"]))
+    if st["has_flow"]:
+        bits.append("flow")
+    if st["n_corr"]:
+        bits.append("corr:%d" % st["n_corr"])
+    txt = " ".join(bits) or "-"
+    errs, warns = split_issues((s or {}).get("_skill_issues"))
+    if errs or warns:
+        txt += " !%d" % (len(errs) + len(warns))
+    return txt
 
 # ===== 来自 03_projects.py =====
 # -*- coding: utf-8 -*-

@@ -103,7 +103,7 @@ def normalize_monitor_command(command, positional, restart=False):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_correct, cmd_correct_usage
     if "--help-all" in sys.argv[1:]:
         print(USAGE)
         return
@@ -173,6 +173,14 @@ def main():
                    help="list/summary/status/dir 以 JSON 输出（机器可读）")
     p.add_argument("--schema", dest="schema", action="store_true",
                    help="json：打印字段 schema 说明")
+    p.add_argument("--strict", dest="strict", action="store_true",
+                   help="schema：自描述有 [错误] 级问题时返回非零（CI/检查用）")
+    p.add_argument("--since", dest="since", metavar="时间",
+                   help="history：只看该时间之后的记录（如 2026-09-14 或 7d）")
+    p.add_argument("-n", dest="last_n", type=int, metavar="N",
+                   help="history：只显示最近 N 条（默认 40）")
+    p.add_argument("--write", dest="hist_write", action="store_true",
+                   help="history：采集一次并把变化写进 history.jsonl（默认只读）")
     p.add_argument("-clean", "--clean", dest="clean", action="store_true")
     p.add_argument("--purge-config", dest="purge_config", action="store_true",
                    help="clean：连 project_setting 一起删（默认保留，重算需 tf init）")
@@ -197,7 +205,10 @@ def main():
     commands = {"status", "list", "summary", "start", "stop", "retry", "rerun",
                 "json", "config", "dir", "fetch", "init", "clean", "watch",
                 "monitor", "restart", "help", "auto", "adopt", "migrate-subdir",
-                "hpc", "skills", "conf", "level", "diagnose", "probe", "push"}
+                "hpc", "skills", "conf", "level", "diagnose", "probe", "push",
+                # v1.0（加技能友好化）：schema = 看技能自描述（io_schema/flow/corrections）
+                #                      correct = 把 FAIL 诊断喂给 _corrections/ handler 库
+                "schema", "correct", "history"}
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -265,6 +276,10 @@ def main():
     cfg = apply_skills(cfg, verbose=True)   # v1.2：先装配 skill/*/skill.yaml
     if cmd == "skills":
         return cmd_skills(cfg, tt=a.tt)
+    if cmd == "schema":   # v1.0：看技能自描述（纯本地、不采集、不提交）
+        # 技能名既可用 -tt，也可直接当位置参数写：tf schema band-dft-cpu
+        _which = a.tt or (mat_toks[0] if mat_toks else None)
+        sys.exit(cmd_schema(cfg, tt=_which, json_out=a.json_out, strict=a.strict))
     cfg = merge_project_configs(cfg)   # v3.1：合并项目配置 project_setting/tf_*.yaml
     if a.host is not None:
         cfg["host"] = a.host or None
@@ -464,6 +479,13 @@ def main():
         print(json.dumps(_outs[0] if len(_outs) == 1 else _outs,
                          ensure_ascii=False, indent=2))
         return
+    if cmd == "correct":   # v1.0：把 FAIL 诊断喂给 _corrections/ handler 库
+        if not projs:
+            sys.exit(cmd_correct_usage())
+        _fails = 0
+        for pj in projs:
+            _fails += cmd_correct(cfg, data, pj, jobs[0], yes=a.yes, dry=a.dry)
+        sys.exit(1 if _fails else 0)
     if cmd == "summary":   # 只读极简汇总；不 auto_fetch/auto_advance（绝不提交）
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)

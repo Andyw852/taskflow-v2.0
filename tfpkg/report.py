@@ -1189,6 +1189,19 @@ def cmd_diagnose(cfg, data, mname, jname):
     for s in targets:
         code = _diag_code(s.get("diag") or "")
         act, reason = _suggested_action(code)
+        # v1.0：把这段诊断喂给 _corrections/ handler 库，附上"该动什么"的具体建议
+        # （handler 名 + 风险等级 + 可照抄的 tf 命令）。纯本地匹配，不连超算。
+        # 库不在/加载失败都不影响 diagnose 本身——空列表即可。
+        corr = []
+        try:
+            from tfpkg import suggest_for_diag
+            corr = suggest_for_diag(
+                cfg, material=m.get("name"), skill=t.get("key"),
+                step=s.get("name"), label=s.get("label"), workdir=s.get("dir"),
+                diag=s.get("diag") or "", diag_code=code,
+                host=m.get("host_eff"), job_id=(s.get("job") or {}).get("id"))
+        except Exception:
+            corr = []
         steps.append({
             "label": s.get("label"),
             "name": s.get("name"),
@@ -1197,6 +1210,7 @@ def cmd_diagnose(cfg, data, mname, jname):
             "diag_code": code,
             "suggested_action": act,
             "action_reason": reason,
+            "corrections": corr,
             "job": s.get("job"),
             "dir": s.get("dir"),
         })

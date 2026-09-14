@@ -33,8 +33,14 @@ _NS["_SLICE_DIR"] = os.path.normpath(os.path.join(_HERE, "_slice"))
 # import REASON_MAX 依赖它；其余模块无模块级跨模块依赖，顺序无关）。
 from . import (  # noqa: E402
     bootstrap, collect, data, workflow, report, ops, cli, yamlmini,
+    # v1.0（加技能友好化）新增两个模块：
+    #   skillspec   —— skill.yaml 扩展段（io_schema / flow / corrections）的规范、
+    #                  校验与 tf schema 渲染（建议 1.2 / 1.3）
+    #   corrections —— _corrections/ 纠错 handler 库的加载、匹配与 tf correct（建议 1.1）
+    skillspec, corrections,
 )
-_MODULES = (bootstrap, collect, data, workflow, report, ops, cli, yamlmini)
+_MODULES = (bootstrap, collect, data, workflow, report, ops, cli, yamlmini,
+            skillspec, corrections)
 
 # 把各模块的名字注入包命名空间（排除 dunder 与标准库名）。
 _STDLIB_NAMES = {
