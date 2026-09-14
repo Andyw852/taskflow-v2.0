@@ -47,7 +47,7 @@ fetch_files: [INCAR, POSCAR, CONTCAR, POTCAR, KPOINTS, KPOINTS_OPT, kpath.json,
 steps:
   - {seq: 1, name: step1_opt, label: S1_opt, src: step1_opt,
      check: relax_injob, gen: gen_step1_std_opt.py, contcar_to_poscar: true,
-     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf, check_common.py, step1_check_and_resubmit.py,
+     gen_need: [relax_common.py, method_select.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf, check_common.py, step1_check_and_resubmit.py,
                 incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
 
   - {seq: 3, name: step3_uniform, label: S3_uniform, src: step3_uniform,

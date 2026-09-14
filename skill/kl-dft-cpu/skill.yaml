@@ -42,7 +42,7 @@ fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, POTCAR, submit.sh, OUTCAR,
 steps:
   - {seq: 1, name: step1_std_opt, label: S1_opt, check: relax_injob,
      gen: gen_step1_std_opt.py, contcar_to_poscar: true,
-     gen_need: [relax_common.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf,
+     gen_need: [relax_common.py, method_select.py, mol_common.py, incar_0d.tpl, submit_std_0d.tpl, dim_common.py, stepconf.py, step.conf,
                 check_common.py, step1_check_and_resubmit.py,
                 incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
 
