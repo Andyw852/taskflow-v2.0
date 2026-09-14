@@ -28,7 +28,7 @@ SPEC_SECTIONS = ("io_schema", "flow", "corrections")
 SPEC_SCHEMA_MIN = 2
 
 # ---- io_schema 字段规范 -----------------------------------------------------
-_IO_TOP_KEYS = ("inputs", "outputs", "params", "notes")
+_IO_TOP_KEYS = ("inputs", "outputs", "params", "steps", "notes")
 _IO_LIST_KEYS = ("inputs", "outputs", "params")
 # name 必填；其余可选。desc 建议写（tf schema 直接展示给人看）。
 _IO_ITEM_KEYS = {
@@ -36,6 +36,18 @@ _IO_ITEM_KEYS = {
     "outputs": ("name", "path", "step", "desc", "type", "consumers"),
     "params": ("name", "values", "default", "desc", "where"),
 }
+# io_schema.steps[]：**按步**的 I/O 与工具（tf skill show 渲染成"技能卡片"，
+# 对应论文里的 Generator / Tool / Validator / Output 四行）。
+#   step       必填，步骤引用（name/label 都行）
+#   title      卡片标题（短英文短语，图里直接显示）
+#   tool       这一步实际用什么算/算什么（VASP / MACE / Pheasy GPU / phono3py / ShengBTE…）
+#   generator  生成器脚本名（可省：默认取 steps[].gen）
+#   validator  判据的人话说明（可省：默认按 steps[].check 渲染）
+#   inputs     本步吃哪些东西（名字即可）
+#   outputs    本步吐哪些东西（名字即可，含中间产物）
+#   note       补充说明（可选）
+_IO_STEP_KEYS = ("step", "title", "tool", "generator", "validator",
+                 "inputs", "outputs", "note")
 
 # ---- flow 字段规范 ----------------------------------------------------------
 _FLOW_KEYS = ("summary", "stages", "next_skills", "requires", "ref", "notes")
@@ -74,6 +86,17 @@ def all_steps(skel):
         if isinstance(spec, dict):
             steps += [s for s in (spec.get("steps") or []) if isinstance(s, dict)]
     return steps
+
+
+def all_steps_optional(skel):
+    """同 all_steps，但带"是否可选"标记：[(step, 是否来自 optional_steps), ...]。
+    返回的是原字典对象（不改动、不复制），调用方只读。"""
+    skel = skel or {}
+    out = [(s, False) for s in (skel.get("steps") or []) if isinstance(s, dict)]
+    for _flag, spec in (skel.get("optional_steps") or {}).items():
+        if isinstance(spec, dict):
+            out += [(s, True) for s in (spec.get("steps") or []) if isinstance(s, dict)]
+    return out
 
 
 def step_tokens(skel):
@@ -202,7 +225,55 @@ def _validate_io(key, io, known_steps, known_skills):
                         and item.get("default") not in vals:
                     issues.append(_issue(_WARN, "%s 的 default=%s 不在 values 里",
                                          tag, item.get("default")))
+    issues += _validate_io_steps(io.get("steps"), known_steps)
     return issues
+
+
+def _validate_io_steps(steps, known_steps):
+    """校验 io_schema.steps[]（按步 I/O，v1.0 第二批新增；tf skill show 用它画卡片）。"""
+    issues = []
+    if steps is None:
+        return issues
+    if not isinstance(steps, list):
+        return [_issue(_ERR, "io_schema.steps 必须是列表（每项一个步骤的 I/O 声明）")]
+    seen = set()
+    for i, st in enumerate(steps):
+        tag = "io_schema.steps[%d]" % i
+        if not isinstance(st, dict):
+            issues.append(_issue(_ERR, "%s 必须是字典", tag))
+            continue
+        ref = str(st.get("step") or "").strip()
+        if not ref:
+            issues.append(_issue(_ERR, "%s 缺少 step（步骤名或 label）", tag))
+        else:
+            tag = "io_schema.steps[%s]" % ref
+            if ref in seen:
+                issues.append(_issue(_WARN, "%s 重复声明了同一个步骤", tag))
+            seen.add(ref)
+            if not _step_ref_ok(ref, known_steps):
+                issues.append(_issue(_WARN, "%s 不是本技能的步骤（可用：%s）",
+                                     tag, ", ".join(sorted(known_steps)[:8]) or "无"))
+        for k in st:
+            if k not in _IO_STEP_KEYS:
+                issues.append(_issue(_WARN, "%s 有不认识的键 '%s'（可用：%s）",
+                                     tag, k, "/".join(_IO_STEP_KEYS)))
+        for k in ("inputs", "outputs"):
+            v = st.get(k)
+            if v is not None and not isinstance(v, list):
+                issues.append(_issue(_WARN, "%s 的 %s 建议写成列表", tag, k))
+    return issues
+
+
+def step_io_map(spec):
+    """io_schema.steps[] → {步骤引用: 声明 dict}（tf skill show 用）。"""
+    out = {}
+    io = (spec or {}).get("io_schema")
+    if not isinstance(io, dict):
+        return out
+    for st in (io.get("steps") or []):
+        if isinstance(st, dict) and str(st.get("step") or "").strip():
+            out[str(st["step"]).strip()] = st
+    return out
 
 
 def _validate_flow(key, flow, known_steps, known_skills):
@@ -563,3 +634,268 @@ def _manifest_of(skel):
     if isinstance(spec, dict):
         return spec
     return {}
+
+
+# =============================================================================
+# 技能卡片：tf skill show —— 渲染成论文图 2 那种
+#   ┌ 1 Relax structure ┐ ──▶ ┌ 2 Generate forces ┐ …
+#   │ Generator / Tool / Validator / Output │
+# 数据来源：steps[]（gen/check/marker）+ io_schema.steps[]（tool/title/outputs）。
+# 没写 io_schema.steps 的技能也能渲染（Tool 显示 "—"，并在尾注里提示补）。
+# =============================================================================
+_CARD_LABELS = ("Generator", "Tool", "Validator", "Output")
+
+
+def _disp_width(s):
+    """终端显示宽度（中文/全角算 2）。"""
+    w = 0
+    for ch in str(s):
+        o = ord(ch)
+        if (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF or 0xAC00 <= o <= 0xD7A3
+                or 0xF900 <= o <= 0xFAFF or 0xFE30 <= o <= 0xFE6F
+                or 0xFF00 <= o <= 0xFF60 or 0xFFE0 <= o <= 0xFFE6
+                or 0x1F300 <= o <= 0x1FAFF):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _fit(s, w):
+    """按显示宽度截断（超出用 … 收尾）。"""
+    s = str(s)
+    if _disp_width(s) <= w:
+        return s
+    out, cur = "", 0
+    for ch in s:
+        cw = _disp_width(ch)
+        if cur + cw > w - 1:
+            break
+        out += ch
+        cur += cw
+    return out + "…"
+
+
+def _pad(s, w):
+    s = _fit(s, w)
+    return s + " " * max(0, w - _disp_width(s))
+
+
+def _card_steps(skel, spec):
+    """→ [(seq_txt, title, generator, tool, validator, outputs, optional)]（按 seq 排序）"""
+    io_map = step_io_map(spec)
+    rows = []
+    for s, is_opt in all_steps_optional(skel or {}):
+        ref = str(s.get("name") or "")
+        ent = io_map.get(ref) or io_map.get(str(s.get("label") or "")) or {}
+        label = s.get("label") or ref
+        gen = str(ent.get("generator") or s.get("gen") or "—")
+        gen = gen.split()[0] if gen else "—"
+        title = str(ent.get("title") or s.get("label") or ref)
+        vd = ent.get("validator")
+        if not vd:
+            ck = str(s.get("check") or "—")
+            vd = ck
+            mk = s.get("marker")
+            if mk:
+                vd = "%s（%s）" % (ck, _fit(str(mk).split(":")[-1].strip('"'), 18))
+            if s.get("run") == "gen":
+                vd = "%s（登录节点跑，判 %s）" % (ck, s.get("done_marker") or "产物")
+        outs = ent.get("outputs") or []
+        outs = ", ".join(str(x) for x in outs) if isinstance(outs, list) else str(outs)
+        rows.append((s.get("seq"), str(title), gen, str(ent.get("tool") or "—"),
+                     str(vd), outs or "—", bool(is_opt)))
+    rows.sort(key=lambda r: (r[0] if isinstance(r[0], (int, float)) else 99, r[1]))
+    out = []
+    for i, r in enumerate(rows, 1):
+        seq = r[0]
+        seq_txt = ("%g" % seq) if isinstance(seq, (int, float)) else str(seq or i)
+        out.append((seq_txt, r[1], r[2], r[3], r[4], r[5], r[6]))
+    return out
+
+
+def _card_box(seq_txt, title, gen, tool, vd, outs, opt, box_w):
+    inner = box_w - 2
+    head = _fit(" %s  %s%s" % (seq_txt, title, "  (可选)" if opt else ""), inner)
+    lines = ["┌" + "─" * inner + "┐",
+             "│" + _pad(head, inner) + "│",
+             "├" + "─" * inner + "┤"]
+    vals = (_fit(gen, inner), _fit(tool, inner), _fit(vd, inner), _fit(outs, inner))
+    for lab, val in zip(_CARD_LABELS, vals):
+        lines.append("│" + _pad(lab, inner) + "│")
+        lines.append("│" + _pad(val, inner) + "│")
+    lines.append("└" + "─" * inner + "┘")
+    return lines
+
+
+def _join_boxes(boxes, arrow_row=1):
+    """并排拼盒子；在 arrow_row 那一行用 ──▶ 连接（对应图 2 的横向箭头）。"""
+    h = max(len(b) for b in boxes)
+    boxes = [b + [" " * _disp_width(b[0])] * (h - len(b)) for b in boxes]
+    lines = []
+    for i in range(h):
+        parts = []
+        for j, b in enumerate(boxes):
+            parts.append(b[i])
+            if j < len(boxes) - 1:
+                parts.append(" ──▶ " if i == arrow_row else "     ")
+        lines.append("".join(parts).rstrip())
+    return lines
+
+
+def render_skill_card(key, skel, spec, width=118, issues=None):
+    """tf skill show <技能>：把技能渲染成一张卡片（Generator/Tool/Validator/Output）。"""
+    spec = spec or {}
+    steps = _card_steps(skel, spec)
+    io = spec.get("io_schema") if isinstance(spec.get("io_schema"), dict) else {}
+    fl = spec.get("flow") if isinstance(spec.get("flow"), dict) else {}
+    corr = spec.get("corrections") or []
+    L = []
+    title = "%s — %s  v%s" % (key, skel.get("desc") or "", skel.get("_skill_version") or "?")
+    L.append("=" * min(width, 110))
+    L.append("Skill: %s" % title)
+    tag = "Validated workflow · configurable templates"
+    if any(r[3] and r[3] != "—" and ("MACE" in r[3] or "MACE" in r[2]) for r in steps):
+        tag += " · replaceable force backend (VASP / MACE)"
+    L.append(tag)
+    if fl.get("summary"):
+        L.append("流程: %s" % fl["summary"])
+    L.append("=" * min(width, 110))
+    if not steps:
+        L.append("（本技能没有声明任何步骤）")
+        return "\n".join(L)
+
+    # 盒子宽度：所有步骤取同一个宽度（好看），上限 26
+    need = 0
+    for sq, ti, ge, to, vd, ou, op in steps:
+        need = max(need, _disp_width(" %s  %s%s" % (sq, ti, "  (可选)" if op else "")),
+                   _disp_width(ge), _disp_width(to), _disp_width(vd), _disp_width(ou))
+    box_w = max(19, min(34, need + 2))
+
+    # 贪心分行：一行放不下就换行
+    rows, cur, cur_w = [], [], 0
+    for st in steps:
+        w = box_w + (5 if cur else 0)
+        if cur and cur_w + w > width:
+            rows.append(cur)
+            cur, cur_w = [], 0
+            w = box_w
+        cur.append(st)
+        cur_w += w
+    if cur:
+        rows.append(cur)
+
+    for row in rows:
+        boxes = [_card_box(*st, box_w=box_w) for st in row]
+        L += _join_boxes(boxes)
+        L.append("")
+
+    # 尾部：输入 / 参数 / 可接技能 / 纠错
+    if io.get("inputs"):
+        L.append("输入: %s" % ", ".join(str(i.get("name")) for i in io["inputs"]
+                                      if isinstance(i, dict)))
+    if io.get("params"):
+        L.append("参数: %s" % ", ".join(str(p.get("name")) for p in io["params"]
+                                      if isinstance(p, dict)))
+    if io.get("outputs"):
+        L.append("产物: %s" % ", ".join(str(o.get("name")) for o in io["outputs"]
+                                      if isinstance(o, dict)))
+    if fl.get("next_skills"):
+        nxt = []
+        for n in fl["next_skills"]:
+            n = {"skill": n} if isinstance(n, str) else (n or {})
+            nxt.append("%s%s" % (n.get("skill"), ("（用 %s）" % n.get("via")) if n.get("via") else ""))
+        L.append("可接: %s" % ", ".join(nxt))
+    if corr:
+        L.append("纠错: %s" % ", ".join(c.get("name") if isinstance(c, dict) else str(c)
+                                      for c in corr))
+    if not io.get("steps"):
+        L.append("提示: 本技能还没写 io_schema.steps（Tool 显示 —）。补上以后这张卡片"
+                 "就能直接当论文图 2 用：见 skill/_template/skill.yaml。")
+    if issues:
+        errs, warns = split_issues(issues)
+        if errs or warns:
+            L.append("校验: %d 错误 / %d 警告（细节看 tf schema %s）" % (len(errs), len(warns), key))
+    return "\n".join(L)
+
+
+def card_dict(key, skel, spec, issues=None):
+    """tf skill show --json：卡片的结构化形式（工具/AI 判读用，字段名稳定）。"""
+    steps = _card_steps(skel, spec)
+    return {
+        "skill": key,
+        "desc": skel.get("desc"),
+        "version": skel.get("_skill_version"),
+        "manifest": skel.get("_skill_manifest"),
+        "flow_summary": ((spec or {}).get("flow") or {}).get("summary")
+        if isinstance((spec or {}).get("flow"), dict) else None,
+        "steps": [{"seq": sq, "title": ti, "generator": ge, "tool": to,
+                   "validator": vd, "outputs": ou, "optional": op}
+                  for sq, ti, ge, to, vd, ou, op in steps],
+        "inputs": [i.get("name") for i in ((spec or {}).get("io_schema") or {}).get("inputs") or []
+                   if isinstance(i, dict)],
+        "params": [p.get("name") for p in ((spec or {}).get("io_schema") or {}).get("params") or []
+                   if isinstance(p, dict)],
+        "outputs": [o.get("name") for o in ((spec or {}).get("io_schema") or {}).get("outputs") or []
+                    if isinstance(o, dict)],
+        "corrections": (spec or {}).get("corrections") or [],
+        "issues": list(issues or []),
+    }
+
+
+def cmd_skill_show(cfg, which=None, json_out=False, width=118):
+    """tf skill show [<技能>] —— 渲染技能卡片（论文图 2 的机器可读来源）。
+
+    纯本地、不采集、不提交、不改文件。不给技能名 = 列出全部技能的一行摘要。
+    退出码：0 正常；1 技能不存在。"""
+    import json as _json
+    skills = cfg.get("_skills") or {}
+    if not skills:
+        print("没有发现任何技能（skill/*/skill.yaml）。")
+        return 0
+    wanted = (which or "").strip()
+    if not wanted:
+        L = ["%-14s %-5s %-8s %s" % ("技能", "步骤", "自描述", "工具链 / 说明")]
+        for k in sorted(skills):
+            skel = skills[k] or {}
+            spec = spec_of(_manifest_of(skel))
+            steps = _card_steps(skel, spec)
+            tools = []
+            for _sq, _ti, _ge, to, _vd, _ou, _op in steps:
+                for t in str(to).split("/"):
+                    t = t.strip()
+                    if t and t != "—" and t not in tools:
+                        tools.append(t)
+            st = spec_stats(spec)
+            spec_txt = "%s%s%s" % ("I" if st["has_io"] else "-",
+                                   "F" if st["has_flow"] else "-",
+                                   "C" if st["n_corr"] else "-")
+            L.append("%-14s %-5d %-8s %s" % (k, len(steps), spec_txt,
+                                             _fit(", ".join(tools) or (skel.get("desc") or ""), 64)))
+        L.append("")
+        L.append("看单个技能：tf skill show <技能名>     机器可读：tf skill show <技能名> --json")
+        print("\n".join(L))
+        return 0
+    if wanted not in skills:
+        import difflib
+        close = difflib.get_close_matches(wanted, sorted(skills), n=3, cutoff=0.4)
+        print("错误：没有技能 '%s'%s" % (wanted,
+                                     ("，你是不是想：%s" % ", ".join(close)) if close else "。"))
+        print("已发现的技能：%s" % ", ".join(sorted(skills)))
+        return 1
+    skel = skills[wanted] or {}
+    spec = spec_of(_manifest_of(skel))
+    issues = None
+    try:
+        from tfpkg import correction_handler_names
+        issues = validate_skill_spec(wanted, _manifest_of(skel), skel=skel,
+                                     known_skills=set(skills),
+                                     handler_names=correction_handler_names(cfg))
+    except Exception:
+        issues = None
+    if json_out:
+        print(_json.dumps(card_dict(wanted, skel, spec, issues), ensure_ascii=False, indent=2))
+        return 0
+    print(render_skill_card(wanted, skel, spec, width=width or 118, issues=issues))
+    return 0
+

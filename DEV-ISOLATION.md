@@ -53,7 +53,9 @@ python3 bin/tf -V
 | W1–4 | ✅ 已完成 | `tf schema [技能]`（`--json` / `--strict`） |
 | W5–8 | ✅ 已完成 | `history.jsonl`（采集时自动记录）+ `tf history` |
 | 模板 | ✅ 已完成 | `skill/_template/`（复制即上线，实测零配置被发现） |
-| W9–12 | ⏳ 设计稿 | `result/_cache/` 结果缓存（设计草案见 ROADMAP 第 3.1 节，未实现） |
+| **第二批 P0-3** | ✅ 已完成 | 每步声明式 I/O（`io_schema.steps`）+ `tf skill show` 技能卡片（论文图 2 数据源） |
+| **第二批 P0-2** | ✅ 已完成 | per-step provenance（gen 时自动落档）+ `tf prove`（含 `--verify`） |
+| W9–12 / P0-1/4/5 / P1-6…9 | ⏳ 未做 | 缓存、`tf act` 网关、`tf bench`、筛选报告、session export、评测集——见 ROADMAP 第 5.3 节 |
 
 详见 `V1.0-ROADMAP.md`。
 
@@ -61,12 +63,17 @@ python3 bin/tf -V
 
 ```bash
 cd ~/software/taskflow-v1.0
-python3 tmp/test_v1_skillspec.py     # 30 项：自描述校验 + 纠错库加载/匹配/隔离
-python3 tmp/test_v1_history.py       # 17 项：history 记录/过滤/--since
-python3 tmp/test_v1_correct_cli.py   # 13 项：tf correct / tf diagnose 接入（假数据）
-python3 tmp/tf_smoke.yaml            # 最小配置：只指向仓库自带本地沙盒 test/tf_test
-python3 bin/tf -c tmp/tf_smoke.yaml list      # 主路径冒烟（本地，不 ssh）
-python3 bin/tf -c tmp/tf_smoke.yaml history   # 看历史
+python3 tmp/test_v1_skillspec.py     # 自描述校验 + 每步 I/O + 卡片渲染 + 纠错库匹配/隔离
+python3 tmp/test_v1_history.py       # history 记录/过滤/--since
+python3 tmp/test_v1_correct_cli.py   # tf correct / tf diagnose 接入（假数据）
+python3 tmp/test_v1_prov.py          # provenance：真跑一遍 gen（本地 bash 模式）+ tf prove
+# 只读命令冒烟（都不 ssh）：
+python3 bin/tf skills ; python3 bin/tf skill ; python3 bin/tf schema --strict
+python3 bin/tf skill show kl-mace-gpu        # 技能卡片（论文图 2）
+# 本地沙盒主路径（tmp/tf_smoke.yaml 只指向仓库自带 test/tf_test，不碰真集群）：
+python3 bin/tf -c tmp/tf_smoke.yaml list
+python3 bin/tf -c tmp/tf_smoke.yaml history
 ```
 
-三个测试脚本都是纯本地断言（不连超算、不写项目、不提交作业），失败返回非零。
+四个测试脚本都是纯本地断言（不连超算、不写项目、不提交作业），失败返回非零。
+`tmp/test_v1_prov.py` 会把 hpc 置空走本地 bash，真的执行一次 gen 并检查落档。

@@ -18,7 +18,7 @@
 #   tf -tt kl-mace-gpu -p <材料> -j <步骤> conf --set params.MACE_MODEL=xxx.model
 # 2D 全程把真空方向压 1（超胞倍数、BTE 网格），胞优化时锁死真空方向。
 # =============================================================================
-schema: 1
+schema: 2
 name: kl-mace-gpu
 desc: 晶格热导率(MACE/GPU)
 version: "0.1"
@@ -31,7 +31,7 @@ defaults:
   skill_subdir: true
 
 # 只拉小文件。fc2/fc3.hdf5、kappa-m*.hdf5 动辄上 GB，留在超算。
-fetch_files: [POSCAR, CONTCAR, workflow_method.txt, klmace_params.txt,
+fetch_files: [POSCAR, CONTCAR, workflow_method.txt, klmace_params.txt, provenance.json,
               relax_summary.json, forces_summary.json, phonon_summary.json,
               kappa_summary.json, band-dft-cpu.yaml, BORN, phono3py_disp.yaml,
               phono3py_params.yaml, FORCES_FC3, FORCES_FC2,
@@ -86,3 +86,92 @@ requires:
   # 3090=mace-gpu、a800=mace）。此处 conda 字段仅作展示。
   conda: mace
   exe: [phono3py, ShengBTE]  # phono3py(默认) / ShengBTE(SOLVER=shengbte，见 README)
+# =============================================================================
+# 自描述（schema 2，v1.0）—— io_schema / flow / corrections
+#   只给人和工具看（论文图 2 的技能卡片、tf schema 校验），**不参与运行期装配**。
+#   渲染： tf skill show kl-mace-gpu        机器可读： tf skill show kl-mace-gpu --json
+# =============================================================================
+io_schema:
+  inputs:
+    - {name: POSCAR, from: user, required: true,
+       desc: "原胞初始结构（材料目录根）；GPU 版在登录节点用 MACE 弛豫它"}
+    - {name: MACE_MODEL, from: config, required: true,
+       desc: "势函数（默认 mace-mp:medium，可指到自己的 .model 文件）；力全部由它给出"}
+  outputs:
+    - {name: kappa_summary.json, step: S4_kappa, type: json, desc: "最终产物：κL(T)"}
+    - {name: forces_summary.json, step: S2_force, type: json,
+       desc: "力数据集汇总（帧数、扣残余力、随机种子）"}
+    - {name: FORCES_FC3, step: S2_force, type: text,
+       desc: "超胞位移力数据集（phono3py 格式）；fc2/fc3.hdf5 动辄上 GB，留在超算不拉回"}
+  params:
+    - {name: MACE_MODEL, default: "mace-mp:medium", where: step.conf,
+       desc: "MACE 势：内置名或本地 .model 路径（换势 = 换这一项）"}
+    - {name: DEVICE, values: [cuda, cpu], default: cuda, where: step.conf,
+       desc: "MACE 推理设备（本技能默认 GPU；CPU 版见 kl-mace-cpu）"}
+    - {name: METHOD, values: [random, findiff], default: random, where: step.conf,
+       desc: "random = hiphive MC-rattle 随机位移（默认）；findiff = 对称有限位移"}
+    - {name: N_RANDOM, default: auto, where: step.conf,
+       desc: "随机位移帧数：auto 按 ALM 自由力常数个数反推，也可写死"}
+    - {name: OVERSAMPLE, default: 3, where: step.conf, desc: "随机位移过采样系数"}
+    - {name: DISP_DISTANCE, default: 0.03, where: step.conf,
+       desc: "MC-rattle 目标位移 RMS（Å）；虚频可疑时用 0.01 / 0.05 各跑一次看敏感性"}
+    - {name: RANDOM_SEED, default: 2025, where: step.conf, desc: "MC-rattle 随机种子（可复现）"}
+    - {name: RESIDUAL_TOL, default: 0.002, where: step.conf,
+       desc: "残余力闸（eV/Å）：S1 弛豫后残余力超它就判 FAIL——这才是声子能不能算的真闸门"}
+    - {name: IMAG_THR, default: 0.10, where: step.conf,
+       desc: "虚频闸（THz）：最小频率低于 -IMAG_THR 判不稳定，S4 不启动"}
+    - {name: SOLVER, values: [phono3py, shengbte], default: phono3py, where: step.conf,
+       desc: "BTE 求解器"}
+    - {name: BTE, values: [rta, lbte], default: rta, where: step.conf,
+       desc: "rta = --br（默认，快）；lbte = --lbte 直接解（准，内存 O(N_mode^2)）"}
+    - {name: KAPPA_MESH, default: "24 24 24", where: step.conf,
+       desc: "BTE q 网格（step2 写进 klmace_params 供 step4；2D 自动压真空方向）"}
+  steps:
+    - {step: S1_relax, title: "Relax structure",
+       tool: "MACE (ASE FIRE + FrechetCellFilter + FixSymmetry)",
+       inputs: [POSCAR, MACE_MODEL], outputs: [CONTCAR, relax_summary.json],
+       validator: "relax_summary.json 里 converged 为 true，且残余力 < RESIDUAL_TOL",
+       note: "登录节点跑（不排队）；机器学习势很便宜，力判据比 DFT 紧两个量级（FMAX=1e-4）"}
+    - {step: S2_force, title: "Generate forces",
+       tool: "phono3py 位移生成 + MACE GPU 单点力",
+       inputs: [CONTCAR], outputs: [FORCES_FC3, forces_summary.json, "disp-* 位移结构"],
+       validator: "forces_summary.json 含 FORCES_DONE",
+       note: "与 DFT 版的关键差别：**不扇出**——N 个位移在 GPU 上一个作业里循环算完"}
+    - {step: S3_fc, title: "Fit force constants",
+       tool: "phono3py symfc / Pheasy (GPU 可选)",
+       inputs: [FORCES_FC3], outputs: [fc2.hdf5, fc3.hdf5, phonon_summary.json, "band-dft-cpu.yaml"],
+       validator: "声子判据（虚频闸 IMAG_THR）+ phonon_summary.json marker",
+       note: "登录节点跑；PHEASY_BIN=pheasy-gpu 时用 GPU 拟合，否则 phono3py/symfc（CPU）"}
+    - {step: S4_kappa, title: "Solve transport (BTE)",
+       tool: "phono3py BTE（本步没有 GPU 路径，两版都排 CPU 队列）",
+       inputs: [fc2.hdf5, fc3.hdf5], outputs: [kappa_summary.json, "kappa-m*.hdf5"],
+       validator: "kappa_summary.json 里 KAPPA_DONE 为 true"}
+    - {step: S5_plot, title: "Phonon band plot",
+       tool: "phonopy / phono3py（登录节点，不排队）",
+       inputs: [band-dft-cpu.yaml], outputs: ["phonon_band_full.png", phonon_band_summary.json],
+       validator: "run: gen 步：产物 phonon_band_summary.json 存在即完成",
+       note: "画全范围 + 0~10 THz 低频放大两张（共享脚本 _common/mace/plot_phonon_band.py）"}
+
+flow:
+  summary: "MACE 弛豫胞（登录节点）→ phono3py 位移 + GPU 单点力 → 拟合 fc2/fc3 + 虚频闸（登录节点）→ BTE 解 κL(T)（CPU 队列）→ 声子谱出图"
+  stages:
+    - {name: "弛豫", steps: [S1_relax], produces: [CONTCAR, relax_summary.json],
+       desc: "ASE + MACE 弛豫并锁对称性；残余力闸决定后面能不能算声子"}
+    - {name: "力数据集", steps: [S2_force], produces: [FORCES_FC3],
+       desc: "一个 GPU 作业算完全部位移力（不扇出，省调度开销）"}
+    - {name: "力常数", steps: [S3_fc], produces: [fc2.hdf5, fc3.hdf5, band-dft-cpu.yaml],
+       desc: "拟合力常数 → 声子谱 → 虚频闸；同时产出 band-dft-cpu.yaml 给后续画带"}
+    - {name: "输运", steps: [S4_kappa], produces: [kappa_summary.json],
+       desc: "phono3py 解 BTE 得 κL(T)；此步走 CPU 队列"}
+    - {name: "出图", steps: [S5_plot], produces: ["phonon_band_full.png"],
+       desc: "声子谱绘图（登录节点，秒级）"}
+  next_skills:
+    - {skill: te-screen, via: kappa_summary.json, desc: "κL 进 zT 热电筛选"}
+    - {skill: kl-mace-cpu, via: POSCAR, desc: "同一物理链的 CPU 版（换机器/换后端对照）"}
+  requires:
+    POSCAR: "材料目录根必须有 POSCAR"
+    python: "mace-torch / torch / phonopy / phono3py / symfc / pheasy（见文件末尾 requires:）"
+
+# 本技能实际会遇到、且 skill/_common/_corrections/ 里已有对策的失败类型
+# （MACE 版没有 VASP，scf/zbrent 类纠错不适用）
+corrections: [node_fail, dir_missing]

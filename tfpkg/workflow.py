@@ -516,7 +516,9 @@ def render_vasp_template(text, filename, step_name, profiles):
 
 
 def remote_gen(cfg, t, m, sname, host=None, wd=None):
-    from tfpkg import STEP_CONF, build_step_conf, find_asset, run_remote, sh_b64, step_cfg
+    from tfpkg import (PROV_DIR, PROV_NAME, STEP_CONF, build_gen_provenance,
+                       build_step_conf, find_asset, provenance_enabled, run_remote,
+                       sh_b64, step_cfg)
     """执行 gen：先建目录、补 POSCAR（v3 本地模式）和 gen_need 依赖文件、gen 脚本，
     再运行。文件来源：find_asset 查找链（project_setting > skill_dir，支持
     template_map 映射，本地 base64 经 ssh 推送，超算无需存放）> gen_dir
@@ -557,12 +559,17 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
                 need.append(lg)
     line = "mkdir -p %s && cd %s && " % (shlex.quote(step_dir),
                                          shlex.quote(step_dir))
+    prov_files = {}   # v1.0：这一步推送了哪些文件（名字 → sha256/来源），写 provenance.json
     if is_py:  # gen 脚本以 skill 为唯一样板：总是覆盖推送（本地改了立即生效）
         gsrc = find_asset(cfg, t, m, gen_script, sname)
         if gsrc:
             with open(gsrc, "rb") as fh:
-                gb64 = base64.b64encode(fh.read()).decode()
+                _gdata = fh.read()
+            gb64 = base64.b64encode(_gdata).decode()
             line += "echo %s | base64 -d > %s ; " % (gb64, shlex.quote(gen_script))
+            prov_files[gen_script] = {"sha256": hashlib.sha256(_gdata).hexdigest(),
+                                      "source": gsrc, "origin": "skill",
+                                      "args": gen_args or None}
         else:
             need = need + [gen_script]  # 本地找不到 → gen_dir 远端兜底
     lp = m.get("lpath")
@@ -570,8 +577,11 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
         pos = os.path.join(lp, "POSCAR")
         if os.path.isfile(pos):
             with open(pos, "rb") as fh:
-                b64 = base64.b64encode(fh.read()).decode()
+                _pdata = fh.read()
+            b64 = base64.b64encode(_pdata).decode()
             line += "[ -f POSCAR ] || echo %s | base64 -d > POSCAR ; " % b64
+            prov_files["POSCAR"] = {"sha256": hashlib.sha256(_pdata).hexdigest(),
+                                    "source": pos, "origin": "project"}
     for f in need:
         if f == STEP_CONF:      # v1.9：step.conf 不按单文件推，先本地合并分层
             text, _lg = build_step_conf(cfg, t, m, sname)
@@ -580,6 +590,8 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
                                "project_setting/templates 都没有）" % STEP_CONF)
             b64 = base64.b64encode(text.encode("utf-8")).decode()
             line += "echo %s | base64 -d > %s ; " % (b64, shlex.quote(f))
+            prov_files[f] = {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                             "source": None, "origin": "merged(step.conf)"}
             continue
         local_src = find_asset(cfg, t, m, f, sname)
         if local_src:
@@ -607,6 +619,13 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
                      "cut -d' ' -f1)\" = %s ] || echo %s | base64 -d > %s ; "
                      % (shlex.quote(f), shlex.quote(f), lmd5,
                         b64, shlex.quote(f)))
+            prov_files[f] = {"sha256": hashlib.sha256(data).hexdigest(),
+                             "source": local_src,
+                             "origin": ("project"
+                                        if (m.get("ps") or {}).get("dir")
+                                        and str(local_src).startswith(
+                                            str(((m.get("ps") or {}).get("dir"))))
+                                        else "skill")}
         elif gd:
             line += ("[ -f %s ] || { [ -f %s ] && cp %s . || "
                      "{ echo 'ERROR: gen_dir 里缺少 %s' >&2; exit 1; }; }; "
@@ -615,6 +634,26 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
         else:
             return False, ("project_setting/skill_dir 里缺少 %s，"
                            "且未配置 gen_dir 兜底" % f)
+    # v1.0：把本步"输入指纹"档案推到远端（<材料>/provenance/<步骤>.json，
+    # 另追加一行到 provenance/history.jsonl 作时间线）。放 provenance/ 子目录是
+    # 为了让每一步各留一份、互不覆盖（gen 的 cwd 是材料目录，不是步骤目录）。
+    # 只加不减：任何异常都吞掉——档案绝不阻断计算。开关见 prov.provenance_enabled。
+    try:
+        from tfpkg import build_gen_provenance, provenance_enabled
+        if provenance_enabled(cfg):
+            _arg = dict(files=prov_files, host=host, gen_script=gen_script,
+                        step_dir=step_dir)
+            _pretty = build_gen_provenance(cfg, t, m, sname, **_arg)
+            _oneline = build_gen_provenance(cfg, t, m, sname, compact=True, **_arg)
+            _rel = os.path.join(PROV_DIR, "%s.json" % sname)
+            line += "mkdir -p %s && echo %s | base64 -d > %s ; " % (
+                shlex.quote(PROV_DIR),
+                base64.b64encode(_pretty.encode("utf-8")).decode(), shlex.quote(_rel))
+            line += "echo %s | base64 -d >> %s ; " % (
+                base64.b64encode((_oneline + "\n").encode("utf-8")).decode(),
+                shlex.quote(os.path.join(PROV_DIR, "history.jsonl")))
+    except Exception as _pe:   # noqa: BLE001
+        print("警告：provenance 记录失败（不影响本次 gen）：%s" % _pe, file=sys.stderr)
     if is_py:
         line += "python %s%s" % (shlex.quote(gen_script),
                                  (" " + gen_args) if gen_args else "")

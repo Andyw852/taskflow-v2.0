@@ -103,7 +103,7 @@ def normalize_monitor_command(command, positional, restart=False):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_correct, cmd_correct_usage, cmd_history, history_record
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_skill_show, cmd_correct, cmd_correct_usage, cmd_history, history_record, cmd_prove
     if "--help-all" in sys.argv[1:]:
         print(USAGE)
         return
@@ -173,6 +173,8 @@ def main():
                    help="list/summary/status/dir 以 JSON 输出（机器可读）")
     p.add_argument("--schema", dest="schema", action="store_true",
                    help="json：打印字段 schema 说明")
+    p.add_argument("--verify", dest="verify", action="store_true",
+                   help="prove：逐份校验输入的 sha256 是否与档案一致")
     p.add_argument("--strict", dest="strict", action="store_true",
                    help="schema：自描述有 [错误] 级问题时返回非零（CI/检查用）")
     p.add_argument("--since", dest="since", metavar="时间",
@@ -208,7 +210,7 @@ def main():
                 "hpc", "skills", "conf", "level", "diagnose", "probe", "push",
                 # v1.0（加技能友好化）：schema = 看技能自描述（io_schema/flow/corrections）
                 #                      correct = 把 FAIL 诊断喂给 _corrections/ handler 库
-                "schema", "correct", "history"}
+                "schema", "skill", "correct", "history", "prove"}
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -280,6 +282,13 @@ def main():
         # 技能名既可用 -tt，也可直接当位置参数写：tf schema band-dft-cpu
         _which = a.tt or (mat_toks[0] if mat_toks else None)
         sys.exit(cmd_schema(cfg, tt=_which, json_out=a.json_out, strict=a.strict))
+    if cmd == "skill":   # v1.0：技能卡片（论文图 2 的机器可读来源；纯本地）
+        # tf skill show <技能> / tf skill show -tt <技能> / tf skill <技能> / tf skill
+        _args = list(mat_toks)
+        if _args and _args[0] in ("show", "list"):
+            _args.pop(0)
+        sys.exit(cmd_skill_show(cfg, which=a.tt or (_args[0] if _args else None),
+                                json_out=a.json_out))
     if cmd == "history" and not a.hist_write:
         # v1.0：直接读 history.jsonl（不采集、不连超算、不提交）。
         # 记录是自动的——任何一次真正采集都会追加；--write 时才先采集一轮再读。
@@ -504,6 +513,14 @@ def main():
         for pj in projs:
             _fails += cmd_correct(cfg, data, pj, jobs[0], yes=a.yes, dry=a.dry)
         sys.exit(1 if _fails else 0)
+    if cmd == "prove":   # v1.0：看这一步"结果是怎么来的"（只读本地档案，不提交）
+        if not projs:
+            sys.exit("错误：prove 需要 -p 材料（如 tf -p C24/qHPC24 prove）。")
+        _rc = 0
+        for pj in projs:
+            _rc |= cmd_prove(cfg, data, pj, jobs[0], json_out=a.json_out,
+                             verify=a.verify)
+        sys.exit(_rc)
     if cmd == "summary":   # 只读极简汇总；不 auto_fetch/auto_advance（绝不提交）
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)

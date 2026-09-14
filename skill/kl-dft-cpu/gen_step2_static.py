@@ -68,6 +68,18 @@ def main():
     stepconf.apply_submit(out / "submit.sh", conf.submit)
     print("[DONE] %s：静态自洽输入就绪" % OUTDIR)
 
+    # v1.0：把本步的工具版本/产物指纹并入 provenance.json（tf 已写输入指纹那份）。
+    # 公共池模块，可选：没推过去就跳过，绝不影响计算。
+    try:
+        import provenance_common as P
+        P.record(step=OUTDIR, skill="kl-dft-cpu",
+                 inputs=["POSCAR", str(out / "INCAR"), str(out / "KPOINTS"),
+                         str(out / "POTCAR"), str(out / "submit.sh")],
+                 outputs=[], tools=["vasp", "vaspkit"],
+                 note="静态自洽输入生成（vaspkit 出 KPOINTS/POTCAR）")
+    except Exception as _e:      # noqa: BLE001
+        print("[provenance] 跳过（%s）" % _e)
+
 
 if __name__ == "__main__":
     main()

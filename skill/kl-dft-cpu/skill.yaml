@@ -19,7 +19,7 @@
 # 模板 per_step：templates/<步骤名>/{incar_*,submit_*}.tpl，缺则回落 templates/ 根。
 # 2D 全程把真空方向压 1（超胞倍数、K 网格、BTE 网格）。
 # =============================================================================
-schema: 1
+schema: 2
 name: kl-dft-cpu
 desc: 晶格热导率(DFT/CPU)
 version: "0.2"
@@ -34,7 +34,7 @@ defaults:
 
 # 各步关键输入/输出拉回本地；扇出 S4 只拉汇总，S5/S6 用 fetch_all 整目录拉回。
 fetch_files: [POSCAR, CONTCAR, INCAR, KPOINTS, POTCAR, submit.sh, OUTCAR,
-              vasprun.xml, workflow_method.txt, kl_params.txt, BORN,
+              vasprun.xml, workflow_method.txt, kl_params.txt, BORN, provenance.json,
               phono3py_disp.yaml, fc2.hdf5, fc3.hdf5, band-dft-cpu.yaml,
               phonon_summary.json, kappa_summary.json,
               phono3py_kappa.log, queue.out, queue.err]
@@ -48,8 +48,9 @@ steps:
 
   - {seq: 2, name: step2_static, label: S2_static, check: outcar,
      gen: gen_step2_static.py,
+     # provenance_common.py（v1.0）：公共池的 provenance 补写器，gen 脚本可选调用
      gen_need: [dim_common.py, stepconf.py, step.conf, kl_common.py,
-                check_common.py, step2_check_and_resubmit.py,
+                check_common.py, step2_check_and_resubmit.py, provenance_common.py,
                 incar_2d.tpl, incar_3d.tpl, submit_std_2d.tpl, submit_std_3d.tpl]}
 
   - {seq: 4, name: step4_disp, label: S4_disp, check: outcar, fanout: "disp-*",
@@ -99,3 +100,95 @@ requires:
   python: [phonopy, phono3py, numpy, spglib]
   conda: atomate2_p_a
   exe: [vasp_std, vaspkit, phono3py]
+# =============================================================================
+# 自描述（schema 2，v1.0）—— io_schema / flow / corrections
+#   只给人和工具看（论文图 2 的技能卡片、tf schema 校验），**不参与运行期装配**：
+#   写错只会让 tf schema 报错，不影响任何计算行为。
+#   渲染： tf skill show kl-dft-cpu        机器可读： tf skill show kl-dft-cpu --json
+# =============================================================================
+io_schema:
+  inputs:
+    - {name: POSCAR, from: user, required: true,
+       desc: "原胞初始结构（材料目录根）。胞由本技能 S1_opt 自己弛豫，不需要预优化"}
+  outputs:
+    - {name: kappa_summary.json, step: S6_kappa, type: json,
+       desc: "最终产物：κL(T) 及各向异性/收敛信息"}
+    - {name: fc2.hdf5, step: S5_fc, type: hdf5, desc: "二阶力常数（声子谱与 BTE 都要）"}
+    - {name: fc3.hdf5, step: S5_fc, type: hdf5, desc: "三阶力常数（BTE 本征散射）"}
+    - {name: BORN, step: S3_nac, type: text,
+       desc: "介电张量 + Born 有效电荷（LO-TO 劈裂）；关掉 nac 步组时没有这个产物"}
+  params:
+    - {name: METHOD, values: [alm, findiff], default: alm, where: step.conf,
+       desc: "位移生成方式：alm = 随机位移+压缩感知（帧数少）；findiff = phono3py 对称有限位移"}
+    - {name: FIT_ENGINE, values: [phono3py, pheasy], default: phono3py, where: step.conf,
+       desc: "力常数拟合引擎；pheasy 需要 METHOD=alm（随机位移压缩感知）"}
+    - {name: FC_CALC, values: [symfc, alm], default: symfc, where: step.conf,
+       desc: "phono3py 的拟合后端：symfc（对称性约束）或 alm"}
+    - {name: SOLVER, values: [phono3py, shengbte], default: phono3py, where: step.conf,
+       desc: "BTE 求解器（shengbte 走 FORCE_CONSTANTS_2ND/3RD 双格式导出）"}
+    - {name: BTE_METHOD, values: [rta, lbte], default: rta, where: step.conf,
+       desc: "单模弛豫时间近似（快）或直接解线性化 BTE（准，内存 O(N_mode^2)）"}
+    - {name: KAPPA_MESH, default: "15 15 15", where: step.conf,
+       desc: "BTE q 网格（2D 自动把真空方向压 1）"}
+    - {name: IMAG_THR, default: 0.10, where: step.conf,
+       desc: "虚频闸（THz）：最小频率低于 -IMAG_THR 判结构不稳定，S6_kappa 不启动"}
+    - {name: MAX_DISP, default: 500, where: step.conf,
+       desc: "位移帧数硬闸：超过就报错停步（防超胞设太大白烧机时）"}
+    - {name: OVERSAMPLE, default: 3, where: step.conf,
+       desc: "随机位移过采样系数（帧数 = ALM 自由力常数个数 × 它）"}
+  steps:
+    - {step: S1_opt, title: "Relax structure",
+       tool: "VASP (vasp_std) · relax_common 三段式",
+       inputs: [POSCAR], outputs: [CONTCAR],
+       validator: "力/能量收敛（relax_injob：逐段判 reached required accuracy）",
+       note: "与 band/elastic/ke/opt 系列共用同一份弛豫策略，保证跨技能可比"}
+    - {step: S2_static, title: "Static SCF (reference cell)",
+       tool: "VASP (vasp_std)", inputs: [CONTCAR], outputs: [OUTCAR, vasprun.xml],
+       validator: "OUTCAR 自洽完成（check: outcar）",
+       note: "顺带判金属/带隙；金属建议关掉 nac 步组（DFPT 介电在金属上发散）"}
+    - {step: S3_nac, title: "NAC / DFPT dielectric",
+       tool: "VASP (LEPSILON DFPT)", inputs: [CONTCAR], outputs: [BORN, OUTCAR],
+       validator: "OUTCAR 含 MACROSCOPIC STATIC DIELECTRIC TENSOR",
+       note: "可选步组 nac（默认开）；无极性/金属体系在项目配置写 nac 关闭"}
+    - {step: S4_disp, title: "Generate forces",
+       tool: "VASP (vasp_std 超胞单点) · phono3py 位移 / ALM MC-rattle",
+       inputs: [CONTCAR], outputs: ["disp-* 力数据集", phono3py_disp.yaml],
+       validator: "扇出判据：每个 disp-* 子目录的 OUTCAR 全部完成（表格显示 3/5 这样的进度）",
+       note: "method=findiff 走对称有限位移；alm 走随机位移，帧数由自由力常数个数 × OVERSAMPLE 定"}
+    - {step: S5_fc, title: "Fit force constants",
+       tool: "phono3py symfc / ALM · Pheasy (CPU)",
+       inputs: ["disp-* 力数据集"], outputs: [fc2.hdf5, fc3.hdf5, phonon_summary.json],
+       validator: "声子判据（虚频闸 IMAG_THR）+ phonon_summary.json marker",
+       note: "在计算节点作业里做：收力 → 拟合 → 双格式导出 → 虚频闸；FAIL 则 S6 不启动"}
+    - {step: S5.1_plot, title: "Phonon band plot",
+       tool: "phonopy / phono3py（登录节点跑，不排队）",
+       inputs: [fc2.hdf5, BORN], outputs: [phonon_band.png, phonon_plot_summary.json],
+       validator: "run: gen 步：产物 phonon_plot_summary.json 存在即完成"}
+    - {step: S6_kappa, title: "Solve transport (BTE)",
+       tool: "phono3py RTA/LBTE · ShengBTE",
+       inputs: [fc2.hdf5, fc3.hdf5, BORN], outputs: [kappa_summary.json, "kappa-m*.hdf5"],
+       validator: "kappa_summary.json 里 KAPPA_DONE 为 true"}
+
+flow:
+  summary: "弛豫胞 → 静态自洽（判金属）→ [NAC 介电/Born] → 超胞位移取力 → 拟合 fc2/fc3（虚频闸）→ BTE 解 κL(T)"
+  stages:
+    - {name: "弛豫", steps: [S1_opt], produces: [CONTCAR],
+       desc: "结构优化到力收敛；后续每一步都用这个胞"}
+    - {name: "参考态", steps: [S2_static, S3_nac], produces: [OUTCAR, BORN],
+       desc: "静态自洽给可比总能并判金属；NAC 步给介电张量与 Born 电荷"}
+    - {name: "力数据集", steps: [S4_disp], produces: ["disp-* 力数据集"],
+       desc: "建超胞、按 METHOD 生成位移，每帧一个 disp-* 子目录并行单点取力（扇出步）"}
+    - {name: "力常数", steps: [S5_fc], produces: [fc2.hdf5, fc3.hdf5],
+       desc: "拟合二阶/三阶力常数并导出 phono3py + ShengBTE 两种格式；虚频超阈判不稳定"}
+    - {name: "输运", steps: [S6_kappa], produces: [kappa_summary.json], desc: "BTE 求 κL(T)"}
+    - {name: "出图", steps: [S5.1_plot], produces: [phonon_band.png],
+       desc: "声子谱绘图（登录节点，秒级）"}
+  next_skills:
+    - {skill: te-screen, via: kappa_summary.json,
+       desc: "κL 与电输运一起进 zT 热电筛选"}
+  requires:
+    POSCAR: "材料目录根必须有 POSCAR"
+    exe: "phono3py / vasp_std / vaspkit（见文件末尾的 requires: 段）"
+
+# 本技能实际会遇到、且 skill/_common/_corrections/ 里已有对策的失败类型
+corrections: [zbrent, nsw_continue, node_fail, dir_missing]

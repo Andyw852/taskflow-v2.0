@@ -38,10 +38,11 @@ from . import (  # noqa: E402
     #                  校验与 tf schema 渲染（建议 1.2 / 1.3）
     #   corrections —— _corrections/ 纠错 handler 库的加载、匹配与 tf correct（建议 1.1）
     #   history     —— 步骤状态的时间序列（history.jsonl）+ tf history（W5–8）
-    skillspec, corrections, history,
+    #   prov        —— 每步 provenance.json（输入 sha256 / 参数 / 工具版本）+ tf prove
+    skillspec, corrections, history, prov,
 )
 _MODULES = (bootstrap, collect, data, workflow, report, ops, cli, yamlmini,
-            skillspec, corrections, history)
+            skillspec, corrections, history, prov)
 
 # 把各模块的名字注入包命名空间（排除 dunder 与标准库名）。
 _STDLIB_NAMES = {

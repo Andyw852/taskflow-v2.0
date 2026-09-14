@@ -258,12 +258,16 @@ QUICK_USAGE = """\
   hpc 集群           切换指定项目集群（需 -p）
   init / skills      初始化项目 / 查看技能
 
-技能自描述（v1.0，全部只读）：
+技能自描述与可追溯（v1.0，全部只读）：
+  skill [show] [技能] 技能卡片：每步 生成器/工具/判据/产物（论文图 2 那种）
+                      （--json 机器可读；不给技能名=列出全部技能一行摘要）
   schema [技能]      看技能吃什么/吐什么/有哪些旋钮/能接谁/怎么纠错
                      （--json 机器可读，--strict 有错误返回非零）
   correct -p 材料    把 FAIL 诊断喂给 _corrections/ 纠错 handler 库，
                      列出建议；-y 才执行 handler.apply（只改输入文件、不提交）
   history [-p 材料]  步骤状态的时间序列（history.jsonl，采集时自动记录）
+  prove -p 材料      这一步"结果怎么来的"：输入 sha256 / step.conf 参数 /
+                     工具版本 / 作业号（gen 时自动落档，--verify 校验输入没被改）
 
 旧命令和别名继续兼容。高级命令、全部参数及示例：tf --help-all
 注意：status/auto/monitor 可提交作业；只看状态用 summary 或 list。
@@ -297,6 +301,19 @@ USAGE = """\
             tf history [-p 材料] [-tt 技能] [--since 7d] [-n 40] [--json]
             记录是**自动**的：任何一次真正采集（tf list/summary/status/monitor）
             之后，状态转移就追加进 setting/history.jsonl；任何技能加进来就自动有历史。
+  skill     技能卡片（v1.0，只读、纯本地）：tf skill [show] [技能名] [--json]
+            把技能渲染成一张卡片：每步的 生成器脚本 / 用什么算(Tool) / 判据(Validator)
+            / 产物(Output)，外加输入、可调参数、能接哪些下游技能、纠错 handler。
+            数据来自 skill.yaml 的 steps[] + io_schema.steps[]（见 skill/_template/）。
+            不给技能名 = 全部技能一行摘要（含工具链）。写论文的图 2 可以直接用它。
+  prove     每一步"结果是怎么来的"（v1.0，只读、读本地档案）：
+            tf prove -p 材料 [-j 步骤] [--json] [--verify]
+            gen 生成输入时 tf 会自动把该步档案写到 <材料>/provenance/<步骤>.json
+            （输入文件 sha256、step.conf 合并后的参数、hpc/远端路径、生成器脚本 sha），
+            并在 provenance/history.jsonl 留一行时间线；脚本侧可用公共池的
+            provenance_common.py 再补工具版本/产物/作业号。随 fetch 回拉本地后
+            用本命令查看；--verify 重算 sha256 校验"输入有没有被改过"。
+            整体开关：tf.yaml 的 provenance: false 或环境变量 TF_PROVENANCE=0。
   start     开始/提交：输入没生成先 gen 再 sbatch。无 -p = 一键推进全部材料。
             init/retry/rerun 只生成不提交；status/auto/monitor 开自动推进时也会提交
   stop      取消作业。无 -p = 一键停止全部作业（有确认）；-p = 该材料全部作业；-p -job = 指定步骤。
