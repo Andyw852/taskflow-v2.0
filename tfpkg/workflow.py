@@ -582,6 +582,19 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
             line += "[ -f POSCAR ] || echo %s | base64 -d > POSCAR ; " % b64
             prov_files["POSCAR"] = {"sha256": hashlib.sha256(_pdata).hexdigest(),
                                     "source": pos, "origin": "project"}
+    # v1.0：公共模块带依赖——被推送的 _common/<组>/X.py 若 import 了**同目录**的
+    # 兄弟模块，而清单里没写它，就自动补推。动机：2026-09-08 往 _common/opt/ 加了
+    # method_select.py 并让 relax_common.py import 它，但 5 个技能的 gen_need 都没
+    # 声明 → 永远推不到超算 → 任何新材料首次 gen 直接 ModuleNotFoundError（retry
+    # 也救不回来）。这类"公共池加文件忘改清单"今后自动兜住。
+    # 只做【补】不做【减】：清单写了什么照推；同名文件技能目录优先（与 find_asset
+    # 一致），所以技能自带的同名模块不会被公共池的覆盖。
+    # 开关：tf.yaml 的 common_autodeps: false（或缺省时 TF_COMMON_AUTODEPS=0）。
+    try:
+        if common_autodeps_enabled(cfg):
+            need = list(need) + _common_dep_closure(cfg, t, m, list(need), sname)
+    except Exception as _cd:      # noqa: BLE001 —— 保守兜底绝不阻断 gen
+        print("警告：公共模块依赖补全失败（按原清单继续）：%s" % _cd, file=sys.stderr)
     for f in need:
         if f == STEP_CONF:      # v1.9：step.conf 不按单文件推，先本地合并分层
             text, _lg = build_step_conf(cfg, t, m, sname)
@@ -1787,6 +1800,104 @@ def auto_fetch(cfg, data):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(4, len(pending))) as ex:
             list(ex.map(one, pending))
+
+# ===== v1.0 公共模块依赖补全（common_autodeps）=====
+def common_autodeps_enabled(cfg):
+    """公共模块自动带依赖：默认开；tf.yaml 写 common_autodeps: false 关闭，
+    或用环境变量 TF_COMMON_AUTODEPS=0 临时关。"""
+    env = os.environ.get("TF_COMMON_AUTODEPS")
+    if env is not None:
+        return str(env).strip().lower() not in ("0", "false", "no", "off")
+    val = (cfg or {}).get("common_autodeps")
+    if val is None:
+        return True
+    return str(val).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _py_sibling_imports(path):
+    """一个 .py 里 import 的同目录模块名 -> 该模块文件路径。
+
+    只认顶层 import（缩进 0 的 import/from），兼容 try/except 包裹（缩进 4 的）
+    与函数内 import（缩进 8）；相对 import（from . import x）跳过——那是包内引用，
+    公共池是平铺目录，不用它。"""
+    names = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    pat = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w]*)\s+import|import\s+([A-Za-z_][\w.]*))",
+                     re.M)
+    for m_ in pat.finditer(text):
+        mod = (m_.group(1) or m_.group(2) or "").strip()
+        if not mod or mod.startswith("."):
+            continue
+        names.add(mod.split(".")[0])
+    out = {}
+    d = os.path.dirname(path)
+    for n in sorted(names):
+        p = os.path.join(d, n + ".py")
+        if os.path.isfile(p):
+            out[n] = p
+    return out
+
+
+def _common_pool_roots(cfg):
+    """所有技能搜索根下的 _common/ 目录（可能不止一个）。"""
+    from tfpkg import COMMON_POOL_DIR, skill_search_dirs
+    out = []
+    for root in skill_search_dirs(cfg or {}):
+        c = os.path.normpath(os.path.join(root, COMMON_POOL_DIR))
+        if os.path.isdir(c):
+            out.append(c)
+    return out
+
+
+def _in_common_pool(path, pools):
+    """这个文件是不是公共池里的（_common/ 本身或它的子目录，如 _common/opt/）。"""
+    d = os.path.normpath(os.path.dirname(os.path.abspath(path)))
+    for pool in pools or ():
+        if d == pool or d.startswith(pool + os.sep):
+            return True
+    return False
+
+
+def _common_dep_closure(cfg, t, m, need, sname=None):
+    """补全清单：[files...] -> 追加"被推送的公共池 .py 的同目录依赖"。
+
+    技能目录里已有同名文件时不补（与 find_asset 的技能优先一致）。返回追加的
+    文件名列表（去重、保序）。"""
+    from tfpkg import find_asset
+    # 技能搜索根可能有多个（./skill、tf.yaml 的 skill_paths、配置目录旁的 skill、
+    # 包根 skill）；逐个找 _common/，找到哪个就算哪个——单测里就靠这个用小树跑。
+    pools = _common_pool_roots(cfg)
+    declared = set()
+    for x in need:
+        declared.add(str(x))
+    queue, seen, extra = [], set(), []
+    for f in list(need):
+        if not str(f).endswith(".py"):
+            continue
+        p = find_asset(cfg, t, m, f, sname)
+        # 只收公共池里的文件（技能目录里的模块由技能自己负责声明）
+        if p and _in_common_pool(p, pools):
+            queue.append(p)
+    while queue:
+        p = queue.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        for mod, sp in _py_sibling_imports(p).items():
+            fname = os.path.basename(sp)
+            if fname in declared or fname in extra:
+                continue
+            # 技能目录（含项目覆盖）里有同名文件 -> 让它按正常优先级命中，不补推
+            if find_asset(cfg, t, m, fname, sname) not in (None, sp):
+                continue
+            extra.append(fname)
+            queue.append(sp)
+    return extra
+
 
 # ===== cmd_fetch (原 L5256-L5269) =====
 def cmd_fetch(cfg, data, mname, all_files=False):
