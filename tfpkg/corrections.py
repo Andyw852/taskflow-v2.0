@@ -303,7 +303,7 @@ def cmd_correct(cfg, data, proj, job=None, yes=False, dry=False):
     from tfpkg import find_material, find_step, _add_diag_codes
     _add_diag_codes(data)
     t, m = find_material(data, proj)
-    if m is None:
+    if m is None or t is None:
         print("错误：找不到材料 %s。" % proj)
         return 1
     if job:

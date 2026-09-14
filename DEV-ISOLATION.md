@@ -42,12 +42,31 @@ python3 bin/tf -V
 
 `~/.local/bin/tf` **仍指向旧仓库 `~/software/taskflow/versions/v1.0/tf`**，未被本副本改动。
 
-## 3. 本副本要做什么（v1.0 加技能友好化）
+## 3. 本副本做了什么（v1.0 加技能友好化）
 
-| 计划 | 内容 |
-|---|---|
-| W1–4 | `io_schema` 段 + `tf schema <skill>`；技能零配置自动发现收尾 |
-| W5–8 | `flow` 段（技能自描述流程）+ `_corrections/` handler 库 |
-| W9–12 | `history.jsonl` + `tf history <MAT>`；`result/_cache/` 缓存 |
+| 计划 | 状态 | 内容 |
+|---|---|---|
+| 建议 1.3 | ✅ 已完成 | `io_schema` 段（技能自报吃什么/吐什么/有哪些旋钮）+ 校验 |
+| 建议 1.2 | ✅ 已完成 | `flow` 段（整条流程 + 产物能喂给谁） |
+| 建议 1.1 | ✅ 已完成 | `_corrections/` handler 库（base + 4 handler + `tf correct`） |
+| 建议 3.1 | ✅ 已完成 | 零配置自动发现已在，本次补齐自描述的自动校验/展示 |
+| W1–4 | ✅ 已完成 | `tf schema [技能]`（`--json` / `--strict`） |
+| W5–8 | ✅ 已完成 | `history.jsonl`（采集时自动记录）+ `tf history` |
+| 模板 | ✅ 已完成 | `skill/_template/`（复制即上线，实测零配置被发现） |
+| W9–12 | ⏳ 设计稿 | `result/_cache/` 结果缓存（设计草案见 ROADMAP 第 3.1 节，未实现） |
 
 详见 `V1.0-ROADMAP.md`。
+
+## 4. 离线自测（不碰集群，随时可跑）
+
+```bash
+cd ~/software/taskflow-v1.0
+python3 tmp/test_v1_skillspec.py     # 30 项：自描述校验 + 纠错库加载/匹配/隔离
+python3 tmp/test_v1_history.py       # 17 项：history 记录/过滤/--since
+python3 tmp/test_v1_correct_cli.py   # 13 项：tf correct / tf diagnose 接入（假数据）
+python3 tmp/tf_smoke.yaml            # 最小配置：只指向仓库自带本地沙盒 test/tf_test
+python3 bin/tf -c tmp/tf_smoke.yaml list      # 主路径冒烟（本地，不 ssh）
+python3 bin/tf -c tmp/tf_smoke.yaml history   # 看历史
+```
+
+三个测试脚本都是纯本地断言（不连超算、不写项目、不提交作业），失败返回非零。
