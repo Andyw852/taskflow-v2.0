@@ -198,8 +198,18 @@ def record(step=None, skill=None, inputs=(), outputs=(), tools=(), extra=None,
 
         ins = prov.setdefault("inputs", {})
         for f in (inputs or []):
-            if os.path.isfile(f) or True:      # 名字可以是文件或产物名
-                ins[str(f)] = _file_entry(f)
+            # tf 基底里已经有这条时【不覆盖】它：基底记的是"从哪来、推过去的是哪份"
+            # （source / origin / src_sha256 / rendered），比我们现场再哈希一遍有用；
+            # 我们只把自己看到的现状挂到 post_gen 下——两者不同恰好说明
+            # "gen 脚本就地改过这个文件"（如 POSCAR 被原胞化），是有价值的信息。
+            name = str(f)
+            mine = _file_entry(f)
+            old = ins.get(name)
+            if isinstance(old, dict) and old.get("sha256"):
+                if old.get("sha256") != mine.get("sha256"):
+                    old["post_gen"] = mine
+            else:
+                ins[name] = mine
         outs = prov.setdefault("outputs", {})
         for f in (outputs or []):
             outs[str(f)] = _file_entry(f)

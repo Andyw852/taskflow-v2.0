@@ -597,6 +597,7 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
         if local_src:
             with open(local_src, "rb") as fh:
                 data = fh.read()
+            _raw = data          # 渲染前的本地原文（下面可能要按集群渲染）
             if re.fullmatch(r"submit_(std|gam|ncl)_(0d|2d|3d)\.tpl", f):
                 from tfpkg import pkg_setting_path, _load_yaml_file
                 cluster = str(sc.get("hpc") or m.get("hpc_name") or host)
@@ -619,7 +620,12 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
                      "cut -d' ' -f1)\" = %s ] || echo %s | base64 -d > %s ; "
                      % (shlex.quote(f), shlex.quote(f), lmd5,
                         b64, shlex.quote(f)))
+            # sha256 = 真正推到超算的那份内容；src_sha256 = 本地源文件本身的
+            # 哈希（提交模板会被按集群渲染成另一份，两者不同——tf prove --verify
+            # 要拿 src_sha256 去比"我本地的模板后来有没有被改过"）。
             prov_files[f] = {"sha256": hashlib.sha256(data).hexdigest(),
+                             "src_sha256": hashlib.sha256(_raw).hexdigest(),
+                             "rendered": _raw != data,
                              "source": local_src,
                              "origin": ("project"
                                         if (m.get("ps") or {}).get("dir")
@@ -1664,7 +1670,7 @@ def _fetch_receipt_write(cfg, m, s):
 
 def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False,
                    force_steps=None, fetch_files_override=None):
-    from tfpkg import FETCH_STAMP, _ssh_cmd, log_action
+    from tfpkg import FETCH_STAMP, PROV_DIR, _ssh_cmd, log_action
     """把该材料各已存在步骤的 fetch_files 从超算拉回本地 result_dir/<step>/。
     用 tar 管道流式传输，缺失文件自动跳过。only_steps = 只拉这些步骤名。"""
     host = m.get("host_eff") or cfg.get("host")
@@ -1707,6 +1713,16 @@ def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False,
             return False
         _fetch_receipt_write(cfg, m, s)
         nstep += 1
+    # v1.0：顺带把 <材料>/provenance/（每步档案 + 时间线，几 KB）拉回
+    # result/provenance/，这样 tf prove 不用额外手动 fetch 就能读到。
+    # 本地还没有就拉一次（老项目第一次采集时补上；之后只在真回拉步骤时刷新）。
+    _prov_local = os.path.join(m.get("result_dir") or "", PROV_DIR)
+    if nstep or (m.get("result_dir") and not os.path.isdir(_prov_local)):
+        try:
+            from tfpkg import fetch_provenance_dir
+            fetch_provenance_dir(cfg, m, quiet=True)
+        except Exception:      # noqa: BLE001
+            pass
     if nstep and not quiet:
         print("%s: 已拉回 %d 个步骤 → %s" % (m["name"], nstep, m["result_dir"]))
     if nstep:
@@ -1715,7 +1731,7 @@ def fetch_material(cfg, m, only_steps=None, quiet=False, all_files=False,
 
 # ===== auto_fetch (原 L5193-L5253) =====
 def auto_fetch(cfg, data):
-    from tfpkg import FETCH_STAMP
+    from tfpkg import FETCH_STAMP, PROV_DIR
     """status 时自动把"已完成但尚未拉回"的步骤结果保存到本地（本地模式；
     项目 setting.yaml 里 auto_fetch: false 可关闭）。失败只警告不打断。"""
     pending = []
@@ -1735,6 +1751,15 @@ def auto_fetch(cfg, data):
                     continue
                 need.append(s["name"])
             if not need:
+                # v1.0：没有要拉的步骤，但如果本地还没有 provenance/（老项目
+                # 第一次采集 / 之前只跑过 init），也把它补拉一次，供 tf prove 用。
+                _pl = os.path.join(m.get("result_dir") or "", PROV_DIR)
+                if m.get("result_dir") and not os.path.isdir(_pl):
+                    try:
+                        from tfpkg import fetch_provenance_dir
+                        fetch_provenance_dir(cfg, m, quiet=True)
+                    except Exception:      # noqa: BLE001
+                        pass
                 continue
             pending.append((m, need))
     if not pending:

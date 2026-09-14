@@ -197,27 +197,80 @@ def provenance_summary(prov):
     return " · ".join(bits)
 
 
+def fetch_provenance_dir(cfg, m, quiet=True):
+    """把远端 <材料>/provenance/ 整个目录拉回本地 <result_dir>/provenance/。
+
+    gen 时 tf 自动写的"每步一份档案 + 一行时间线"就在那个目录里；不拉回来的话
+    `tf prove` 只能看到脚本侧自己写进步骤目录的那份（provenance_common.py）。
+    整目录通常只有几 KB，跟着 fetch 一起走。失败只警告，绝不影响 fetch 本身。
+    返回 True/False（拉到东西了没）。"""
+    import shlex as _shlex
+    import subprocess as _sp
+    from tfpkg import _ssh_cmd
+    rd = (m or {}).get("result_dir")
+    sdir = None
+    for s in (m or {}).get("steps") or []:      # 用任一步骤目录推出材料目录
+        if s.get("dir"):
+            sdir = os.path.dirname(str(s["dir"]).rstrip("/"))
+            break
+    if not (rd and sdir):
+        return False
+    host = (m or {}).get("host_eff") or (cfg or {}).get("host")
+    # 远端 tar 里带的一级目录名就是 provenance/，所以解到 result/ 根下，
+    # 正好落成 result/provenance/<步骤>.json（local_provenance_paths 认这个位置）。
+    dest = rd
+    remote = ("cd %s && tar --ignore-failed-read -cf - %s"
+              % (_shlex.quote(sdir), _shlex.quote(PROV_DIR)))
+    try:
+        os.makedirs(dest, exist_ok=True)
+        cmd1 = (_ssh_cmd(cfg, host, [remote]) if host else ["bash", "-c", remote])
+        p1 = _sp.Popen(cmd1, stdout=_sp.PIPE, stderr=_sp.DEVNULL)
+        p2 = _sp.run(["tar", "xf", "-", "-C", dest], stdin=p1.stdout,
+                     capture_output=True, text=True)
+        p1.stdout.close()
+        rc1 = p1.wait()
+        if rc1 != 0 or p2.returncode != 0:
+            if not quiet:
+                print("%s: provenance 拉回失败。%s" % (m.get("name"), p2.stderr))
+            return False
+        return os.path.isdir(os.path.join(rd, PROV_DIR))
+    except Exception as _e:                     # noqa: BLE001
+        if not quiet:
+            print("%s: provenance 拉回异常（忽略）：%s" % (m.get("name"), _e))
+        return False
+
+
 def verify_provenance(prov, base_dirs=()):
     """校验：档案里记的输入 sha256，和现在磁盘上的文件是否还一致。
 
-    返回 [(名字, 'ok'|'changed'|'missing', 档案sha, 现在sha)]。只在能找到文件时判，
-    找不到就跳过（远端文件本地没有是常态，不算问题）。"""
+    优先比档案里记下的**来源路径**（生成输入时那个文件在哪，就回哪去比），
+    再退回 base_dirs 里按文件名找。返回 [(名字, 'ok'|'changed'|'missing', 档案sha, 现在sha)]，
+    missing = 本地压根找不到这份文件（远端合成出来的 step.conf 等），不是"被改过"。"""
     out = []
     for name, meta in sorted((prov.get("inputs") or {}).items()):
         if not isinstance(meta, dict) or not meta.get("sha256"):
             continue
-        now = None
-        for d in base_dirs:
-            p = os.path.join(d, name)
-            if os.path.isfile(p):
-                now = sha256_file(p)
-                break
+        now, want = None, meta.get("sha256")
+        src = meta.get("source")
+        if src and os.path.isfile(str(src)):
+            # 比"本地源文件后来有没有被改过"——渲染过的提交模板要拿 src_sha256
+            now = sha256_file(str(src))
+            want = meta.get("src_sha256") or meta.get("sha256")
+        elif src:
+            pass      # 记了来源、但本地那个文件没了 → 只能算 missing，别拿
+                      # 步骤目录里 "gen 就地改过" 的副本来比（会误报被改）
+        elif not meta.get("rendered"):
+            for d in base_dirs:
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    now = sha256_file(p)
+                    break
         if now is None:
-            out.append((name, "missing", meta.get("sha256"), None))
-        elif now == meta.get("sha256"):
-            out.append((name, "ok", meta.get("sha256"), now))
+            out.append((name, "missing", want, None))
+        elif now == want:
+            out.append((name, "ok", want, now))
         else:
-            out.append((name, "changed", meta.get("sha256"), now))
+            out.append((name, "changed", want, now))
     return out
 
 
@@ -250,8 +303,10 @@ def render_provenance(rows):
             L.append("  输入   %d 个文件（sha256 前 12 位）" % len(ins))
             for k in sorted(ins):
                 v = ins[k] or {}
-                L.append("    %-24s %s%s" % (k, (v.get("sha256") or "-")[:12],
-                                             ("  ← " + v["source"]) if v.get("source") else ""))
+                L.append("    %-24s %s%s%s"
+                         % (k, (v.get("sha256") or "-")[:12],
+                            ("  ← " + v["source"]) if v.get("source") else "",
+                            "（已按集群渲染）" if v.get("rendered") else ""))
         sc = prov.get("step_conf") or {}
         if sc:
             L.append("  参数   step.conf sha256 %s（%d 字符%s）"
@@ -309,12 +364,25 @@ def cmd_prove(cfg, data, proj, job=None, json_out=False, verify=False):
     print(render_provenance(rows))
     if verify:
         for r in rows:
-            bad = [x for x in r.get("verify") or [] if x[1] != "ok"]
+            rows_v = r.get("verify") or []
+            bad = [x for x in rows_v if x[1] == "changed"]
+            miss = [x for x in rows_v if x[1] == "missing"]
+            nok = len(rows_v) - len(bad) - len(miss)
             if not bad:
-                print("校验 %s %s：输入全部未变 ✓" % (r["material"], r["step"]))
+                print("校验 %s %s：%d 个输入与档案逐字节一致 ✓"
+                      "（另有 %d 个本地找不到、跳过）"
+                      % (r["material"], r["step"], nok, len(miss)))
             else:
                 for name, st, a, b in bad:
-                    print("校验 %s %s：%s %s（档案 %s → 现在 %s）"
-                          % (r["material"], r["step"], name, st,
+                    print("校验 %s %s：%s 被改过！（档案 %s → 现在 %s）"
+                          % (r["material"], r["step"], name,
                              (a or "-")[:12], (b or "-")[:12]))
+                if nok:
+                    print("校验 %s %s：其余 %d 个输入未变 ✓"
+                          % (r["material"], r["step"], nok))
+            if miss:
+                print("        （本地找不到、没法比对的 %d 个：%s）"
+                      % (len(miss), ", ".join(os.path.basename(str(x[0]))
+                                              for x in miss[:6])
+                         + (" 等" if len(miss) > 6 else "")))
     return 0
