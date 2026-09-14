@@ -1,0 +1,92 @@
+# =============================================================================
+# skill/fc-fit/skill.yaml -- force-constant fitting (fc2 / fc3), engines:
+# pheasy | hiphive | phono3py.
+#
+# This skill is the force-constant-fitting branch lifted out of kl-dft-cpu S5_fc
+# (gen_step5_fc.py + kl_fc_backends.py + the submit_fit_* templates +
+# templates/step5_fc/step.conf), turned into a standalone skill and extended
+# with a third engine.  It does NOT generate displacements and never runs VASP:
+# it consumes an existing displacement+force dataset produced by another skill
+# (kl-dft-cpu step4_disp, kl-mace-*/phonon-* step2_disp_force, phonon-dft-cpu
+# step2_disp) or placed in a directory by hand.
+#
+# Pipeline:
+#   S1_fit   compute node, submitted:
+#              prep  normalise the dataset -> POSCAR/SPOSCAR/dataset_*.npy,
+#                    disp_matrix.pkl (pheasy input), phono3py_*.yaml passthrough
+#              fit   fc2 (+ fc3) with FIT_ENGINE = phono3py | pheasy | hiphive
+#              post  ShengBTE export (optional) + imaginary-frequency gate
+#            artifacts: fc2.hdf5 (+ fc3.hdf5), shengbte/FORCE_CONSTANTS_2ND|_3RD,
+#                       band-dft-cpu.yaml, phonon_summary.json, fc_fit_summary.json
+#            judge: check "phonon" -> stable | imaginary frequency | tool error
+#   S2_plot  login node, run: gen, optional: phonon band figures from fc2.hdf5
+#
+# Engines (FIT_ENGINE in step1_fit/step.conf):
+#   phono3py  phono3py + symfc/alm least squares.
+#             Finite-displacement and random-displacement datasets.
+#   pheasy    pheasy compressive sensing (OLS/LASSO/ALASSO/RFE/RFE-OLS-TSQR/
+#             RIDGE), CPU or GPU build.  Random-displacement datasets.
+#   hiphive   hiphive cluster space + linear regression (ols/ridge/lasso/ard/
+#             bayes) with optional Huang + Born-Huang projection.
+#             Random-displacement datasets.
+#
+# All parameters live in step.conf (stepconf.py three-layer merge):
+#   tf -tt fc-fit -p <material> -j step1_fit conf --set params.FIT_ENGINE=hiphive
+# =============================================================================
+schema: 1
+name: fc-fit
+desc: 力常数拟合 fc2/fc3 (pheasy/hiphive/phono3py)
+version: "0.1"
+
+template_layout: per_step
+template_dir: templates
+
+defaults:
+  hpc: jzzn
+  skill_subdir: true
+
+# Pre-submit input check (tfpkg/workflow.py::_remote_submit_preflight): this
+# skill runs no VASP, so INCAR/KPOINTS/POSCAR never exist in the step directory
+# at submission time -- the gen writes only the recipe and the submit script,
+# and prep copies the cells on the compute node.  Declaring the real inputs is
+# what lets the submission pass the check.
+submit_required: [fit_config.json, submit.sh]
+
+# Pull the key inputs/outputs back locally; S1_fit also uses fetch_all so the
+# whole step directory (hdf5, shengbte/, logs) comes home.
+fetch_files: [POSCAR, SPOSCAR, phono3py_disp.yaml, phono3py_params.yaml,
+              FORCES_FC3, BORN, fc2.hdf5, fc3.hdf5, FORCE_CONSTANTS,
+              fit_config.json, fc_dataset.json, phonon_summary.json,
+              fc_fit_summary.json, band-dft-cpu.yaml,
+              submit.sh, queue.out, queue.err]
+
+steps:
+  # S1_fit is a SUBMITTED job: the gen only writes fit_config.json + submit.sh
+  # (+ fc_fit_driver.py); the compute node runs prep / fit / post.
+  # marker is phonon_summary.json, judged by the built-in "phonon" check:
+  #   stable -> done; imaginary frequency -> finished but held back; a gate
+  #   tool error -> step error.
+  - {seq: 1, name: step1_fit, label: S1_fit, check: phonon,
+     gen: gen_step1_fit.py, fetch_all: true,
+     gen_need: [stepconf.py, step.conf, fc_common.py, fc_fit_driver.py,
+                dim_common.py,
+                submit_fcfit_p3py.tpl, submit_fcfit_hiphive.tpl,
+                submit_fcfit_pheasy.tpl, submit_fcfit_pheasy_gpu.tpl]}
+
+# Optional phonon band figures (login node, best effort).  Turn it off with
+#   tf -tt fc-fit -p <material> conf --set phonon_plot=false
+optional_steps:
+  phonon_plot:
+    default: true
+    steps:
+      - {seq: 2, name: step2_phonon_plot, label: S2_plot, after: step1_fit,
+         gen: "fc_plot_phonon.py", check: plot, run: gen, gen_need: [],
+         done_marker: phonon_band_summary.json, fetch_all: true}
+
+requires:
+  # phono3py is only needed for FIT_ENGINE=phono3py and for the hdf5 writers;
+  # hiphive additionally needs hiphive + scikit-learn (+ numba for the residual
+  # check), pheasy needs the pheasy package (and celer for LASSO/ALASSO/RFE).
+  python: [numpy, scipy, phonopy, spglib, ase, h5py, phono3py, symfc, hiphive, pheasy]
+  conda: atomate2_p_a
+  exe: [phono3py, pheasy]
