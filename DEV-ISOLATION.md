@@ -77,3 +77,7 @@ python3 bin/tf -c tmp/tf_smoke.yaml history
 
 四个测试脚本都是纯本地断言（不连超算、不写项目、不提交作业），失败返回非零。
 `tmp/test_v1_prov.py` 会把 hpc 置空走本地 bash，真的执行一次 gen 并检查落档。
+
+**真机验证记录**（jzzn 4 核 Si 小体系，隔离配置 `tmp/tf_jzzn_si.yaml`）：
+`tmp/v1_si4c_verification.md`——含 4 核改动位置、作业号、provenance 证据链、
+实测暴露的 6 个缺陷与修法、复现命令。
