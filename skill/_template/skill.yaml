@@ -1,0 +1,71 @@
+# =============================================================================
+# skill/_template/skill.yaml —— 新技能模板（v1.0，schema 2）
+#
+# 用法：把整个 skill/_template/ 目录复制成 skill/<你的技能名>/，然后：
+#   ① 把下面 enabled: false 这行删掉（或改 true）——复制前它是"未启用"的模板；
+#   ② 改 name / desc / version；name 必须是全局唯一的技能 key（= tf -tt 用的名字）；
+#   ③ 按你的流程改 steps（每步一个 gen 脚本 + 一个判据 check）；
+#   ④ 填 io_schema / flow / corrections 三段自描述（tf schema 会校验，写错会提示）；
+#   ⑤ cd 到仓库根跑  python3 bin/tf skills  看它有没有被自动发现（无需改任何配置），
+#      再跑  python3 bin/tf schema <你的技能名>  自检。
+# 详细清单见同目录 README.md。真实范例：skill/opt-dft-cpu/（VASP 计算步最全）、
+# skill/band-dft-cpu/（可选步骤组 + 画图步 + 自描述三段）。
+# =============================================================================
+schema: 2
+enabled: false            # ← 复制后删掉本行（或改 true）即启用
+name: template            # ← 改成你的技能名（唯一，= tf -tt 的名字）
+desc: 新技能模板（复制我）
+version: "0.1"
+
+# 判据文件：本模板只有 run: gen 的后处理步，用 tf 内置的 check: plot，不需要它。
+# 有 SLURM 计算步时再指向公共池判据，如： checks: ../_common/checks_relax.py
+# template_layout: shared          # 模板布局：shared（所有步共用 templates/）
+defaults:
+  hpc: jzzn
+  skill_subdir: true               # 计算放进 材料/<技能>/ 子目录，多技能互不干扰
+
+# 拉到本地 result/ 的文件清单（计算步常用；run: gen 步一般用 fetch_all: true）
+fetch_files: [POSCAR, INCAR, KPOINTS, OUTCAR, queue.out, queue.err]
+
+# ---- 步骤：顺序即流水线顺序 ------------------------------------------------
+# seq    序号（决定表格列顺序；3.1 这样的画图/后处理步就写小数）
+# name   步骤目录名（远端 材料/<技能>/<name>/）
+# label  显示用短名（tf -j 也能用它）
+# gen    gen 脚本（可带参数： "gen_x.py --stage a"）
+# check  完成判据：outcar / wavecar / relax_injob（公共池）/ plot（run: gen 用）
+# run: gen  表示"在登录节点跑脚本、不交 SLURM"（画图/汇总这类轻量后处理）
+# done_marker   run: gen 步的产出文件名（tf 用它判完成、并自动拉回本地）
+# gen_need      要随 gen 一起推到材料目录的依赖（模板/公共库/step.conf）
+steps:
+  - {seq: 1, name: step1_summary, label: S1_summary, check: plot, run: gen,
+     gen: gen_step1_summary.py, gen_need: [], done_marker: template_summary.json,
+     fetch_all: true}
+
+# =============================================================================
+# 自描述三段（只给人/AI 看，不参与运行期装配；tf schema <技能> 展示 + 校验）
+# =============================================================================
+io_schema:
+  inputs:
+    - {name: POSCAR, from: user, required: true, desc: 材料初始结构（材料目录根）}
+    - {name: OUTCAR, from: file:OUTCAR, required: false,
+       desc: 上游 VASP 输出（本模板没有上游计算步，脚本找不到时会照常出产物并写 warning）}
+  outputs:
+    - {name: template_summary.json, step: S1_summary, type: json,
+       desc: 本技能的结果汇总（换成你自己的产物名）}
+  params:
+    - {name: EXAMPLE_PARAM, values: [a, b], default: a, where: step.conf,
+       desc: 示例参数：在 skill 里声明，用户用 tf -p X -j S1_summary conf --set params.EXAMPLE_PARAM=b 改}
+  notes: "run: gen 步的产物直接落本地 result/<步骤>/。"
+
+flow:
+  summary: 一句话说清这条流水线干什么（tf schema 第一行就会显示）
+  stages:
+    - {name: 取数, steps: [S1_summary], produces: [template_summary.json],
+       desc: 从上游步骤产物里读数、汇总成 JSON}
+  next_skills:
+    - {skill: band-dft-cpu, via: CONTCAR, desc: 示例：本技能产物能喂给谁（没有就删掉这段）}
+  requires: {POSCAR: 材料目录根必须有 POSCAR}
+
+# ---- 本技能声明会用到的纠错 handler（名字见 skill/_common/_corrections/）----
+# 不写也能被全局 handler 命中；写出来只是自描述，让 tf schema 看得到。
+corrections: [node_fail]

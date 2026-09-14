@@ -103,7 +103,7 @@ def normalize_monitor_command(command, positional, restart=False):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_correct, cmd_correct_usage
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_correct, cmd_correct_usage, cmd_history, history_record
     if "--help-all" in sys.argv[1:]:
         print(USAGE)
         return
@@ -280,6 +280,13 @@ def main():
         # 技能名既可用 -tt，也可直接当位置参数写：tf schema band-dft-cpu
         _which = a.tt or (mat_toks[0] if mat_toks else None)
         sys.exit(cmd_schema(cfg, tt=_which, json_out=a.json_out, strict=a.strict))
+    if cmd == "history" and not a.hist_write:
+        # v1.0：直接读 history.jsonl（不采集、不连超算、不提交）。
+        # 记录是自动的——任何一次真正采集都会追加；--write 时才先采集一轮再读。
+        sys.exit(cmd_history(cfg,
+                             proj=a.proj or (mat_toks[0] if mat_toks else None),
+                             tt=a.tt, since=a.since, last_n=a.last_n or 40,
+                             json_out=a.json_out))
     cfg = merge_project_configs(cfg)   # v3.1：合并项目配置 project_setting/tf_*.yaml
     if a.host is not None:
         cfg["host"] = a.host or None
@@ -388,6 +395,14 @@ def main():
         fill_local_dim(cfg, data, types)
         if cmd in ("list", "summary"):
             _state_cache_save(cfg, data, types, a.tt, root)
+        # v1.0（W5–8）：把本轮的状态转移追加进 history.jsonl。这样**任何技能**
+        # 加进来就自动有历史，不必各技能自己写日志；走缓存那一支不重复记录。
+        try:
+            _n_hist = history_record(cfg, data)
+            if _n_hist and os.environ.get("TF_DEBUG_TIME"):
+                print("[history] 记录 %d 条状态转移" % _n_hist, file=sys.stderr)
+        except Exception:
+            pass
     _dbg_t("状态采集（ssh+远端扫描）", _t0)
 
     apply_exclude(data, a.exclude)   # v3.11：-x 跳过指定项目
@@ -464,6 +479,9 @@ def main():
                                         jb, a.force) == 0 else 1
         sys.exit(fails)
 
+    if cmd == "history":   # v1.0：--write 已先采集记录一轮，这里再读出来
+        sys.exit(cmd_history(cfg, proj=a.proj or None, tt=a.tt, since=a.since,
+                             last_n=a.last_n or 40, json_out=a.json_out))
     if cmd == "list":   # v3.23：只读总览表格；不 auto_fetch/auto_advance（绝不提交）
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)

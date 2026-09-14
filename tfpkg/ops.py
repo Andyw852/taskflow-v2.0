@@ -2022,6 +2022,12 @@ def cmd_watch(cfg, types, projs, exclude, interval, tt=None, root=None,
             # patch_state_cache：把本轮采集结果写进本地缓存，前台 tf list/summary
             # 在 TTL 内直接读它，不用再 ssh 采集一遍。
             _state_cache_save(cfg, data, types, tt, root)
+            # v1.0（W5–8）：监控每轮把状态转移记进 history.jsonl —— 后台监控在跑时
+            # 时间序列最完整（谁什么时候排队/开跑/算完/失败一清二楚）。
+            try:
+                history_record(cfg, data)
+            except Exception:
+                pass
             apply_exclude(data, exclude)
             filter_projs(data, projs)
             auto_fetch(cfg, data)

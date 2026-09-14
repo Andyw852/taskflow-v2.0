@@ -258,6 +258,13 @@ QUICK_USAGE = """\
   hpc 集群           切换指定项目集群（需 -p）
   init / skills      初始化项目 / 查看技能
 
+技能自描述（v1.0，全部只读）：
+  schema [技能]      看技能吃什么/吐什么/有哪些旋钮/能接谁/怎么纠错
+                     （--json 机器可读，--strict 有错误返回非零）
+  correct -p 材料    把 FAIL 诊断喂给 _corrections/ 纠错 handler 库，
+                     列出建议；-y 才执行 handler.apply（只改输入文件、不提交）
+  history [-p 材料]  步骤状态的时间序列（history.jsonl，采集时自动记录）
+
 旧命令和别名继续兼容。高级命令、全部参数及示例：tf --help-all
 注意：status/auto/monitor 可提交作业；只看状态用 summary 或 list。
 """
@@ -277,6 +284,19 @@ USAGE = """\
   probe     只读探测作业健康度：判每作业 弛豫/收敛/SCF发散/崩溃/掉队/排队，
             输出结构化 JSON（判据+结论），不采集、不提交、不改文件。
             需 -p 材料，可配 -j 步骤（如 tf -tt defect-dft-cpu -p Sn2Sb2Te5 probe）
+  schema    看技能的自描述（v1.0，只读、纯本地）：tf schema [技能名]
+            io_schema = 吃什么/吐什么/有哪些旋钮；flow = 整条流程与产物能喂给谁；
+            corrections = 这类失败怎么纠。--json 机器可读；--strict 有 [错误] 返回非零。
+            写新技能照 skill/_template/ 抄；看真实例子：tf schema band-dft-cpu
+  correct   把 FAIL/指定步骤的诊断喂给 skill/_common/_corrections/ 纠错 handler 库：
+            tf correct -p 材料 [-j 步骤]      只列出命中的 handler + 建议命令（只读）
+            tf correct -p 材料 [-j 步骤] -y   执行 handler.apply（改远端输入，
+                                              自动备份 INCAR；作业在跑时拒绝执行）
+            ★ 永不提交作业、永不删目录——提交仍走 tf start。
+  history   步骤状态的时间序列（v1.0，只读、不采集、不连超算）：
+            tf history [-p 材料] [-tt 技能] [--since 7d] [-n 40] [--json]
+            记录是**自动**的：任何一次真正采集（tf list/summary/status/monitor）
+            之后，状态转移就追加进 setting/history.jsonl；任何技能加进来就自动有历史。
   start     开始/提交：输入没生成先 gen 再 sbatch。无 -p = 一键推进全部材料。
             init/retry/rerun 只生成不提交；status/auto/monitor 开自动推进时也会提交
   stop      取消作业。无 -p = 一键停止全部作业（有确认）；-p = 该材料全部作业；-p -job = 指定步骤。
