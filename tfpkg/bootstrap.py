@@ -269,6 +269,12 @@ QUICK_USAGE = """\
   prove -p 材料      这一步"结果怎么来的"：输入 sha256 / step.conf 参数 /
                      工具版本 / 作业号（gen 时自动落档，--verify 校验输入没被改）
 
+AI 审计（v1.0 P0-1，agent 走网关：风险分档 + 每次调用留痕）：
+  act <命令>         agent 的唯一入口：tf act -p 材料 summary / tf act start …
+                     （只读与推进类放行并记账；stop/rerun/clean/-f/-y 需人工批准）
+  act log           看审计流水（.tf_agent_log.jsonl）；act policy 看风险分档表
+  approve <命令>     人工在**交互终端**批准一条破坏性动作（一次性令牌，默认 15 分钟）
+
 旧命令和别名继续兼容。高级命令、全部参数及示例：tf --help-all
 注意：status/auto/monitor 可提交作业；只看状态用 summary 或 list。
 """
@@ -306,6 +312,12 @@ USAGE = """\
             / 产物(Output)，外加输入、可调参数、能接哪些下游技能、纠错 handler。
             数据来自 skill.yaml 的 steps[] + io_schema.steps[]（见 skill/_template/）。
             不给技能名 = 全部技能一行摘要（含工具链）。写论文的图 2 可以直接用它。
+  act       agent 动作网关（v1.0 P0-1）：agent 把命令交给 `tf act <原命令>`——
+            只读/推进类放行并记账；stop/rerun/clean 与任何 -f/-y 属破坏性，
+            必须人工在交互终端 `tf approve <同一条命令>` 换一次性令牌（默认 900 秒）。
+            每次调用都追加 {ts,actor,cmd,risk,decision,exit_code,approved_by} 到配置
+            目录的 .tf_agent_log.jsonl：`tf act log` 看流水，`tf act policy` 看风险分档。
+            不设 TF_ACTOR 也不用 act 时，行为与此前完全一致。
   prove     每一步"结果是怎么来的"（v1.0，只读、读本地档案）：
             tf prove -p 材料 [-j 步骤] [--json] [--verify]
             gen 生成输入时 tf 会自动把该步档案写到 <材料>/provenance/<步骤>.json

@@ -39,10 +39,12 @@ from . import (  # noqa: E402
     #   corrections —— _corrections/ 纠错 handler 库的加载、匹配与 tf correct（建议 1.1）
     #   history     —— 步骤状态的时间序列（history.jsonl）+ tf history（W5–8）
     #   prov        —— 每步 provenance.json（输入 sha256 / 参数 / 工具版本）+ tf prove
-    skillspec, corrections, history, prov,
+    #   agentgate   —— LLM 动作网关（风险分档 + 一次性批准令牌）+ 审计流水 tf act（P0-1）
+    #   session     —— 会话导出（操作历史 + provenance + 审计打包）tf session export（P1-7）
+    skillspec, corrections, history, prov, agentgate, session,
 )
 _MODULES = (bootstrap, collect, data, workflow, report, ops, cli, yamlmini,
-            skillspec, corrections, history, prov)
+            skillspec, corrections, history, prov, agentgate, session)
 
 # 把各模块的名字注入包命名空间（排除 dunder 与标准库名）。
 _STDLIB_NAMES = {

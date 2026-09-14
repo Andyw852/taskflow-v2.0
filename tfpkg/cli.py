@@ -103,7 +103,7 @@ def normalize_monitor_command(command, positional, restart=False):
 
 
 def main():
-    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_skill_show, cmd_correct, cmd_correct_usage, cmd_history, history_record, cmd_prove, set_active_cfg
+    from tfpkg import EXAMPLE_CONFIG, JSON_SCHEMA, TF_VERSION, USAGE, _PKG_ROOT, _add_diag_codes, _json_changes, _json_errors_only, _json_paginate, _dbg_t, _state_cache_load, _state_cache_save, _summary_json, _watch_cron, _watch_daemon, _watch_ensure, _watch_stop, apply_exclude, apply_hide_done, apply_skills, auto_advance, auto_fetch, auto_recover_hung, cmd_adopt, cmd_auto, cmd_auto_project, cmd_auto_skill, cmd_clean, cmd_conf, cmd_diagnose, cmd_fetch, cmd_hpc, cmd_init, cmd_level, cmd_migrate_subdir, cmd_rerun, cmd_retry, cmd_skills, cmd_start, cmd_status, cmd_step_init, cmd_stop, cmd_summary, cmd_watch, collect_data, fill_local_dim, filter_status, find_material, find_step, find_uninited, get_types, load_config, merge_project_configs, render_table, status_spec_has_scancel, cmd_schema, cmd_skill_show, cmd_correct, cmd_correct_usage, cmd_history, history_record, cmd_prove, set_active_cfg, cmd_act, cmd_approve, agent_direct_gate, agent_audit, cmd_session
     if "--help-all" in sys.argv[1:]:
         print(USAGE)
         return
@@ -175,6 +175,8 @@ def main():
                    help="json：打印字段 schema 说明")
     p.add_argument("--verify", dest="verify", action="store_true",
                    help="prove：逐份校验输入的 sha256 是否与档案一致")
+    p.add_argument("--out", dest="out", metavar="文件",
+                   help="session export：包输出路径（默认 cwd/tmp/session_<材料>_<时间>.tar.gz）")
     p.add_argument("--full", dest="full", action="store_true",
                    help="skill show：卡片里再给输入/参数/可接技能/纠错")
     p.add_argument("--strict", dest="strict", action="store_true",
@@ -212,7 +214,13 @@ def main():
                 "hpc", "skills", "conf", "level", "diagnose", "probe", "push",
                 # v1.0（加技能友好化）：schema = 看技能自描述（io_schema/flow/corrections）
                 #                      correct = 把 FAIL 诊断喂给 _corrections/ handler 库
-                "schema", "skill", "correct", "history", "prove"}
+                "schema", "skill", "correct", "history", "prove",
+                # v1.0（P0-1）：act = agent 动作网关（风险分档+审计）；
+                #                approve = 人工批准破坏性动作（仅交互终端）
+                "act", "approve",
+                # v1.0（P1-7）：session export = 把一个材料的操作历史/provenance/
+                #                  审计打包成论文补充材料
+                "session"}
     root, cmd, pos = None, "status", []
     for tok in a.args:  # v3.14：位置参数先收集，之后按"材料名/目录"消歧
         if tok == "help":
@@ -264,6 +272,12 @@ def main():
                           if cfg_path else os.getcwd())
     cfg["_config_path"] = cfg_path
     set_active_cfg(cfg)    # v1.0：让 log_action 能把动作记进 history.jsonl
+    if cmd in ("act", "approve"):   # v1.0（P0-1）：网关在**任何**采集之前短路
+        sys.exit(cmd_act(cfg, sys.argv[1:]) if cmd == "act"
+                 else cmd_approve(cfg, sys.argv[1:]))
+    _gate = agent_direct_gate(cfg, cmd, sys.argv[1:])   # agent 会话直接调用 → 审计
+    if _gate is not None:
+        sys.exit(_gate)
     if cmd == "monitor":   # 控制类操作不采集状态，提前短路
         if a.install:
             sys.exit(_watch_cron(True))
@@ -292,6 +306,9 @@ def main():
             _args.pop(0)
         sys.exit(cmd_skill_show(cfg, which=a.tt or (_args[0] if _args else None),
                                 json_out=a.json_out, full=a.full))
+    if cmd == "session" and not (a.proj or mat_toks):
+        # 缺材料名不必采集（省一次 ssh）：直接给用法
+        sys.exit(cmd_session(cfg, None, None))
     if cmd == "history" and not a.hist_write:
         # v1.0：直接读 history.jsonl（不采集、不连超算、不提交）。
         # 记录是自动的——任何一次真正采集都会追加；--write 时才先采集一轮再读。
@@ -316,6 +333,9 @@ def main():
     # 提示，这里放行，按空表/无目标处理（不算错误）。
 
     if cmd == "init" and not a.job:  # 项目配置初始化：纯本地，不连超算
+        _gate = agent_direct_gate(cfg, cmd, sys.argv[1:])   # P0-1：init 也进审计
+        if _gate is not None:
+            sys.exit(_gate)
         if a.proj and mat_toks:
             print("提示：多个材料要用逗号分隔，如  -p %s,%s"
                   % (a.proj, ",".join(mat_toks)))
@@ -524,6 +544,13 @@ def main():
             _rc |= cmd_prove(cfg, data, pj, jobs[0], json_out=a.json_out,
                              verify=a.verify)
         sys.exit(_rc)
+    if cmd == "session":   # v1.0（P1-7）：会话导出（只读本地，打论文补充材料包）
+        _sargs = list(mat_toks)
+        if _sargs and _sargs[0] in ("export", "bundle"):
+            _sargs.pop(0)
+        _sp = a.proj or (_sargs[0] if _sargs else None)
+        sys.exit(cmd_session(cfg, data, _sp, job=jobs[0], out=a.out,
+                             since=a.since, json_out=a.json_out))
     if cmd == "summary":   # 只读极简汇总；不 auto_fetch/auto_advance（绝不提交）
         if a.hide_done or (cfg.get("hide_done") and not a.show_done):
             apply_hide_done(data)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -61,6 +62,24 @@ def build_cmd(num_outer: int, densify: str | None) -> str:
 OUT_DIR = "step1_cohp"   # run:gen 步骤在技能目录下运行，产物写入本子目录
 
 
+def _tf_bin() -> str:
+    """找"正在跑我的那个 tf"：TF_BIN 环境变量 > 本仓库 bin/tf > PATH 里的 tf。
+
+    不要直接写 "tf"：① 副本树常以 python3 bin/tf 调用，PATH 里可能没有 tf；
+    ② PATH 里的 tf 可能指向**另一棵树**（如 ~/.local/bin/tf → 生产树），
+    一调用就会拿错配置去提交——这里必须优先用同一个仓库里的入口。
+    """
+    env = os.environ.get("TF_BIN")
+    if env and os.path.isfile(env):
+        return env
+    here = Path(__file__).resolve().parent          # skill/cohp-cogito/
+    for up in (here.parent.parent, here.parent, here):   # 仓库根 → 技能目录
+        cand = up / "bin" / "tf"
+        if cand.is_file():
+            return str(cand)
+    return shutil.which("tf") or "tf"
+
+
 def main() -> int:
     root = Path(os.getcwd())
     dest = root / OUT_DIR
@@ -76,10 +95,19 @@ def main() -> int:
     except SystemExit:
         material = root.parent.name if root.name == "cohp-cogito" else root.name
         print(f"[..] 未找到合格 step3_PBE_WAVECAR，自动启动 band-dft-cpu：{material}")
+        tfbin = _tf_bin()
         try:
-            proc = subprocess.run(["tf", "-tt", "band-dft-cpu", "-p", material, "start"], text=True, capture_output=True)
+            proc = subprocess.run([tfbin, "-tt", "band-dft-cpu", "-p", material, "start"], text=True, capture_output=True)
         except OSError as exc:
-            raise SystemExit(f"[错误] 找不到 tf，无法自动启动 band-dft-cpu：{exc}")
+            # 集群登录节点上通常没有 tf（tf 跑在你本机），"自动拉起上游"这条分支
+            # 只在 local 模式或集群装了 tf 时才有意义 —— 这里给出可直接照抄的命令，
+            # 而不是抛一个看不懂的 [Errno 2]。
+            raise SystemExit(
+                f"[等待] 上游 band-dft-cpu 还没算出 step3_PBE_WAVECAR，本步无法继续。\n"
+                f"       本机没有可调用的 tf（{tfbin}: {exc}），请在**本地**跑：\n"
+                f"           tf -tt band-dft-cpu -p {material} start\n"
+                f"       等它算出 step3_PBE_WAVECAR，再重跑本步：\n"
+                f"           tf -tt cohp-cogito -p {material} -j S1_COHP retry")
         if proc.stdout: print(proc.stdout.rstrip())
         if proc.returncode != 0:
             if proc.stderr: print(proc.stderr.rstrip(), file=sys.stderr)
