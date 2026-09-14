@@ -961,7 +961,9 @@ def _init_one_skill(cfg, types, target, name=None, tt=None, force=False,
     if os.path.exists(f2):
         print("已存在，跳过 %s" % f2)
     else:
-        hpc_name = (t or {}).get("hpc") or "jzzn"
+        # 必须转 str：集群名 3090 在 YAML 里没加引号就是 int，hpc_name + ".yaml"
+        # 会直接 TypeError（技能默认 hpc: 3090 的 te-screen/unihamgnn/*-mace-gpu 新材料 init 必崩）。
+        hpc_name = str((t or {}).get("hpc") or "jzzn")
         src = pkg_setting_path(hpc_name + ".yaml")
         if src:
             shutil.copyfile(src, f2)
