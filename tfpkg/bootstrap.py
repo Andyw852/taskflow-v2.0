@@ -1391,8 +1391,50 @@ def resolve_material_local(t, root, m):
     return m
 
 # ===== log_action (原 L1801-L1813) =====
+_ACTIVE_CFG = None      # v1.0：当前会话的配置（log_action 要拿它定位 history.jsonl）
+
+
+def set_active_cfg(cfg):
+    """cli 启动时登记当前配置；动作事件（history.jsonl 的 ev=action）需要它。"""
+    global _ACTIVE_CFG
+    _ACTIVE_CFG = cfg
+    return cfg
+
+
+_ACT_RE = None
+
+def _action_event_fields(text):
+    """从操作日志文本里抠出 (动作, 步骤, 作业号)。
+
+    文本都是 tf 自己拼的，形态就那么几种：
+      "start S1_opt jobid=3839063" / "gen S2_static（只生成输入，待 start 提交）"
+      "retry S1_opt" / "rerun S1_opt（删除 …）" / "stop 3839063"
+      "hang 自动恢复 job=3839063 NODE_FAIL（第 1/3 次）→ retry"
+    抠不出就留空——事件本身照样记，只是少几个字段。"""
+    global _ACT_RE
+    import re as _re
+    if _ACT_RE is None:
+        _ACT_RE = _re.compile(r"\b(S\d+(?:\.\d+)?_[A-Za-z0-9_.]+)\b")
+    s = str(text or "").strip()
+    act = s.split()[0] if s.split() else ""
+    if s.startswith("hang"):
+        act = "hang-recover"
+    if act.startswith("stop-mark"):
+        act = "stop"
+    if s.startswith("rerun project"):
+        act = "rerun"
+    m_step = _ACT_RE.search(s)
+    m_job = _re.search(r"jobid=(\d+)", s) or _re.search(r"job=(\d+)", s) \
+        or _re.search(r"\b(\d{6,})\b", s)
+    return act, (m_step.group(1) if m_step else None), (m_job.group(1) if m_job else None)
+
+
 def log_action(m, text):
-    """往该材料的 log_dir/tf.log 追加一行操作日志（本地模式才有）。"""
+    """往该材料的 log_dir/tf.log 追加一行操作日志（本地模式才有）。
+
+    v1.0：同时把这条动作记进 history.jsonl（ev=action）——"谁什么时候重交的"
+    这类问题 `tf history` 直接答，不必翻 monitor 日志。只加不减：history 写失败
+    只警告，tf.log 照写。"""
     ld = m.get("log_dir")
     if not ld:
         return
@@ -1403,4 +1445,14 @@ def log_action(m, text):
         with open(os.path.join(ld, "tf.log"), "a", encoding="utf-8") as f:
             f.write("%s  %s\n" % (ts, text))
     except OSError:
+        pass
+    try:
+        if _ACTIVE_CFG is None:
+            return
+        from tfpkg import history_action
+        act, step, job = _action_event_fields(text)
+        history_action(_ACTIVE_CFG, mat=m.get("name"), skill=m.get("tt"),
+                       step=step, action=act, host=m.get("host_eff"), job=job,
+                       note=text)
+    except Exception:      # noqa: BLE001 —— 记事件绝不能影响操作本身
         pass

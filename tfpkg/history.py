@@ -22,6 +22,7 @@
   skill 技能 key（如 band-dft-cpu）
   step  步骤名 / label
   ev    state（状态词变了）| diag（状态没变但诊断文本变了）
+        | action（我们**做的事**：start/retry/rerun/stop/clean/init/fetch/gen）
   f     变化前状态词（首次见到为 null）
   t     变化后状态词（OK/R/PD/FAIL/TODO/PREP/WAIT/SCANCEL）
   diag  变化后的诊断文本（截断）
@@ -51,6 +52,27 @@ def history_state_path(cfg):
 
 def _now():
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _secs_between(ts_a, ts_b):
+    """两个 "%Y-%m-%dT%H:%M:%S" 之间相差多少秒；解析不了返回 None。"""
+    try:
+        a = datetime.datetime.strptime(str(ts_a)[:19], "%Y-%m-%dT%H:%M:%S")
+        b = datetime.datetime.strptime(str(ts_b)[:19], "%Y-%m-%dT%H:%M:%S")
+        return max(0, int((b - a).total_seconds()))
+    except ValueError:
+        return None
+
+
+def _fmt_dur(sec):
+    if sec is None:
+        return ""
+    sec = int(sec)
+    if sec < 60:
+        return "%ds" % sec
+    if sec < 3600:
+        return "%dm%02ds" % (sec // 60, sec % 60)
+    return "%dh%02dm" % (sec // 3600, (sec % 3600) // 60)
 
 
 def _trim(path):
@@ -91,20 +113,32 @@ def history_record(cfg, data, force=False):
                 diag = (s.get("diag") or "")[:160]
                 job = (s.get("job") or {}).get("id")
                 kind = s.get("kind")
-                cur[sk] = {"k": kind, "d": diag, "j": job}
+                old = prev.get(sk) if isinstance(prev, dict) else None
+                # v1.0：记住"第一次看到它在跑/排队"的时刻，结束那一下就能算出
+                # 真实墙钟（dur 秒）——作业号 + 墙钟正是论文里要的 per-step 事实。
+                started = (old or {}).get("s")
+                if kind in ("R", "PD"):
+                    started = started or ts
+                elif kind in ("TODO", "PREP", "WAIT"):
+                    started = None
+                cur[sk] = {"k": kind, "d": diag, "j": job, "s": started}
                 if prev is None and not force:
                     continue
-                old = prev.get(sk) if isinstance(prev, dict) else None
                 if old and old.get("k") == kind and old.get("d") == diag:
                     continue
                 if old is None and not force:
                     continue      # 新出现的步骤：先记基线，下一轮起才记事件
+                ev = "state" if (old or {}).get("k") != kind else "diag"
+                dur = None
+                if old is not None and kind in ("OK", "FAIL") \
+                        and old.get("k") in ("R", "PD"):
+                    ev = "finish" if kind == "OK" else "fail"
+                    dur = _secs_between(old.get("s") or ts, ts)
                 events.append({
                     "ts": ts, "mat": mname, "skill": key,
                     "step": s.get("label") or s.get("name"),
-                    "ev": "state" if (old or {}).get("k") != kind else "diag",
-                    "f": (old or {}).get("k"), "t": kind,
-                    "diag": diag, "job": job, "host": host,
+                    "ev": ev, "f": (old or {}).get("k"), "t": kind,
+                    "diag": diag, "job": job, "host": host, "dur": dur,
                 })
     dropped = 0
     if len(events) > _MAX_EVENTS_PER_RUN:
@@ -133,6 +167,30 @@ def history_record(cfg, data, force=False):
 # =============================================================================
 # 读取（tf history）
 # =============================================================================
+def history_action(cfg, mat=None, skill=None, step=None, action=None,
+                   host=None, job=None, note=None):
+    """记一条**动作**事件（我们做过什么：提交/重生成/停止…）。
+
+    与状态事件同流：这样 `tf history` 一句话就能回答"谁在什么时候把它重交的"，
+    不用翻 monitor 日志。只追加、绝不抛（失败返回 False）。"""
+    import sys as _sys
+    if not action:
+        return False
+    e = {"ts": _now(), "mat": mat, "skill": skill, "step": step,
+         "ev": "action", "act": str(action), "t": str(action),
+         "host": host, "job": job, "note": (str(note)[:200] if note else None)}
+    path = history_path(cfg)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        _trim(path)
+        return True
+    except OSError as exc:
+        _sys.stderr.write("警告（history）：动作事件没记上：%s\n" % exc)
+        return False
+
+
 def history_load(cfg, proj=None, tt=None, since=None, limit=None):
     """读出事件流并按材料/技能/时间过滤。返回 (事件列表, 总行数)。"""
     path = history_path(cfg)
@@ -233,13 +291,20 @@ def cmd_history(cfg, proj=None, tt=None, since=None, last_n=40, json_out=False):
     for e in show:
         f, t = e.get("f") or "-", e.get("t") or "-"
         arrow = "%s → %s" % (f, t)
+        detail = e.get("diag") or ""
         if e.get("ev") == "diag":
             arrow = "诊断变化（%s）" % t
+        elif e.get("ev") == "action":
+            # 动作事件：t 存的是动作名，后面跟细节（如 "start jobid=3839063"）
+            arrow = "» %s" % (e.get("act") or "-")
+            detail = str(e.get("note") or e.get("job") or "")
+        elif e.get("ev") in ("finish", "fail") and e.get("dur") is not None:
+            arrow = "%s（耗时 %s）" % (arrow, _fmt_dur(e.get("dur")))
         print("%-19s %-18s %-14s %-12s %-16s %s"
               % (str(e.get("ts") or "").replace("T", " ")[:19],
                  str(e.get("mat") or "")[:18], str(e.get("skill") or "")[:14],
                  str(e.get("step") or "")[:12], arrow,
-                 str(e.get("diag") or "")[:40]))
+                 str(detail)[:40]))
     by_mat = {}
     for e in evs:
         by_mat.setdefault(e.get("mat"), 0)
