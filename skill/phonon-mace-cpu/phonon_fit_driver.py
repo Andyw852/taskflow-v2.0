@@ -89,8 +89,11 @@ def main():
 
     uc = read_vasp("POSCAR")
     params = read_params(cwd / "klmace_params.txt")
-    dim = [int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()]
-    ph = Phonopy(uc, supercell_matrix=np.diag(np.array(dim, dtype=int)), primitive_matrix="P")
+    _dim = np.array([int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()],
+                    dtype=int)
+    # 3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，与 phonopy/phono3py --dim 同义）
+    scm = _dim.reshape(3, 3) if _dim.size == 9 else np.diag(_dim)
+    ph = Phonopy(uc, supercell_matrix=scm, primitive_matrix="P")
 
     disps = np.ascontiguousarray(np.load("disps.npy"), dtype="double")
     forces = np.ascontiguousarray(np.load("forces.npy"), dtype="double")

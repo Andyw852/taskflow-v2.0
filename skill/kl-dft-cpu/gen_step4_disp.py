@@ -71,9 +71,10 @@ def make_ph3(out, reps):
         sys.exit("[ERROR] 无法 import phono3py/phonopy（%s）—— step4 需要在装了 "
                  "phono3py 的 conda 环境里跑 gen" % e)
     cell, _ = read_crystal_structure(str(out / "POSCAR"), interface_mode="vasp")
-    return Phono3py(cell,
-                    supercell_matrix=np.diag(np.array(reps, dtype=int)),
-                    primitive_matrix="auto")
+    _reps = np.array(reps, dtype=int)
+    # 3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，与 phonopy/phono3py --dim 同义）
+    scm = _reps.reshape(3, 3) if _reps.size == 9 else np.diag(_reps)
+    return Phono3py(cell, supercell_matrix=scm, primitive_matrix="auto")
 
 
 def count_findiff_frames(ph3, distance, cutoff_pair):

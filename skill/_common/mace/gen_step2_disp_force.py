@@ -83,7 +83,9 @@ orders = [int(x) for x in orders_s.split(",")]
 oversample = int(ov_s)
 
 cell, _ = read_crystal_structure(poscar, interface_mode="vasp")
-ph3 = Phono3py(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)),
+_reps = np.array(reps, dtype=int)
+scm = _reps.reshape(3, 3) if _reps.size == 9 else np.diag(_reps)   # 3 个数=对角；9 个数=3×3 矩阵（phono3py --dim 同义）
+ph3 = Phono3py(cell, supercell_matrix=scm,
                primitive_matrix=np.eye(3))
 sc = ph3.supercell
 atoms = SymfcAtoms(cell=sc.cell, scaled_positions=sc.scaled_positions, numbers=sc.numbers)

@@ -45,8 +45,10 @@ def main():
     if not (cwd / "POSCAR").is_file():
         sys.exit("[ERROR] 本目录没有 POSCAR")
     uc = read_vasp("POSCAR")
-    dim = [int(x) for x in a.dim.split()]
-    ph = Phonopy(uc, supercell_matrix=np.diag(np.array(dim, dtype=int)))
+    _dim = np.array([int(x) for x in a.dim.split()], dtype=int)
+    # 3 个数=对角；9 个数=3×3 矩阵（行主序，与 phonopy/phono3py --dim 同义）
+    dim = _dim.reshape(3, 3) if _dim.size == 9 else np.diag(_dim)
+    ph = Phonopy(uc, supercell_matrix=np.array(dim, dtype=int))
     sc = ph.supercell
     write_vasp("SPOSCAR", sc, direct=True)
 

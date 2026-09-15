@@ -80,7 +80,10 @@ def main():
 
     uc = read_vasp("POSCAR")
     params = _read_params(cwd / "klmace_params.txt")
-    dim = [int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()]
+    _dim = np.array([int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()],
+                    dtype=int)
+    # 3 个数=对角；9 个数=3×3 矩阵（行主序，phono3py --dim 同义）；np.prod 对矩阵=行列式
+    dim = _dim.reshape(3, 3) if _dim.size == 9 else np.diag(_dim)
     raw_list = str(params.get("CUTOFF_LIST") or "4.0,6.0,8.0")
     cutoffs = [float(x) for x in raw_list.replace(" ", "").split(",") if x.strip()]
     if not cutoffs:
@@ -99,7 +102,7 @@ def main():
     results = []
     for cut in cutoffs:
         try:
-            ph = Phonopy(uc, supercell_matrix=np.diag(np.array(dim, dtype=int)),
+            ph = Phonopy(uc, supercell_matrix=np.array(dim, dtype=int),
                          primitive_matrix="P")
             ph.dataset = {"displacements": disps, "forces": forces}
             ph.produce_force_constants(

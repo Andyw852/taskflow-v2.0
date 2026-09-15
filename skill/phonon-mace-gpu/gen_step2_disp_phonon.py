@@ -47,10 +47,12 @@ from ase import Atoms
 from alm import ALM
 
 poscar, reps_s, ov_s = sys.argv[1:4]
-reps = [int(x) for x in reps_s.split()]
+_reps = np.array([int(x) for x in reps_s.split()], dtype=int)
+# 3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，与 phonopy/phono3py --dim 同义）
+reps = _reps.reshape(3, 3) if _reps.size == 9 else np.diag(_reps)
 oversample = int(ov_s)
 cell, _ = read_crystal_structure(poscar, interface_mode="vasp")
-ph = Phonopy(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)))
+ph = Phonopy(cell, supercell_matrix=np.array(reps, dtype=int))
 sc = ph.supercell
 atoms = Atoms(numbers=sc.numbers, positions=sc.positions, cell=sc.cell, pbc=True)
 n_sc = len(atoms)
