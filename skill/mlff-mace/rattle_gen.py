@@ -238,7 +238,9 @@ def gen_displ_sets(prim_lat, prim_frac, symbols, counts, reps, strain, dim, vac_
     numbers = [chemical_symbols.index(s) for s in symbols]
     ph = Phonopy(unitcell=PhonopyAtoms(numbers=numbers, cell=lat,
                                        scaled_positions=prim_frac),
-                 supercell_matrix=np.diag(reps) * 1,
+                 supercell_matrix=(np.array(reps, dtype=int).reshape(3, 3)
+                                   if len(reps) == 9
+                                   else np.diag(np.array(reps, dtype=int))),
                  primitive_matrix=np.eye(3))
     ph.generate_displacements(distance=disp)
     dataset = ph.dataset
@@ -265,6 +267,14 @@ def main():
         sys.exit("[ERROR] 找不到 %s —— step1_relax 还没算完？" % a.prim)
     sc_sum = json.loads((cwd / a.sc_summary).read_text())
     reps = [int(x) for x in sc_sum["supercell_reps"]]
+    # 超胞规格：3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，(a',b',c')=(a,b,c)·P，
+    # 与 phonopy/phono3py --dim 同义）。P 是"超胞晶格 = P @ 原胞晶格"的矩阵。
+    _r = np.array(reps, dtype=int)
+    IS_MATRIX = _r.size == 9
+    P = _r.reshape(3, 3) if IS_MATRIX else np.diag(_r)
+    if _r.size not in (3, 9):
+        sys.exit("[ERROR] supercell_reps 要写 3 个（对角）或 9 个（3×3 矩阵）整数，"
+                 "收到 %r" % (reps,))
     dim = a.dim
     vac_axis = sc_sum.get("vac_axis") or 2
 
@@ -319,7 +329,9 @@ def main():
         """超胞原子 → 原胞原子索引（按位置匹配，对 image-major 和 phonopy 的
         超胞排序都成立）。"""
         f = np.array(frac_sc, dtype=float)
-        f_sc = (f * np.array(reps, dtype=float)) % 1.0
+        # 原胞分数坐标 → 超胞分数坐标：对角是 f*reps，一般矩阵是 f·P⁻¹
+        f_sc = ((f @ np.linalg.inv(P)) if IS_MATRIX
+                else (f * np.array(reps, dtype=float))) % 1.0
         p = np.array(frac, dtype=float) % 1.0
         out = np.zeros(len(f), dtype=int)
         for i in range(len(f)):
@@ -343,25 +355,34 @@ def main():
     # 排一次（stable：同元素保持展开次序），之后所有下游（POSCAR/MAGMOM/displ
     # 帧对比）看到同一顺序。注意：只排 base（static/rattle），displ 帧由 phonopy
     # 自己 generate_displacements 生成（本就是 atom-major），不要动那一路。
-    if len(reps) != 3:
-        sys.exit("[ERROR] rattle_gen 的超胞只支持对角倍数（3 个整数，如 \"4 4 4\"），"
-                 "收到 %r；要做一般矩阵超胞请走 kl-mace 的 phono3py/MC-rattle 路径。" % (reps,))
-    base_frac, base_sym = [], []
-    for ai in range(natom_prim):
-        for i in range(reps[0]):
-            for j in range(reps[1]):
-                for k in range(reps[2]):
-                    base_frac.append([(frac[ai][0] + i) / reps[0],
-                                      (frac[ai][1] + j) / reps[1],
-                                      (frac[ai][2] + k) / reps[2]])
-                    base_sym.append(sym_list[ai])
+    if IS_MATRIX:
+        # 一般矩阵超胞：借 phonopy 建胞（原子序本就是 atom-major，与 displ 帧同一顺序），
+        # 再取其超胞分数坐标；晶格由 P @ 原胞晶格 给出。
+        from phonopy.structure.atoms import PhonopyAtoms
+        import phonopy as _phonopy
+        _uc = PhonopyAtoms(symbols=sym_list, cell=np.array(prim.cell, dtype=float),
+                           scaled_positions=np.array(frac, dtype=float))
+        _sc = _phonopy.Phonopy(unitcell=_uc, supercell_matrix=P,
+                               primitive_matrix=np.eye(3)).supercell
+        base_frac = [list(x) for x in _sc.scaled_positions]
+        base_sym = list(_sc.symbols)
+    else:
+        base_frac, base_sym = [], []
+        for ai in range(natom_prim):
+            for i in range(reps[0]):
+                for j in range(reps[1]):
+                    for k in range(reps[2]):
+                        base_frac.append([(frac[ai][0] + i) / reps[0],
+                                          (frac[ai][1] + j) / reps[1],
+                                          (frac[ai][2] + k) / reps[2]])
+                        base_sym.append(sym_list[ai])
 
     # ---- static 帧（EOS 基准 + 训练）----
     print("[..] static 帧：%d 个应变档" % len(lat_factors))
     for f_lat, f_vol in zip(lat_factors, vol_factors):
         lat_s = strain_cell(lat, f_lat, dim, vac_axis)
-        # 超胞 = 应变后的原胞 × reps（分数坐标不变）
-        sc_lat_s = np.array(lat_s, dtype=float) * np.array(reps, dtype=float)[:, None]
+        # 超胞 = P @ 应变后的原胞晶格（分数坐标不变）——对角 P 与旧的 ×reps 等价
+        sc_lat_s = P @ np.array(lat_s, dtype=float)
         cid = add("static", sc_lat_s, base_frac, base_sym,
                   {"strain_factor": round(f_lat, 6), "volume_factor": round(f_vol, 6),
                    "rattle_std": None, "seed": None, "rms_A": 0.0,
@@ -408,7 +429,7 @@ def main():
               % (len(lat_factors), len(rattle_std), a.n_per_cell, len(grid)))
     for (f_lat, f_vol, std, seed_i) in grid:
         lat_s = strain_cell(lat, f_lat, dim, vac_axis)
-        sc_lat_s = np.array(lat_s, dtype=float) * np.array(reps, dtype=float)[:, None]
+        sc_lat_s = P @ np.array(lat_s, dtype=float)
         r = rattle_supercell(sc_lat_s, base_frac, base_sym, counts, std, rng,
                              a.min_dist_ratio, dim, vac_axis)
         if r is None:
@@ -491,7 +512,7 @@ def main():
         "dim": dim,
         "vac_axis": int(vac_axis),
         "supercell_reps": reps,
-        "n_atoms_supercell": natom_prim * reps[0] * reps[1] * reps[2],
+        "n_atoms_supercell": natom_prim * int(round(abs(np.linalg.det(P)))),
         "n_atoms_primitive": natom_prim,
         "elements": order,
         "element_counts_primitive": counts,

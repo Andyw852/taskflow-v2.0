@@ -174,6 +174,12 @@ def main():
 
     sc_sum = json.loads((cwd / a.sc_summary).read_text())
     reps = [int(x) for x in sc_sum["supercell_reps"]]
+    if len(reps) == 9:
+        # 一般矩阵超胞暂未打通这个辅助脚本（freqs_on_mesh 等下游仍按对角三元组
+        # 做网格/体积换算）；明确报错而不是算出一堆看似正常的错数。
+        sys.exit("[ERROR] %s 目前只支持对角超胞（3 个整数），收到一般矩阵 %r；"
+                 "矩阵超胞请走 kl-mace 的 phono3py/MC-rattle 或 fc-fit"
+                 "（FIT_ENGINE=phono3py|hiphive）。" % (Path(__file__).name, reps))
 
     # DFT 基准频率（幂等：ref_freqs.npy 存在就复用，免重算）
     # [FIX-lite] 无 displ 帧力 → ref_freqs=None，声子 MAE 曲线 NA（只出力 RMSE 曲线），不崩

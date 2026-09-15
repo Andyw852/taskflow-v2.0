@@ -261,8 +261,10 @@ def _shengbte_control_from_poscar(poscar, SUPERCELL, ngrid, tmin, tmax, tstep,
         # 真·非对角就直接报错——绝不静默近似成对角。
         _m = np.array(scell, dtype=int).reshape(3, 3)
         if np.count_nonzero(_m - np.diag(np.diag(_m))):
-            sys.exit("[ERROR] ShengBTE 的 control 只支持对角超胞，当前 SUPERCELL=%r "
-                     "是一般矩阵。请把该步 SUPERCELL/FC2_SUPERCELL 写成 \"n n n\"。"
+            sys.exit("[ERROR] ShengBTE 的 CONTROL 文件里 scell 是三个整数，物理上"
+                     "只表达对角超胞；当前 SUPERCELL=%r 是一般矩阵，没法写进去。\n"
+                     "        两条路：(1) 该步 SUPERCELL/FC2_SUPERCELL 用 \"n n n\" 对角扩胞；"
+                     "(2) 换 kappa 后端（phono3py/phonopy 能直接吃 3×3 矩阵）。"
                      % (SUPERCELL,))
         scell = [int(x) for x in np.diag(_m)]
     ng = [int(x) for x in ngrid.split()]

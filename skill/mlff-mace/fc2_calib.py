@@ -58,8 +58,12 @@ def main():
     # ---- phonopy 单原子位移集 + 基座模型取力 ----
     # primitive_matrix 显式给单位阵：输入 CONTCAR 已是原胞，不走 phonopy 的
     # 对称性猜原胞；unitcell 必须是 PhonopyAtoms（2.47 不收 ase Atoms）
+    # reps 可能来自上游汇总的 3 个数（对角）或 9 个数（3×3 矩阵，行主序，
+    # 与 phonopy/phono3py --dim 同义）——统一转成 supercell_matrix
+    _reps = np.array(reps, dtype=int)
+    scm = _reps.reshape(3, 3) if _reps.size == 9 else np.diag(_reps)
     ph = phonopy.Phonopy(unitcell=mm.ase_to_phonopy(prim),
-                         supercell_matrix=np.diag(reps),
+                         supercell_matrix=scm,
                          primitive_matrix=np.eye(3))
     ph.generate_displacements(distance=a.disp)
     disp_scs = ph.supercells_with_displacements

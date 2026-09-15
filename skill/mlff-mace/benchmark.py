@@ -100,8 +100,11 @@ def make_phonopy(prim_atoms, reps):
     import phonopy
     # primitive_matrix 显式单位阵：输入就是原胞；unitcell 必须是 PhonopyAtoms
     #（phonopy 2.47 不收 ase Atoms）
+    # reps：3 个数=对角扩胞，9 个数=3×3 矩阵（行主序，phonopy --dim 同义）
+    _reps = np.array(reps, dtype=int)
+    scm = _reps.reshape(3, 3) if _reps.size == 9 else np.diag(_reps)
     return phonopy.Phonopy(unitcell=mm.ase_to_phonopy(prim_atoms),
-                           supercell_matrix=np.diag(reps),
+                           supercell_matrix=scm,
                            primitive_matrix=np.eye(3))
 
 
@@ -315,6 +318,12 @@ def main():
     from ase.io import read as ase_read
     sc_sum = json.loads((cwd / a.sc_summary).read_text(encoding="utf-8"))
     reps = [int(x) for x in sc_sum["supercell_reps"]]
+    if len(reps) == 9:
+        # 一般矩阵超胞暂未打通这个辅助脚本（freqs_on_mesh 等下游仍按对角三元组
+        # 做网格/体积换算）；明确报错而不是算出一堆看似正常的错数。
+        sys.exit("[ERROR] %s 目前只支持对角超胞（3 个整数），收到一般矩阵 %r；"
+                 "矩阵超胞请走 kl-mace 的 phono3py/MC-rattle 或 fc-fit"
+                 "（FIT_ENGINE=phono3py|hiphive）。" % (Path(__file__).name, reps))
     man = json.loads(Path(a.manifest).read_text(encoding="utf-8"))
     # displ/static/iso 帧只在第 0 代生成（gen_step4），后续代的 REF_FC2 / E0s 锚定 /
     # Grüneisen 必须复用 gen-0 的这些帧（当前代清单里只有 rattle 帧）。
