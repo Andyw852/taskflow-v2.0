@@ -29,6 +29,17 @@ def _rattle(supercell, n, rms, dmin, niter, seed):
     return disps, rattle_std, rms_out
 
 
+def _sc_matrix(vals):
+    """超胞规格 → phonopy/phono3py 的 supercell_matrix（照抄它们的 --dim 语义）：
+    3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，即 (a',b',c')=(a,b,c)·P）。"""
+    a = np.array(vals, dtype=int)
+    if a.size == 9:
+        return a.reshape(3, 3)
+    if a.size != 3:
+        sys.exit("[ERROR] 超胞要写 3 个（对角）或 9 个（3×3 矩阵）整数，收到 %r" % (vals,))
+    return np.diag(a)
+
+
 def main():
     poscar, reps_s, n_s, rms_s, dmin_s, niter_s, seed_s = sys.argv[1:8]
     reps2_s, n2_s = (sys.argv[8], sys.argv[9]) if len(sys.argv) >= 10 else ("", "0")
@@ -41,10 +52,9 @@ def main():
 
     cell, _ = read_crystal_structure(poscar, interface_mode="vasp")
     reps2 = [int(x) for x in reps2_s.split()] if reps2_s.strip() else None
-    ph3 = Phono3py(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)),
+    ph3 = Phono3py(cell, supercell_matrix=_sc_matrix(reps),
                    primitive_matrix=np.eye(3),
-                   phonon_supercell_matrix=(np.diag(np.array(reps2, dtype=int))
-                                            if reps2 else None))
+                   phonon_supercell_matrix=(_sc_matrix(reps2) if reps2 else None))
     sc = ph3.supercell
     write_vasp("SPOSCAR", sc, direct=True)
 

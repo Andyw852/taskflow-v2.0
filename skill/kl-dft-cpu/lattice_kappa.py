@@ -727,6 +727,13 @@ def validate_user_supercell(atoms, reps_raw, min_length, min_diameter, max_atoms
         reps = tuple(int(r) for r in reps_raw)
     except (TypeError, ValueError):
         raise ValueError(f"supercell 须为 3 个正整数的列表，如 [2,2,2]；收到 {reps_raw!r}")
+    if len(reps) == 9:
+        _m = np.array(reps, dtype=int).reshape(3, 3)
+        if np.count_nonzero(_m - np.diag(np.diag(_m))):
+            raise ValueError(
+                f"lattice_kappa 只支持对角超胞，收到一般矩阵 {reps_raw!r}；"
+                "请把 SUPERCELL 写成 \"n n n\"（一般矩阵请走 phono3py/ShengBTE 之外的路）")
+        reps = tuple(int(x) for x in np.diag(_m))
     if len(reps) != 3 or any(r < 1 for r in reps):
         raise ValueError(f"supercell 须为 3 个正整数（对角倍数），收到 {reps_raw!r}")
     cell = np.asarray(atoms.cell)

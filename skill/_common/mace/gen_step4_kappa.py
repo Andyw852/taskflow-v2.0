@@ -255,7 +255,17 @@ def _shengbte_control_from_poscar(poscar, SUPERCELL, ngrid, tmin, tmax, tstep,
     numbers = atoms.numbers; unique = sorted(set(numbers))
     syms = [_cs[z] for z in unique]; kd = {z: i + 1 for i, z in enumerate(unique)}
     types = [kd[z] for z in numbers]; spos = atoms.get_scaled_positions(wrap=True)
-    scell = [int(x) for x in SUPERCELL]; ng = [int(x) for x in ngrid.split()]
+    scell = [int(x) for x in SUPERCELL]
+    if len(scell) == 9:
+        # 一般矩阵超胞：ShengBTE 的 control 只写对角 scell。对角化的矩阵照常提取，
+        # 真·非对角就直接报错——绝不静默近似成对角。
+        _m = np.array(scell, dtype=int).reshape(3, 3)
+        if np.count_nonzero(_m - np.diag(np.diag(_m))):
+            sys.exit("[ERROR] ShengBTE 的 control 只支持对角超胞，当前 SUPERCELL=%r "
+                     "是一般矩阵。请把该步 SUPERCELL/FC2_SUPERCELL 写成 \"n n n\"。"
+                     % (SUPERCELL,))
+        scell = [int(x) for x in np.diag(_m)]
+    ng = [int(x) for x in ngrid.split()]
     L = ["&allocations", "  nelements=%d," % len(unique), "  natoms=%d," % len(atoms),
          "  ngrid(:)=%d %d %d" % (ng[0], ng[1], ng[2]), "&end", "&crystal", "  lfactor=0.1,"]
     for r in range(3):

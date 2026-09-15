@@ -50,13 +50,16 @@ def main():
     if not (cwd / "POSCAR").is_file():
         sys.exit("[ERROR] 缺 POSCAR")
     params = read_params(cwd / "kl_params.txt")
-    dim = [int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()]
+    _sc = [int(x) for x in (params.get("SUPERCELL") or "1 1 1").split()]
+    # 3 个数=对角；9 个数=3×3 矩阵（行主序，Phonopy 的 supercell_matrix 直接用）
+    dim = (np.array(_sc, dtype=int).reshape(3, 3) if len(_sc) == 9
+           else np.diag(np.array(_sc, dtype=int)))
     fd = float(params.get("FD_DISTANCE") or 0.01)
     mesh = [int(x) for x in (params.get("MESH") or "20 20 20").split()]
     imag_thr = float(params.get("IMAG_THR") or 0.10)
 
     uc = read_vasp("POSCAR")
-    ph = Phonopy(uc, supercell_matrix=np.diag(np.array(dim, dtype=int)),
+    ph = Phonopy(uc, supercell_matrix=np.array(dim, dtype=int),
                  primitive_matrix="auto")
     ph.generate_displacements(distance=fd)
     n = len(ph.supercells_with_displacements)

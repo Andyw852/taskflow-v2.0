@@ -343,6 +343,9 @@ def main():
     # 排一次（stable：同元素保持展开次序），之后所有下游（POSCAR/MAGMOM/displ
     # 帧对比）看到同一顺序。注意：只排 base（static/rattle），displ 帧由 phonopy
     # 自己 generate_displacements 生成（本就是 atom-major），不要动那一路。
+    if len(reps) != 3:
+        sys.exit("[ERROR] rattle_gen 的超胞只支持对角倍数（3 个整数，如 \"4 4 4\"），"
+                 "收到 %r；要做一般矩阵超胞请走 kl-mace 的 phono3py/MC-rattle 路径。" % (reps,))
     base_frac, base_sym = [], []
     for ai in range(natom_prim):
         for i in range(reps[0]):

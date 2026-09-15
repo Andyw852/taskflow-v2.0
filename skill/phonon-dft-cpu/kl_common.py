@@ -86,7 +86,66 @@ def supercell_matrix(poscar, dim, min_len=15.0, max_multiple=6, vac_axis=2):
     return reps
 
 
+def _det3(m):
+    """3×3 整数矩阵行列式（纯标准库，超胞解析不依赖 numpy）。"""
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+
+def is_matrix(spec):
+    """3×3 嵌套（一般矩阵超胞）→ True；[n,n,n]（对角扩胞）→ False。"""
+    return len(spec) == 3 and all(hasattr(r, "__len__") for r in spec)
+
+
+def parse_reps(text, dim, vac_axis=2):
+    """解析超胞规格，返回 [na,nb,nc]（对角）或 3×3 矩阵（一般扩胞）。
+
+    两种写法与 hiphive / phonopy / phono3py 完全同义（照抄它们的语义）：
+      · 3 个整数 —— 对角扩胞，等价 phonopy --dim="2 2 2"、ASE atoms.repeat((2,2,2))；
+      · 9 个整数 —— 3×3 矩阵，**行主序**，等价 phonopy/phono3py --dim="2 1 0 -1 2 0 0 0 1"
+                    （(a',b',c') = (a,b,c)·P，即 ASE make_supercell(atoms, P.T)）。
+                    六方/菱形/单斜等"对角扩胞不经济"的体系用它。
+    2D 材料强制真空方向不动：对角写法压 1；矩阵写法要求真空方向那行那列是单位基矢，
+    否则直接报错（免得把真空和面内混一起，算出看似正常其实错的超胞）。
+    """
+    try:
+        vals = [int(x) for x in str(text).split()]
+    except ValueError:
+        sys.exit("[ERROR] 超胞要写整数（3 个=对角扩胞，或 9 个=3×3 矩阵），收到 %r" % text)
+    ax = 2 if vac_axis is None else int(vac_axis)
+    if len(vals) == 3:
+        if dim == "2d":
+            vals[ax] = 1
+        return vals
+    if len(vals) != 9:
+        sys.exit("[ERROR] 超胞要写 3 个（对角，如 \"3 3 3\"）或 9 个（3×3 矩阵，行主序，"
+                 "如 \"2 1 0 -1 2 0 0 0 1\"）整数，收到 %r" % text)
+    m = [vals[0:3], vals[3:6], vals[6:9]]
+    det = _det3(m)
+    if det == 0:
+        sys.exit("[ERROR] 超胞矩阵行列式为 0（%s），不是合法扩胞矩阵" % m)
+    if dim == "2d":
+        for i in range(3):
+            for j in range(3):
+                if (i == ax or j == ax) and m[i][j] != (1 if i == j == ax else 0):
+                    sys.exit("[ERROR] 2D 材料的超胞矩阵不能动真空方向（第 %d 轴）：%s\n"
+                             "        真空方向那一行/列必须是 [0,0,1]，面内两轴随便混。"
+                             % (ax + 1, m))
+    return m
+
+
+def sc_matrix(spec):
+    """规格 → 3×3 嵌套列表，可直接喂 phonopy/phono3py 的 supercell_matrix。"""
+    if is_matrix(spec):
+        return [[int(x) for x in row] for row in spec]
+    return [[int(spec[0]), 0, 0], [0, int(spec[1]), 0], [0, 0, int(spec[2])]]
+
+
 def dim_str(reps):
+    """规格 → 字符串：对角 "n n n"；一般矩阵 → 9 个整数（行主序，phono3py --dim 同义）。"""
+    if is_matrix(reps):
+        return " ".join(str(int(x)) for row in reps for x in row)
     return " ".join(str(int(x)) for x in reps)
 
 

@@ -57,9 +57,9 @@ def main():
             else meth.get("FUNC", "pbe-d3").lower())
 
     if conf["SUPERCELL"]:
-        reps = [int(x) for x in conf["SUPERCELL"]]
-        if dim == "2d":
-            reps[vac_axis if vac_axis is not None else 2] = 1
+        # 3 个整数=对角扩胞；9 个整数=3×3 矩阵（一般扩胞，与 phono3py --dim 同义）
+        reps = kc.parse_reps(conf["SUPERCELL"], dim,
+                             vac_axis if vac_axis is not None else 2)
     else:
         reps = kc.supercell_matrix(out / "POSCAR", dim, conf["MIN_SC_LEN"],
                                    conf["MAX_MULTIPLE"],
@@ -79,7 +79,7 @@ def main():
         except Exception as e:
             sys.exit("[ERROR] 无法 import phonopy（%s）—— step2 需要 phonopy 环境" % e)
         cell = read_vasp(str(out / "POSCAR"))
-        ph = Phonopy(cell, supercell_matrix=np.diag(np.array(reps, dtype=int)),
+        ph = Phonopy(cell, supercell_matrix=np.array(kc.sc_matrix(reps), dtype=int),
                      primitive_matrix="auto")
         ph.generate_displacements(distance=float(conf["FD_DISTANCE"]))
         n = len(ph.supercells_with_displacements)

@@ -55,7 +55,9 @@ SPEC = {
     "SUBTRACT_EQUILIBRIUM": (True, "bool"),  # subtract the equilibrium residual forces
     "EQUILIBRIUM_FORCES_NPY": ("", "str"),   # optional explicit (natom,3) npy
     "COORDS": ("cartesian", "str"),          # cartesian | fractional (displacement input)
-    "SUPERCELL": ("", "str"),                # "n n n" override for pheasy
+    "SUPERCELL": ("", "str"),                # 对角 "n n n"；或一般矩阵 9 个数
+                                             # "n11 n12 n13 n21 n22 n23 n31 n32 n33"
+                                             # （行主序，与 phonopy/phono3py --dim 同义）
     # ---- engine ----
     "FIT_ENGINE": ("phono3py", "str"),       # phono3py | pheasy | hiphive
     "ENABLE_FC": (3, "int"),                 # 2 | 3 (highest order to fit)
@@ -380,9 +382,23 @@ def main():
             print("[OK] supercell %s deduced from the POSCAR/SPOSCAR edge ratio"
                   % sc_str)
     if str(conf["SUPERCELL"] or "").strip():
-        sc_str = str(conf["SUPERCELL"]).strip()
-        sc_rows = [[float(x) for x in sc_str.split()]]
-        sc_rows = [[sc_rows[0][0], 0, 0], [0, sc_rows[0][1], 0], [0, 0, sc_rows[0][2]]]
+        # 3 个数=对角扩胞；9 个数=3×3 矩阵（行主序，与 phono3py --dim 同义，
+        # hiphive/pheasy 直接吃这个 3×3；phono3py 那一路按原样透传 --dim）
+        _sc_vals = [int(x) for x in str(conf["SUPERCELL"]).split()]
+        if len(_sc_vals) == 9:
+            sc_str = " ".join(str(x) for x in _sc_vals)
+            sc_rows = [[float(x) for x in _sc_vals[0:3]],
+                       [float(x) for x in _sc_vals[3:6]],
+                       [float(x) for x in _sc_vals[6:9]]]
+        elif len(_sc_vals) == 3:
+            sc_str = " ".join(str(x) for x in _sc_vals)
+            sc_rows = [[float(_sc_vals[0]), 0.0, 0.0],
+                       [0.0, float(_sc_vals[1]), 0.0],
+                       [0.0, 0.0, float(_sc_vals[2])]]
+        else:
+            sys.exit("[ERROR] SUPERCELL 要写 3 个（对角，如 \"3 3 3\"）或 9 个"
+                     "（3×3 矩阵，行主序，如 \"2 1 0 -1 2 0 0 0 1\"）整数，"
+                     "收到 %r" % conf["SUPERCELL"])
     if engine in ("pheasy", "hiphive") and sig in ("vasprun", "phono3py_disp_forces"):
         print("[WARN] the dataset looks like a finite-displacement set; "
               "%s fits random-displacement (rattled) data.  The driver will stop "

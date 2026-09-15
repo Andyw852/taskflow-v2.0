@@ -42,7 +42,10 @@ SPEC = {
     "CONDA_ENV": (kc.DEFAULT_CONDA_ENV, "str"),
     # ---- 本步 ----
     "METHOD": ("random", "str"),           # random | findiff（findiff 帧数由对称性决定，CPU 上偏多）
-    "SUPERCELL": (None, "str"),            # 显式 "4 4 4"；空=按 MIN_SC_LEN 自动
+    "SUPERCELL": (None, "str"),            # 对角 "4 4 4"，或一般矩阵 9 个数
+                                           # "2 1 0 -1 2 0 0 0 1"（行主序，与
+                                           # phonopy/phono3py --dim 同义；六方/菱形
+                                           # 常用）；空=按 MIN_SC_LEN 自动对角
     "FC2_SUPERCELL": (None, "str"),        # 二阶专用大超胞（--dim-fc2）；空=与 fc3 同
     "MIN_SC_LEN": (12.0, "float"),
     "MAX_MULTIPLE": (8, "int"),
