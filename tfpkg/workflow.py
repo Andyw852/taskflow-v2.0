@@ -515,6 +515,120 @@ def render_vasp_template(text, filename, step_name, profiles):
     return "\n".join(lines) + "\n"
 
 
+# ===== 统一核数：cores 归一化（v1.0 P0 统一化）=====
+# 动机：以前"改核数"要分别改 setting/<hpc>/templates/submit_*.tpl 的 --ntasks-per-node、
+# defects_common.build_job 的 NCORE/KPAR，还要知道**每个技能用的模板叫什么名字**
+# （defect 用 submit_ncl_3d.tpl + incar_defect.tpl，mlff-mace 用 step1_relax/ 下的那份…），
+# 漏一处就出现"4 个 MPI 进程 + INCAR NCORE=6"这种自相矛盾的输入。
+# 现在：tf.yaml / 项目 setting.yaml / 类型配置里写一个 cores: N，gen 结束后由这段
+# 远端小程序**按文件模式**统一归一化（不认技能、不认模板名）：
+#   · submit*.sh/slurm/tpl：有 --ntasks[-per-node] 就设成 N 并把 --cpus-per-task 压回 1；
+#     只有 --cpus-per-task 的（单进程多线程型作业）就把 cpus-per-task 设成 N；
+#   · INCAR / INCAR.*：NCORE = N 的最大 ≤4 因子（必须整除进程数），KPAR = 1。
+# 目录遍历深度 2：扇出步骤（step4_disp/deform-*/ 这种）每帧自己的 submit.sh 也一起改。
+_CORES_NORMALIZER = r'''
+import os, re, sys
+n = int(sys.argv[1])
+sub = sys.argv[2] if len(sys.argv) > 2 else ""
+root = sub if (sub and os.path.isdir(sub)) else "."
+def ncore_for(n):
+    for d in (4, 3, 2, 1):
+        if n % d == 0:
+            return d
+    return 1
+ncore, kpar = ncore_for(n), 1
+hits = []
+
+def norm_dir(d):
+    for f in sorted(os.listdir(d)):
+        p = os.path.join(d, f)
+        if not os.path.isfile(p):
+            continue
+        if re.fullmatch(r"submit.*\.(sh|slurm|tpl)", f):
+            t = open(p, encoding="utf-8", errors="replace").read()
+            o = t
+            if re.search(r"^#SBATCH --ntasks(-per-node)?=", t, re.M):
+                t = re.sub(r"^#SBATCH --ntasks-per-node=\d+",
+                           "#SBATCH --ntasks-per-node=%d" % n, t, flags=re.M)
+                t = re.sub(r"^#SBATCH --ntasks=\d+",
+                           "#SBATCH --ntasks=%d" % n, t, flags=re.M)
+                t = re.sub(r"^#SBATCH --cpus-per-task=\d+",
+                           "#SBATCH --cpus-per-task=1", t, flags=re.M)
+            elif re.search(r"^#SBATCH --cpus-per-task=", t, re.M):
+                t = re.sub(r"^#SBATCH --cpus-per-task=\d+",
+                           "#SBATCH --cpus-per-task=%d" % n, t, flags=re.M)
+            if t != o:
+                open(p, "w", encoding="utf-8").write(t)
+                hits.append("%s: %d 核" % (os.path.relpath(p, root), n))
+        elif f == "INCAR" or f.startswith("INCAR"):
+            t = open(p, encoding="utf-8", errors="replace").read()
+            t2 = re.sub(r"^(\s*NCORE\s*=\s*)\d+", r"\g<1>%d" % ncore, t, flags=re.M)
+            t2 = re.sub(r"^(\s*KPAR\s*=\s*)\d+", r"\g<1>%d" % kpar, t2, flags=re.M)
+            if t2 != t:
+                open(p, "w", encoding="utf-8").write(t2)
+                hits.append("%s: NCORE=%d KPAR=%d" % (os.path.relpath(p, root),
+                                                     ncore, kpar))
+
+depth0 = root.rstrip("/").count(os.sep)
+for cur, dirs, _f in os.walk(root):
+    if cur.rstrip("/").count(os.sep) - depth0 > 1:
+        dirs[:] = []
+        continue
+    norm_dir(cur)
+print("[cores] 统一为 %d 核：%s" % (n, "; ".join(hits) if hits else "无 submit/INCAR 可改"))
+'''
+
+
+def resolve_cores(cfg, t, m, sname=None):
+    """统一核数来源（都不写就是 None=不动）：项目 setting.yaml > 项目/技能 hpc.yaml >
+    类型配置 task_types.<key>.cores > 全局 tf.yaml 的 cores。"""
+    from tfpkg import step_cfg
+    ps = (m or {}).get("ps") or {}
+    st = ps.get("setting") if isinstance(ps, dict) else None
+    st = st if isinstance(st, dict) else {}
+    hpc = ps.get("hpc") if isinstance(ps, dict) else None
+    hpc = dict(hpc) if isinstance(hpc, dict) else {}
+    # 技能子目录私有 hpc.yaml（材料/<技能>/hpc.yaml）也认，优先级同上。
+    # 任何异常都吞掉：核数解析绝不能把 gen 拖崩。
+    try:
+        from tfpkg import _load_yaml_file
+        _sdir = (m or {}).get("_skill_dir_local")
+        if _sdir:
+            _shpc = _load_yaml_file(os.path.join(_sdir, "hpc.yaml")) or {}
+            if isinstance(_shpc, dict):
+                hpc.update(_shpc)
+    except Exception:                       # noqa: BLE001
+        pass
+    tt = (t or {}).get("key") or (m or {}).get("tt")
+    cands = [st.get("cores"), hpc.get("cores"),
+             ((cfg.get("task_types") or {}).get(tt) or {}).get("cores"),
+             cfg.get("cores")]
+    for v in cands:
+        if v in (None, "", 0, "0"):
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return None
+
+
+def _append_cmd(line, cmd):
+    """在已拼好的远端命令行后安全追加一段（避免出现 '; ;' 这种空命令）。"""
+    return line.rstrip().rstrip(";").rstrip() + " ; " + cmd
+
+
+def _cores_cmd(n, sub=""):
+    """把归一化小程序 base64 推到远端跑一次（不落任何仓库文件）。"""
+    b64 = base64.b64encode(_CORES_NORMALIZER.encode("utf-8")).decode()
+    return ("echo %s | base64 -d > .tf_cores.py && { python3 .tf_cores.py %d %s "
+            "|| python .tf_cores.py %d %s || echo '[cores] 归一化失败（不影响 gen）' >&2 ; } "
+            "; rm -f .tf_cores.py"
+            % (b64, n, shlex.quote(sub), n, shlex.quote(sub)))
+
+
 def remote_gen(cfg, t, m, sname, host=None, wd=None):
     from tfpkg import (PROV_DIR, PROV_NAME, STEP_CONF, build_gen_provenance,
                        build_step_conf, find_asset, provenance_enabled, run_remote,
@@ -673,12 +787,26 @@ def remote_gen(cfg, t, m, sname, host=None, wd=None):
                 shlex.quote(os.path.join(PROV_DIR, "history.jsonl")))
     except Exception as _pe:   # noqa: BLE001
         print("警告：provenance 记录失败（不影响本次 gen）：%s" % _pe, file=sys.stderr)
+    # 统一核数：gen 跑完后按文件模式把 submit/INCAR 归一到 cores 指定的核数
+    # （不认技能、不认模板名——defect 的 submit_ncl_3d.tpl / mlff-mace 的
+    #  step1_relax/ 子目录模板一样管到）。cores 没配就完全不动，保持出厂行为。
+    _cores = resolve_cores(cfg, t, m, sname)
+    # 以步骤目录为归一化根（远端目录名 = 步骤名；不存在时小程序自己退回材料目录）。
+    # 这样扇出步骤的帧目录（step4_disp/deform-*/）也在遍历深度 1 之内。
+    _sub = str(sname or "")
     if is_py:
         line += "python %s%s" % (shlex.quote(gen_script),
                                  (" " + gen_args) if gen_args else "")
+        if _cores:
+            line = _append_cmd(line, _cores_cmd(_cores, _sub))
         rc, out = run_remote(cfg, line, host=host, use_stdin=True)
     else:
-        rc, out = run_remote(cfg, line + sh_b64(gen), host=host, use_stdin=True)
+        _tail = ((" ; " + _cores_cmd(_cores, _sub)) if _cores else "")
+        rc, out = run_remote(cfg, line + sh_b64(gen) + _tail, host=host,
+                             use_stdin=True)
+    if _cores and rc == 0:
+        out = (out or "") + ("\n[cores] 本步按 cores=%d 提交（来源：项目 setting.yaml / "
+                             "hpc.yaml / 类型配置 / tf.yaml 的 cores）\n" % _cores)
     return rc == 0, out
 
 # ===== remote_sbatch_fanout (原 L3372-L3433) =====
@@ -1100,6 +1228,56 @@ def do_submit(cfg, t, m, s, force, gen_first, contcar_cp, tag, submit=True):
         _scancel_clear(m, s["name"])       # v1.4：重交成功，清 stop 标记
     return ok
 
+# 提交前清单的"输出文件"排除表——步骤目录里凡是这些名字都不是输入。
+# 判据统一：作业还没跑，目录里已存在的文件基本就是 gen 写的输入；跑过的老目录里
+# 这些大块输出要排掉。
+_STEP_OUTPUT_NAMES = ("OUTCAR", "OSZICAR", "vasprun.xml", "CONTCAR", "CHG",
+                      "CHGCAR", "WAVECAR", "XDATCAR", "PCDAT", "DOSCAR",
+                      "EIGENVAL", "PROCAR", "PROCAR_OPT", "ELFCAR", "LOCPOT",
+                      "queue.out", "core.")
+
+
+def _step_input_name_ok(name):
+    """判断远端步骤目录里的一个文件是否算"输入"（统一规则，与技能无关）。"""
+    b = os.path.basename(name)
+    if b.startswith(_STEP_OUTPUT_NAMES):
+        return False
+    if b.endswith((".err", ".log", ".out")) and b != "queue.out":
+        if b.startswith("slurm") or b.endswith(".err") or b.endswith(".log"):
+            return False
+    if b.startswith("slurm-") or b.startswith(".tf_"):
+        return False
+    return True
+
+
+def _discover_step_inputs(cfg, host, step_dir, subdir=None):
+    """统一发现"提交前必须存在"的输入清单（只读 ssh，一条 find）。
+
+    不再按技能硬编码 INCAR/KPOINTS（unihamgnn 那种非 VASP 技能因此永远提交不出去），
+    也不要求技能自报 submit_required：作业还没跑，步骤目录里已有的文件就是输入。
+    任何异常都退回空元组，调用方按历史默认清单兜底——绝不因为发现失败而卡住提交。
+    """
+    import subprocess
+    from tfpkg import _ssh_cmd
+    root = os.path.join(step_dir, str(subdir)) if subdir else step_dir
+    remote = ("cd %s 2>/dev/null || exit 0; find . -maxdepth 2 -type f "
+              "-size -40M -printf '%%P\\n' 2>/dev/null | head -300" % shlex.quote(root))
+    try:
+        p = subprocess.run(_ssh_cmd(cfg, host, [remote]), capture_output=True,
+                           text=True, timeout=240)
+    except Exception as exc:                    # noqa: BLE001
+        print("警告：远端输入清单发现失败（按默认清单继续）：%s" % exc, file=sys.stderr)
+        return ()
+    if p.returncode != 0:
+        return ()
+    out = []
+    for ln in (p.stdout or "").splitlines():
+        f = ln.strip()
+        if f and _step_input_name_ok(f):
+            out.append(f)
+    return tuple(sorted(set(out)))
+
+
 def _remote_submit_preflight(cfg, m, s, t=None):
     """远端提交前验证连接，并把当前步骤输入保存到本地 result。
 
@@ -1120,9 +1298,21 @@ def _remote_submit_preflight(cfg, m, s, t=None):
     # 只带回 steps_cfg/gen_need 等少数字段，t 上不一定有本键。
     declared = (((cfg.get("task_types") or {}).get(m.get("tt")) or {})
                 .get("submit_required") or (t or {}).get("submit_required"))
-    required = (tuple(str(x) for x in declared) if declared
-                else (("POSCAR", "submit.sh") if is_mace
-                      else ("INCAR", "POSCAR", "KPOINTS", "submit.sh")))
+    if declared:
+        # 技能显式声明的清单优先级最高（cohp-cogito / fc-fit 这种"必须带上游产物"
+        # 的步骤用它精确表达需求）。
+        required = tuple(str(x) for x in declared)
+    else:
+        # 统一默认：按远端步骤目录里**实际已经存在的文件**要求（只读 find）。
+        # 这样 VASP、MACE、纯 Python/MPI 步骤走的是同一条逻辑，谁都不用自报清单。
+        _probe_sub = None
+        if s.get("fanout"):
+            _subs = list(s.get("fan_todo") or s.get("subs") or [])
+            _probe_sub = _subs[0] if _subs else None
+        required = _discover_step_inputs(cfg, host, s["dir"], _probe_sub)
+        if not required:
+            required = (("POSCAR", "submit.sh") if is_mace
+                        else ("INCAR", "POSCAR", "KPOINTS", "submit.sh"))
     dest = os.path.join(m.get("result_dir") or "", s["name"])
 
     # 扇出步骤的输入在 deform-*/ 子目录中，父目录通常只有 POSCAR，不能

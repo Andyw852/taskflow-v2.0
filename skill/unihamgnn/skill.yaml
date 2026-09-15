@@ -25,10 +25,10 @@ fetch_files: [POSCAR, workflow_method.txt, graph_data_summary.json,
               predict_summary.json, band_summary.json, submit.sh,
               queue.out, queue.err, band_cal.log]
 
-# 提交前检查（tfpkg/workflow.py::_remote_submit_preflight）：本技能不跑 VASP，
-# step 目录里不会有 INCAR/KPOINTS，而默认清单按 VASP 要这四样 ⇒ S1_graph 永远提交不出去。
-# 按 gen 实际写出的文件自报清单（与 cohp-cogito / fc-fit 的写法一致）。
-submit_required: [POSCAR, submit.sh, graph_data_gen.yaml, poscar2openmx.yaml]
+# 注：本技能不跑 VASP，step 目录里没有 INCAR/KPOINTS，历史默认清单按 VASP 要这四样
+# ⇒ S1_graph 曾经永远提交不出去。现已不需要在技能里自报清单：tf 的提交前检查统一按
+# "远端步骤目录里实际存在的文件"要求（tfpkg/workflow.py::_discover_step_inputs），
+# 所有技能同一条逻辑。真要精确限定时才用 submit_required（如 cohp-cogito/fc-fit）。
 
 steps:
   - {seq: 1, name: step1_graph_data, label: S1_graph,
